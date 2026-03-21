@@ -462,11 +462,58 @@ export function App() {
   }, []);
 
   // Handler to exit Bezier curve drawing mode (could be called from Scene3D or UI)
-  const handleFinishDrawBezierCurve = useCallback(() => {
-    setDrawBezierCurveMode(false);
-  }, []);
+    const handleFinishDrawBezierCurve = useCallback((points?: {x:number, y:number, z:number}[]) => {
+      setDrawBezierCurveMode(false);
+      if (!points || points.length < 2) return;
+      
+      const pathId = 'drawn_bezier_' + Date.now();
+      const pathObject: SceneObject = {
+        id: pathId,
+        name: 'Manual Bezier Path',
+        type: 'Path',
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+        parentId: null,
+        properties: { emitterType: 'curve' }
+      };
 
-  // ── applySpineJson: parse Spine JSON into scene bones + keyframes ──
+      const emitterId = 'emitter_' + Date.now();
+      const newEmitter: SceneObject = {
+        id: emitterId,
+        name: 'Bezier Emitter',
+        type: 'Emitter',
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+        parentId: null,
+        properties: {
+          emissionRate: 100,
+          particleSpeed: 10,
+          particleLifetime: 3,
+          particleSize: 5,
+          particleColor: '#ffffff',
+          shape_emitterType: 'curve'
+        }
+      };
+
+      pathObject.parentId = emitterId;
+
+      const pointObjects: SceneObject[] = points.map((pt, i) => ({
+        id: 'bezier_pt_' + Date.now() + '_' + i,
+        name: 'Point ' + i,
+        type: 'PathPoint',
+        position: { x: pt.x, y: pt.y, z: pt.z },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+        parentId: pathId,
+        properties: {}
+      }));
+      
+      setSceneObjects(prev => [...prev, newEmitter, pathObject, ...pointObjects]);
+    }, []);
+
+    // ── applySpineJson: parse Spine JSON into scene bones + keyframes ──
   const applySpineJson = useCallback((
     spineJson: any,
     fileName: string,

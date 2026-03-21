@@ -148,7 +148,7 @@ type Scene3DProps = {
   onUpdateSceneSettings?: (settings: Partial<SceneSettings>) => void;
   onCameraChange?: (cameraState: { position: THREE.Vector3, quaternion: THREE.Quaternion }) => void;
   drawBezierCurveMode?: boolean;
-  onFinishDrawBezierCurve?: () => void;
+  onFinishDrawBezierCurve?: (points?: {x:number, y:number, z:number}[]) => void;
   spineAttachments?: SpineAttachmentInfo[];
   spineFrameOverrides?: SpineFrameOverrides;
   spineLayerSpread?: number;
@@ -309,7 +309,7 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
             // TODO: Add curve to scene objects or call onDrawComplete/onFinishDrawBezierCurve
           }
           setBezierCurvePoints([]);
-          if (onFinishDrawBezierCurve) onFinishDrawBezierCurve();
+          if (onFinishDrawBezierCurve) onFinishDrawBezierCurve(bezierCurvePoints);
         }
       };
       window.addEventListener('keydown', handleFinish);
