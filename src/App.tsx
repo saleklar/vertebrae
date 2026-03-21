@@ -1,7 +1,7 @@
 import { generateFireSequenceHeadless, defaultTorchParams, defaultCampfireParams } from './FireHeadless';
 import * as THREE from 'three';
-import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Scene3D, Scene3DRef } from './Scene3D';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Scene3D, Scene3DRef, SpineAttachmentInfo, SpineFrameOverrides } from './Scene3D';
 import { Animator3D } from './Animator3D';
 import { CurveEditor } from './CurveEditor';
 
@@ -62,29 +62,11 @@ export type SceneObject = {
   properties?: any;
 };
 
-export type EmitterShapeType = 'point' | 'circle' | 'square' | 'cube' | 'ball' | 'curve' | 'layer';
-
-export type EmitterShapeProperties = {
-  emitterType: EmitterShapeType;
-  emissionMode: 'surface' | 'volume' | 'edge';
-  layerImageDataUrl?: string;
-  useFractalNoiseMap?: boolean;
-  fractalNoiseScale?: number;
-  fractalNoiseDetail?: number;
-  fractalNoiseSpeed?: number;
-  fractalNoiseThreshold?: number;
-};
-
-export type EmitterShapeObject = SceneObject & {
-  type: 'EmitterShape';
-  properties: EmitterShapeProperties;
-};
 
 export type EmitterObject = SceneObject & {
   type: 'Emitter';
   properties: {
     emissionRate: number;
-    emitterType?: EmitterShapeType;
     emissionMode?: 'surface' | 'volume' | 'edge';
     layerImageDataUrl?: string;
     particleLifetime: number;
@@ -92,7 +74,7 @@ export type EmitterObject = SceneObject & {
     particleColor: string;
     particleSize: number;
     particleOpacity: number;
-    particleType: "dots" | "stars" | "circles" | "glow-circles" | "sprites" | "3d-model" | "volumetric-fire";
+    particleType: "dots" | "stars" | "circles" | "glow-circles" | "sparkle" | "sprites" | "3d-model" | "volumetric-fire";
     particleGlow: boolean;
     particleBlendMode?: string;
     particleRotation: number;
@@ -223,21 +205,442 @@ const interpolateSceneObject = (from: SceneObject, to: SceneObject, t: number): 
   };
 };
 
+// ─── Spine import helpers ────────────────────────────────────────────────────
+
+/** Cubic bezier solver (Newton-Raphson, 8 iterations). Control points in normalized 0-1 space. */
+function solveBezierModule(cx1: number, cy1: number, cx2: number, cy2: number, x: number): number {
+  let t = x;
+  for (let i = 0; i < 8; i++) {
+    const mt = 1 - t;
+    const bx = 3 * mt * mt * t * cx1 + 3 * mt * t * t * cx2 + t * t * t;
+    const dbx = 3 * mt * mt * cx1 + 6 * mt * t * (cx2 - cx1) + 3 * t * t * (1 - cx2);
+    if (Math.abs(dbx) < 1e-6) break;
+    t -= (bx - x) / dbx;
+    t = Math.max(0, Math.min(1, t));
+  }
+  const mt = 1 - t;
+  return 3 * mt * mt * t * cy1 + 3 * mt * t * t * cy2 + t * t * t;
+}
+
+/**
+ * CurveTimeline1 (single-axis: translatex/y, rotate, scaleX/Y):
+ * cy values are RAW property values, not normalized.
+ * Bezier is parametric: P0=(0,fromVal) P1=(cx1,cy1) P2=(cx2,cy2) P3=(1,toVal).
+ * Find parameter s such that Px(s)=rawT, return Py(s).
+ */
+function evalCurveTimeline1(cx1: number, cy1: number, cx2: number, cy2: number, rawT: number, fromVal: number, toVal: number): number {
+  let s = rawT;
+  for (let i = 0; i < 8; i++) {
+    const sm = 1 - s;
+    const px = 3 * sm * sm * s * cx1 + 3 * sm * s * s * cx2 + s * s * s;
+    const dpx = 3 * sm * sm * cx1 + 6 * sm * s * (cx2 - cx1) + 3 * s * s * (1 - cx2);
+    if (Math.abs(dpx) < 1e-6) break;
+    s -= (px - rawT) / dpx;
+    s = Math.max(0, Math.min(1, s));
+  }
+  const sm = 1 - s;
+  return sm * sm * sm * fromVal + 3 * sm * sm * s * cy1 + 3 * sm * s * s * cy2 + s * s * s * toVal;
+}
+
+/** Apply Spine CurveTimeline2 curve to a raw linear t value (cy values ARE normalized 0-1). */
+function applySpineCurve(curve: any, rawT: number): number {
+  if (!curve || curve === 'linear') return rawT;
+  if (curve === 'stepped') return 0;
+  if (Array.isArray(curve) && curve.length >= 4)
+    return solveBezierModule(curve[0], curve[1], curve[2], curve[3], rawT);
+  return rawT;
+}
+
+/** Interpolate a single-value Spine CurveTimeline1 (rotate / translatex / translatey / scaleX / scaleY). */
+function spineInterpolateSingle(timeline: any[], time: number, defaultVal: number, valueKey = 'value'): number {
+  if (!timeline || timeline.length === 0) return defaultVal;
+  if (time <= (timeline[0].time ?? 0)) return timeline[0][valueKey] ?? defaultVal;
+  const last = timeline[timeline.length - 1];
+  if (time >= (last.time ?? 0)) return last[valueKey] ?? defaultVal;
+  for (let i = 0; i < timeline.length - 1; i++) {
+    const a = timeline[i], b = timeline[i + 1];
+    if (time >= (a.time ?? 0) && time < (b.time ?? 0)) {
+      const fromVal = a[valueKey] ?? defaultVal;
+      const toVal = b[valueKey] ?? defaultVal;
+      if (a.curve === 'stepped') return fromVal;
+      const rawT = (time - (a.time ?? 0)) / ((b.time ?? 0) - (a.time ?? 0));
+      if (Array.isArray(a.curve) && a.curve.length >= 4) {
+        // CurveTimeline1: cy values are raw property values, use 2D parametric bezier
+        return evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, fromVal, toVal);
+      }
+      return fromVal + (toVal - fromVal) * rawT;
+    }
+  }
+  return last[valueKey] ?? defaultVal;
+}
+
+function spineInterpolateTranslate(timeline: any[], time: number): { x: number; y: number } {
+  if (!timeline || timeline.length === 0) return { x: 0, y: 0 };
+  if (time <= (timeline[0].time ?? 0)) return { x: timeline[0].x ?? 0, y: timeline[0].y ?? 0 };
+  const last = timeline[timeline.length - 1];
+  if (time >= (last.time ?? 0)) return { x: last.x ?? 0, y: last.y ?? 0 };
+  for (let i = 0; i < timeline.length - 1; i++) {
+    const a = timeline[i], b = timeline[i + 1];
+    if (time >= (a.time ?? 0) && time < (b.time ?? 0)) {
+      const ax = a.x ?? 0, bx = b.x ?? 0, ay = a.y ?? 0, by = b.y ?? 0;
+      if (a.curve === 'stepped') return { x: ax, y: ay };
+      const rawT = (time - (a.time ?? 0)) / ((b.time ?? 0) - (a.time ?? 0));
+      if (Array.isArray(a.curve) && a.curve.length >= 8) {
+        // CurveTimeline2: 8 values, cy are raw property values, separate bezier per axis
+        return {
+          x: evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, ax, bx),
+          y: evalCurveTimeline1(a.curve[4], a.curve[5], a.curve[6], a.curve[7], rawT, ay, by),
+        };
+      } else if (Array.isArray(a.curve) && a.curve.length >= 4) {
+        return {
+          x: evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, ax, bx),
+          y: evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, ay, by),
+        };
+      }
+      return { x: ax + (bx - ax) * rawT, y: ay + (by - ay) * rawT };
+    }
+  }
+  return { x: last.x ?? 0, y: last.y ?? 0 };
+}
+
+function spineInterpolateRotate(timeline: any[], time: number): number {
+  return spineInterpolateSingle(timeline, time, 0, 'value');
+}
+
+function spineInterpolateScale(timeline: any[], time: number): { x: number; y: number } {
+  if (!timeline || timeline.length === 0) return { x: 1, y: 1 };
+  if (time <= (timeline[0].time ?? 0)) return { x: timeline[0].x ?? 1, y: timeline[0].y ?? 1 };
+  const last = timeline[timeline.length - 1];
+  if (time >= (last.time ?? 0)) return { x: last.x ?? 1, y: last.y ?? 1 };
+  for (let i = 0; i < timeline.length - 1; i++) {
+    const a = timeline[i], b = timeline[i + 1];
+    if (time >= (a.time ?? 0) && time < (b.time ?? 0)) {
+      const ax = a.x ?? 1, bx = b.x ?? 1, ay = a.y ?? 1, by = b.y ?? 1;
+      if (a.curve === 'stepped') return { x: ax, y: ay };
+      const rawT = (time - (a.time ?? 0)) / ((b.time ?? 0) - (a.time ?? 0));
+      if (Array.isArray(a.curve) && a.curve.length >= 8) {
+        // CurveTimeline2: 8 values, cy are raw property values, separate bezier per axis
+        return {
+          x: evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, ax, bx),
+          y: evalCurveTimeline1(a.curve[4], a.curve[5], a.curve[6], a.curve[7], rawT, ay, by),
+        };
+      } else if (Array.isArray(a.curve) && a.curve.length >= 4) {
+        return {
+          x: evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, ax, bx),
+          y: evalCurveTimeline1(a.curve[0], a.curve[1], a.curve[2], a.curve[3], rawT, ay, by),
+        };
+      }
+      return { x: ax + (bx - ax) * rawT, y: ay + (by - ay) * rawT };
+    }
+  }
+  return { x: last.x ?? 1, y: last.y ?? 1 };
+}
+
+function spineBoneWorldTransform(
+  boneName: string,
+  boneMap: Map<string, any>,
+  animBones: Record<string, any>,
+  time: number,
+  cache?: Map<string, { wx: number; wy: number; wRot: number; wSX: number; wSY: number }>
+): { wx: number; wy: number; wRot: number; wSX: number; wSY: number } {
+  const cacheKey = boneName;
+  if (cache?.has(cacheKey)) return cache.get(cacheKey)!;
+
+  const boneDef = boneMap.get(boneName);
+  if (!boneDef) return { wx: 0, wy: 0, wRot: 0, wSX: 1, wSY: 1 };
+
+  // Guard against cyclic bone hierarchy — insert sentinel before recursing
+  const SENTINEL = { wx: 0, wy: 0, wRot: 0, wSX: 1, wSY: 1 };
+  cache?.set(cacheKey, SENTINEL);
+
+  const animBone = animBones?.[boneName];
+
+  // Spine 4.x separate-axis translate timelines: key names are lowercase "translatex" / "translatey"
+  // Also allow "x"/"y" and "translateX"/"translateY" for other format variants
+  let trans: { x: number; y: number };
+  const hasTranslate = (animBone?.translate?.length ?? 0) > 0;
+  const sepTX = animBone?.translatex ?? animBone?.translateX ?? animBone?.x;
+  const sepTY = animBone?.translatey ?? animBone?.translateY ?? animBone?.y;
+  const hasSepX = (sepTX?.length ?? 0) > 0;
+  const hasSepY = (sepTY?.length ?? 0) > 0;
+  if (hasSepX || hasSepY) {
+    const baseXY = hasTranslate ? spineInterpolateTranslate(animBone.translate, time) : { x: 0, y: 0 };
+    trans = {
+      x: hasSepX ? spineInterpolateSingle(sepTX, time, 0, 'value') : baseXY.x,
+      y: hasSepY ? spineInterpolateSingle(sepTY, time, 0, 'value') : baseXY.y,
+    };
+  } else {
+    trans = hasTranslate ? spineInterpolateTranslate(animBone.translate, time) : { x: 0, y: 0 };
+  }
+
+  const rot = spineInterpolateRotate(animBone?.rotate ?? [], time);
+
+  // Spine 4.x separate-axis scale timelines use key "scaleX" / "scaleY" (capitalized)
+  let scl: { x: number; y: number };
+  const hasScale = (animBone?.scale?.length ?? 0) > 0;
+  const sepSX = animBone?.scaleX;
+  const sepSY = animBone?.scaleY;
+  const hasSepSX = (sepSX?.length ?? 0) > 0;
+  const hasSepSY = (sepSY?.length ?? 0) > 0;
+  if (hasSepSX || hasSepSY) {
+    const baseXY = hasScale ? spineInterpolateScale(animBone.scale, time) : { x: 1, y: 1 };
+    scl = {
+      x: hasSepSX ? spineInterpolateSingle(sepSX, time, 1, 'value') : baseXY.x,
+      y: hasSepSY ? spineInterpolateSingle(sepSY, time, 1, 'value') : baseXY.y,
+    };
+  } else {
+    scl = hasScale ? spineInterpolateScale(animBone.scale, time) : { x: 1, y: 1 };
+  }
+
+  const localX = (boneDef.x ?? 0) + trans.x;
+  const localY = (boneDef.y ?? 0) + trans.y;
+  const localRot = (boneDef.rotation ?? 0) + rot;
+  const localSX = (boneDef.scaleX ?? 1) * scl.x;
+  const localSY = (boneDef.scaleY ?? 1) * scl.y;
+
+  let result: { wx: number; wy: number; wRot: number; wSX: number; wSY: number };
+
+  if (!boneDef.parent) {
+    result = { wx: localX, wy: localY, wRot: localRot, wSX: localSX, wSY: localSY };
+  } else {
+    const parent = spineBoneWorldTransform(boneDef.parent, boneMap, animBones, time, cache);
+    const pRad = parent.wRot * Math.PI / 180;
+    const cos = Math.cos(pRad), sin = Math.sin(pRad);
+    result = {
+      wx: parent.wx + (localX * cos - localY * sin) * parent.wSX,
+      wy: parent.wy + (localX * sin + localY * cos) * parent.wSY,
+      wRot: parent.wRot + localRot,
+      wSX: parent.wSX * localSX,
+      wSY: parent.wSY * localSY,
+    };
+  }
+
+  cache?.set(cacheKey, result);
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export function App() {
   const [showFireModal, setShowFireModal] = useState(false);
+    // Add state for Bezier curve drawing mode
+    const [drawBezierCurveMode, setDrawBezierCurveMode] = useState(false);
   const [appMode, setAppMode] = useState<'particle-system' | '3d-animator'>('particle-system');
   const [showScenePropertiesPanel, setShowScenePropertiesPanel] = useState(true);
-  const [leftPanelTab, setLeftPanelTab] = useState<'scene' | 'hierarchy'>('hierarchy');
+  const [leftPanelTab, setLeftPanelTab] = useState<'scene' | 'hierarchy' | 'spine'>('hierarchy');
+
+  // Spine import state
+  type ImportedSpineSource = {
+    json: any;
+    images: Record<string, string>; // basename-no-ext → data URL
+    boneIdMap: Record<string, string>; // bone name → scene obj id
+    fileName: string;
+  };
+  const [importedSpineSource, setImportedSpineSource] = useState<ImportedSpineSource | null>(null);
+  const [activeSpineAnimation, setActiveSpineAnimation] = useState<string | null>(null);
+  const [activeSpineSkin, setActiveSpineSkin] = useState<string | null>(null);
+  const [spineLayerSpread, setSpineLayerSpread] = useState(0);
   const [renamingObjectId, setRenamingObjectId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
   const [showPresetsMenu, setShowPresetsMenu] = useState(false);
   const [showCreateSubmenu, setShowCreateSubmenu] = useState<'3D' | '2D' | 'Presets' | null>(null);
+  const [showPrefsSubmenu, setShowPrefsSubmenu] = useState(false);
+  const [guiScale, setGuiScaleState] = useState<number>(() => {
+    try { const v = localStorage.getItem('vertebrae_gui_scale'); return v ? parseFloat(v) : 1.0; } catch { return 1.0; }
+  });
+  const setGuiScale = (v: number) => { setGuiScaleState(v); try { localStorage.setItem('vertebrae_gui_scale', String(v)); } catch {} };
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [draftSize, setDraftSize] = useState<SceneSize>(DEFAULT_SCENE_SIZE);
   const [particleCameraState, setParticleCameraState] = useState<{position: THREE.Vector3, quaternion: THREE.Quaternion} | null>(null);
-    const [drawMode, setDrawMode] = useState(false);
+  const [drawMode, setDrawMode] = useState(false);
+
+  // Handler to enable Bezier curve drawing mode
+  const handleStartDrawBezierCurve = useCallback(() => {
+    setDrawBezierCurveMode(true);
+  }, []);
+
+  // Handler to exit Bezier curve drawing mode (could be called from Scene3D or UI)
+  const handleFinishDrawBezierCurve = useCallback(() => {
+    setDrawBezierCurveMode(false);
+  }, []);
+
+  // ── applySpineJson: parse Spine JSON into scene bones + keyframes ──
+  const applySpineJson = useCallback((
+    spineJson: any,
+    fileName: string,
+    images: Record<string, string> = {},
+    existingBoneIdMap?: Record<string, string>,
+    animOverride?: string
+  ): Record<string, string> | null => {
+    try {
+    if (!spineJson.bones || !Array.isArray(spineJson.bones)) {
+      if (!spineJson.skeleton && !spineJson.slots && !spineJson.skins) {
+        alert('Invalid Spine JSON: no "bones", "slots", or "skins" found. Make sure to select your Spine project folder.');
+        return null;
+      }
+      // bones may be absent in some exports — default to empty
+      spineJson.bones = spineJson.bones ?? [];
+    }
+    const fps: number = Math.max(1, Math.min(120, spineJson.skeleton?.fps ?? 24));
+    const boneMap = new Map<string, any>();
+    for (const bone of spineJson.bones) boneMap.set(bone.name, bone);
+
+    const animEntries = spineJson.animations ? Object.entries(spineJson.animations) : [];
+    const animName: string | null = animOverride ?? (animEntries.length > 0 ? (animEntries[0][0] as string) : null);
+    const animData: any = animName ? ((spineJson.animations as any)[animName] ?? null) : null;
+    const animBones: Record<string, any> = animData?.bones ?? {};
+
+    let maxTime = 0;
+    for (const ba of Object.values(animBones) as any[]) {
+      // Include all possible timeline keys — combined and separate-axis (Spine 4.x uses lowercase "translatex"/"translatey")
+      for (const tl of [
+        ba.translate, ba.translatex, ba.translatey, ba.translateX, ba.translateY, ba.x, ba.y,
+        ba.rotate, ba.scale, ba.scaleX, ba.scaleY, ba.shearX, ba.shearY,
+      ] as any[][]) {
+        if (Array.isArray(tl) && tl.length > 0) {
+          const t = tl[tl.length - 1].time ?? 0;
+          if (Number.isFinite(t)) maxTime = Math.max(maxTime, t);
+        }
+      }
+    }
+    // Also scan slot timelines (attachment, rgba) so totalFrames isn't clipped short
+    const animSlotData: Record<string, any> = animData?.slots ?? {};
+    for (const sa of Object.values(animSlotData) as any[]) {
+      for (const tl of [sa.attachment, sa.rgba, sa.color] as any[][]) {
+        if (Array.isArray(tl) && tl.length > 0) {
+          const t = tl[tl.length - 1].time ?? 0;
+          if (Number.isFinite(t)) maxTime = Math.max(maxTime, t);
+        }
+      }
+    }
+    // Hard cap: never bake more than 3600 frames (~2.5 min @ 24fps) to prevent OOM / hangs on bad data
+    const totalFrames = maxTime > 0 ? Math.min(Math.ceil(maxTime * fps), 3600) : 0;
+
+    const now = Date.now();
+    const boneIdMapLocal: Record<string, string> = existingBoneIdMap ? { ...existingBoneIdMap } : {};
+    if (!existingBoneIdMap) {
+      for (const bone of spineJson.bones) {
+        boneIdMapLocal[bone.name] = `bone_${bone.name.replace(/\W+/g, '_')}_${now}`;
+      }
+    }
+    const switchingAnim = !!existingBoneIdMap;
+
+    const newObjects: SceneObject[] = [];
+    if (!switchingAnim) {
+      for (const bone of spineJson.bones) {
+        const id = boneIdMapLocal[bone.name];
+        const parentId = bone.parent ? (boneIdMapLocal[bone.parent] ?? null) : null;
+        const w = spineBoneWorldTransform(bone.name, boneMap, {}, 0, new Map());
+        newObjects.push({
+          id, name: bone.name, type: 'Bone',
+          position: { x: w.wx, y: w.wy, z: 0 },
+          rotation: { x: 0, y: 0, z: (w.wRot * Math.PI) / 180 },
+          scale: { x: w.wSX, y: w.wSY, z: 1 },
+          parentId, properties: {},
+        });
+      }
+    }
+
+    const newKeyframes: ObjectKeyframes = {};
+    if (animName && totalFrames > 0) {
+      for (const bone of spineJson.bones) {
+        if (!animBones[bone.name]) continue;
+        const id = boneIdMapLocal[bone.name];
+        const w0 = spineBoneWorldTransform(bone.name, boneMap, {}, 0, new Map());
+        const baseObj: SceneObject = switchingAnim
+          ? { id, name: bone.name, type: 'Bone', position: { x: w0.wx, y: w0.wy, z: 0 }, rotation: { x: 0, y: 0, z: (w0.wRot * Math.PI) / 180 }, scale: { x: w0.wSX, y: w0.wSY, z: 1 }, parentId: null, properties: {} }
+          : newObjects.find((o) => o.id === id)!;
+        newKeyframes[id] = {};
+        for (let f = 0; f <= totalFrames; f++) {
+          const t = f / fps;
+          const w = spineBoneWorldTransform(bone.name, boneMap, animBones, t, new Map());
+          newKeyframes[id][f] = {
+            ...baseObj,
+            position: { x: w.wx, y: w.wy, z: 0 },
+            rotation: { x: 0, y: 0, z: (w.wRot * Math.PI) / 180 },
+            scale: { x: w.wSX, y: w.wSY, z: 1 },
+          };
+        }
+      }
+    }
+
+    if (!switchingAnim) {
+      setSceneObjects((prev) => [...prev.filter((o) => o.type !== 'Bone'), ...newObjects]);
+    }
+    if (Object.keys(newKeyframes).length > 0) {
+      if (switchingAnim) {
+        setKeyframes((prev) => {
+          const next = { ...prev };
+          for (const id of Object.values(boneIdMapLocal)) delete next[id];
+          return { ...next, ...newKeyframes };
+        });
+      } else {
+        setKeyframes((prev) => ({ ...prev, ...newKeyframes }));
+      }
+      setTimelineOut((prev) => Math.max(prev, totalFrames));
+    }
+
+    setImportedSpineSource({ json: spineJson, images, boneIdMap: boneIdMapLocal, fileName });
+    setActiveSpineAnimation(animName);
+    if (!existingBoneIdMap) setActiveSpineSkin(null); // reset skin on fresh import
+    setLeftPanelTab('spine');
+    setShowScenePropertiesPanel(true);
+    setShowFileMenu(false);
+
+    if (!switchingAnim) {
+      const kfCount = Object.keys(newKeyframes).length;
+      alert(
+        `Imported ${newObjects.length} bone${newObjects.length !== 1 ? 's' : ''} from "${fileName}"` +
+        (animName ? ` (animation: "${animName}", ${totalFrames} frames, ${kfCount} animated bones)` : '') + '.'
+      );
+    }
+    return boneIdMapLocal;
+    } catch (err: any) {
+      console.error('[applySpineJson] crash:', err);
+      alert('Spine import crashed:\n' + (err?.stack ?? err?.message ?? String(err)));
+      return null;
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleImportSpine = useCallback(async () => {
+    // ── Electron path ──
+    if ((window as any).vertebrae?.importSpineFile) {
+      const result = await (window as any).vertebrae.importSpineFile();
+      if (!result.success) {
+        if (result.error !== 'Cancelled') alert('Spine import error: ' + result.error);
+        return;
+      }
+      try {
+        applySpineJson(JSON.parse(result.jsonString), result.fileName ?? 'spine export', result.images ?? {});
+      } catch (err: any) {
+        console.error('[handleImportSpine] crash:', err);
+        alert('Error parsing exported Spine JSON:\n' + (err?.stack ?? err?.message ?? String(err)));
+      }
+      return;
+    }
+
+    // ── Browser fallback: Spine CLI is required; only works in Electron ──
+    alert('Importing .spine files requires the Electron desktop app.\nPlease run Vertebrae as the desktop application, not in a plain browser.');
+  }, [applySpineJson]);
+
+  const switchSpineAnimation = useCallback((animName: string) => {
+    if (!importedSpineSource) return;
+    const { json, images, boneIdMap, fileName } = importedSpineSource;
+    applySpineJson(json, fileName, images, boneIdMap, animName);
+  }, [importedSpineSource, applySpineJson]);
+
+  // ── Derive list of skin names from imported Spine source ──
+  const spineSkinNames = useMemo((): string[] => {
+    if (!importedSpineSource) return [];
+    const rawSkins = importedSpineSource.json.skins;
+    if (Array.isArray(rawSkins)) return rawSkins.map((s: any) => s.name).filter(Boolean);
+    if (rawSkins && typeof rawSkins === 'object') return Object.keys(rawSkins);
+    return [];
+  }, [importedSpineSource]);
+
   const handleExportSpine = async () => {
     if (!scene3DRef.current) return;
     const spineData = scene3DRef.current.exportSpineData();
@@ -295,12 +698,14 @@ export function App() {
   const [sceneSettings, setSceneSettings] = useState<SceneSettings>(DEFAULT_SCENE_SETTINGS);
   const [snapSettings, setSnapSettings] = useState<SnapSettings>(DEFAULT_SNAP_SETTINGS);
   const [viewMode, setViewMode] = useState<'perspective' | 'x' | 'y' | 'z'>('perspective');
+  const [quadViewport, setQuadViewport] = useState(false);
   const [sceneObjects, setSceneObjects] = useState<SceneObject[]>([]);
   const [undoStack, setUndoStack] = useState<SceneObject[][]>([]);
   const [redoStack, setRedoStack] = useState<SceneObject[][]>([]);
   const isHistoryActionRef = useRef(false);
   const previousSceneObjectsRef = useRef<SceneObject[]>([]);
   const scene3DRef = useRef<Scene3DRef>(null);
+  const spineInputRef = useRef<HTMLInputElement>(null);
   
   // Timeline state
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -308,7 +713,7 @@ export function App() {
   const [isCaching, setIsCaching] = useState(false);
   const [isLooping, setIsLooping] = useState(true);
   const [playReverse, setPlayReverse] = useState(false);
-  const [fps] = useState(24);
+  const [fps, setFps] = useState(24);
   const [timelineIn, setTimelineIn] = useState(0);
   const [timelineOut, setTimelineOut] = useState(240);
   const [autoKeyEnabled, setAutoKeyEnabled] = useState(false);
@@ -369,6 +774,246 @@ export function App() {
   
   // Handle scale state
   const [handleScale, setHandleScale] = useState(1.0);
+
+  // ── Derive stable set of attachment planes (no currentFrame dep → meshes created once) ──
+  const spineAllAttachments = useMemo((): SpineAttachmentInfo[] => {
+    try {
+    if (!importedSpineSource) return [];
+    const { json, images, boneIdMap } = importedSpineSource;
+    const slots: any[] = json.slots ?? [];
+    const rawImagesDir: string = json.skeleton?.images ?? '';
+    const imagesDir = rawImagesDir.replace(/^\.\//,  '').replace(/\/$/, '');
+
+    // Resolve skin attachments
+    let skinAttachments: Record<string, Record<string, any>> = {};
+    const rawSkins = json.skins;
+    if (Array.isArray(rawSkins)) {
+      const targetSkin = (activeSpineSkin ? rawSkins.find((s: any) => s.name === activeSpineSkin) : null)
+        ?? rawSkins.find((s: any) => s.name === 'default')
+        ?? rawSkins[0];
+      const raw = targetSkin?.attachments;
+      if (Array.isArray(raw)) {
+        for (const entry of raw) {
+          const slotName = entry.slot ?? entry.name;
+          const attName = entry.name ?? slotName;
+          if (!skinAttachments[slotName]) skinAttachments[slotName] = {};
+          skinAttachments[slotName][attName] = entry;
+        }
+      } else { skinAttachments = raw ?? {}; }
+    } else if (rawSkins && typeof rawSkins === 'object') {
+      const key = (activeSpineSkin && (rawSkins as any)[activeSpineSkin]) ? activeSpineSkin : 'default';
+      skinAttachments = (rawSkins as any)[key] ?? Object.values(rawSkins as any)[0] ?? {};
+    }
+
+    const animData: any = activeSpineAnimation
+      ? (json.animations?.[activeSpineAnimation] ?? null)
+      : null;
+    const animSlots: Record<string, any> = animData?.slots ?? {};
+
+    const resolveImage = (attName: string, attPath?: string): string => {
+      const candidates: string[] = [];
+      const add = (p: string) => {
+        candidates.push(p);
+        if (imagesDir) candidates.push(`${imagesDir}/${p}`);
+        candidates.push(p.replace(/\//g, '-'));
+        candidates.push(p.split('/').pop() ?? p);
+      };
+      if (attPath) add(attPath);
+      add(attName);
+      const k = candidates.find((c) => c && images[c] !== undefined);
+      return k ? images[k] : '';
+    };
+
+    const result: SpineAttachmentInfo[] = [];
+    for (const [slotIndex, slot] of slots.entries()) {
+      const slotSkinData = skinAttachments[slot.name];
+      const boneObjectId: string | undefined = boneIdMap[slot.bone];
+      if (!boneObjectId) continue;
+
+      // When animation active, only include slots that appear in its attachment timelines
+      let repAttName: string | undefined;
+      if (animData) {
+        const attachmentTL: any[] = animSlots[slot.name]?.attachment ?? [];
+        if (!attachmentTL.length) continue;
+        repAttName = attachmentTL.find((kf: any) => kf.name != null)?.name ?? undefined;
+        if (!repAttName) continue; // all keyframes are null → slot is fully hidden this animation
+      } else {
+        repAttName = slot.attachment ?? (slotSkinData ? Object.keys(slotSkinData)[0] : undefined);
+        if (!repAttName) continue;
+      }
+
+      const attachData: any = slotSkinData?.[repAttName] ?? {};
+      const attType: string = attachData.type ?? 'region';
+      if (attType !== 'region' && attType !== 'mesh' && attType !== 'sequence') continue;
+
+      // Detect sequence attachment
+      let seq: any = attachData.sequence;
+      if (!seq && repAttName.endsWith('_') && slotSkinData) {
+        const seqEntry = Object.values(slotSkinData).find((e: any) => e.sequence) as any;
+        if (seqEntry) seq = seqEntry.sequence;
+      }
+
+      let sequenceFrames: string[] | undefined;
+      let imageDataUrl: string;
+      if (seq) {
+        const { count = 1, start = 0, digits = 2 } = seq;
+        sequenceFrames = [];
+        const baseName = repAttName.endsWith('_') ? repAttName.slice(0, -1) : repAttName;
+        for (let i = start; i < start + count; i++) {
+          const frameNum = String(i).padStart(digits, '0');
+          const frameName = `${baseName}_${frameNum}`;
+          sequenceFrames.push(resolveImage(frameName));
+        }
+        imageDataUrl = sequenceFrames[0] ?? '';
+      } else {
+        imageDataUrl = resolveImage(repAttName, attachData.path);
+      }
+
+      result.push({
+        id: `att_${slot.name}`,
+        slotName: slot.name,
+        boneObjectId,
+        imageDataUrl,
+        localX: attachData.x ?? 0,
+        localY: attachData.y ?? 0,
+        localRotationDeg: attachData.rotation ?? 0,
+        width: attachData.width ?? 100,
+        height: attachData.height ?? 100,
+        scaleX: attachData.scaleX ?? 1,
+        scaleY: attachData.scaleY ?? 1,
+        sequenceFrames,
+        slotIndex,
+        blendMode: slot.blend ?? 'normal',
+        color: slot.color ?? 'ffffffff',
+      });
+    }
+    return result;
+    } catch (err: any) {
+      console.error('[spineAllAttachments] crash:', err);
+      return [];
+    }
+  }, [importedSpineSource, activeSpineSkin, activeSpineAnimation]);
+
+  // ── Spine keyframe interpolation helpers ──
+
+  /** Solve cubic bezier for x → return y. cx1,cy1,cx2,cy2 are the two control points (0-1 space). */
+  function solveBezier(cx1: number, cy1: number, cx2: number, cy2: number, x: number): number {
+    // Newton-Raphson to find t given x, then compute y(t)
+    let t = x;
+    for (let i = 0; i < 8; i++) {
+      const t2 = t * t; const t3 = t2 * t;
+      const mt = 1 - t; const mt2 = mt * mt; const mt3 = mt2 * mt;
+      const bx = 3 * mt2 * t * cx1 + 3 * mt * t2 * cx2 + t3;
+      const dbx = 3 * mt2 * cx1 + 6 * mt * t * (cx2 - cx1) + 3 * t2 * (1 - cx2);
+      if (Math.abs(dbx) < 1e-6) break;
+      t -= (bx - x) / dbx;
+      t = Math.max(0, Math.min(1, t));
+    }
+    const t2 = t * t; const t3 = t2 * t; const mt = 1 - t; const mt2 = mt * mt; const mt3 = mt2 * mt;
+    return 3 * mt2 * t * cy1 + 3 * mt * t2 * cy2 + t3;
+  }
+
+  /** Get interpolation alpha [0..1] between two Spine keyframes at currentTimeSec. */
+  function spineKfAlpha(kf: any, nextKf: any, currentTimeSec: number): number {
+    const t0 = kf.time ?? 0;
+    const t1 = nextKf.time ?? 0;
+    if (t1 <= t0) return 1;
+    const raw = Math.max(0, Math.min(1, (currentTimeSec - t0) / (t1 - t0)));
+    const curve = kf.curve;
+    if (!curve || curve === 'linear') return raw;
+    if (curve === 'stepped') return 0;
+    if (Array.isArray(curve) && curve.length === 4) {
+      return solveBezier(curve[0], curve[1], curve[2], curve[3], raw);
+    }
+    return raw;
+  }
+
+  /** Interpolate two Spine RGBA hex strings ('rrggbbaa') using alpha t. */
+  function lerpColor(a: string, b: string, t: number): [number, number, number, number] {
+    const parse = (s: string, off: number) => parseInt(s.substring(off, off + 2), 16) / 255;
+    const lerp = (x: number, y: number) => x + (y - x) * t;
+    return [
+      lerp(parse(a, 0), parse(b, 0)),
+      lerp(parse(a, 2), parse(b, 2)),
+      lerp(parse(a, 4), parse(b, 4)),
+      lerp(parse(a, 6), parse(b, 6)),
+    ];
+  }
+
+  // ── Per-frame overrides: visibility + sequence frame index (fast, no mesh rebuilding) ──
+  const spineFrameOverrides = useMemo((): SpineFrameOverrides => {
+    try {
+    if (!importedSpineSource || !spineAllAttachments.length) return {};
+    const { json } = importedSpineSource;
+    const animData: any = activeSpineAnimation
+      ? (json.animations?.[activeSpineAnimation] ?? null)
+      : null;
+    if (!animData) {
+      const result: SpineFrameOverrides = {};
+      for (const att of spineAllAttachments) result[att.id] = { visible: true };
+      return result;
+    }
+    const spineFps: number = json.skeleton?.fps ?? 24;
+    const currentTimeSec = currentFrame / spineFps;
+    const animSlots: Record<string, any> = animData.slots ?? {};
+    const result: SpineFrameOverrides = {};
+    for (const att of spineAllAttachments) {
+      const attachmentTL: any[] = animSlots[att.slotName]?.attachment ?? [];
+      if (!attachmentTL.length) { result[att.id] = { visible: false }; continue; }
+      let activeName: string | null | undefined = undefined;
+      let activeKfTime = 0;
+      for (const kf of attachmentTL) {
+        if ((kf.time ?? 0) <= currentTimeSec + 0.0001) {
+          activeName = kf.name ?? null;
+          activeKfTime = kf.time ?? 0;
+        } else { break; }
+      }
+      if (activeName === undefined || activeName === null) {
+        result[att.id] = { visible: false };
+        continue;
+      }
+      let seqFrame: number | undefined;
+      if (att.sequenceFrames && att.sequenceFrames.length > 0) {
+        const elapsed = Math.max(0, currentTimeSec - activeKfTime);
+        seqFrame = Math.floor(elapsed * spineFps) % att.sequenceFrames.length;
+      }
+      // Read per-frame slot color/alpha from rgba or color animation timeline with proper interpolation
+      let alpha: number | undefined;
+      let tintR: number | undefined;
+      let tintG: number | undefined;
+      let tintB: number | undefined;
+      const rgbaTL: any[] = animSlots[att.slotName]?.rgba ?? animSlots[att.slotName]?.color ?? [];
+      if (rgbaTL.length > 0) {
+        let kfIdx = -1;
+        for (let i = 0; i < rgbaTL.length; i++) {
+          if ((rgbaTL[i].time ?? 0) <= currentTimeSec + 0.0001) kfIdx = i;
+          else break;
+        }
+        if (kfIdx >= 0) {
+          const kf = rgbaTL[kfIdx];
+          const colorA: string = kf.color ?? 'ffffffff';
+          let r: number, g: number, b: number, a: number;
+          const nextKf = rgbaTL[kfIdx + 1];
+          if (nextKf && kf.curve !== 'stepped' && colorA.length >= 8 && nextKf.color?.length >= 8) {
+            const t = spineKfAlpha(kf, nextKf, currentTimeSec);
+            [r, g, b, a] = lerpColor(colorA, nextKf.color, t);
+          } else {
+            r = parseInt(colorA.substring(0, 2), 16) / 255;
+            g = parseInt(colorA.substring(2, 4), 16) / 255;
+            b = parseInt(colorA.substring(4, 6), 16) / 255;
+            a = parseInt(colorA.substring(6, 8), 16) / 255;
+          }
+          tintR = r; tintG = g; tintB = b; alpha = a;
+        }
+      }
+      result[att.id] = { visible: true, seqFrame, alpha, tintR, tintG, tintB };
+    }
+    return result;
+    } catch (err: any) {
+      console.error('[spineFrameOverrides] crash:', err);
+      return {};
+    }
+  }, [importedSpineSource, activeSpineSkin, activeSpineAnimation, currentFrame, spineAllAttachments]);
 
   const updateDraft = (axis: keyof SceneSize, value: string) => {
     const nextValue = Number.parseInt(value, 10);
@@ -478,34 +1123,7 @@ export function App() {
     }, []);
 
 
-  const createEmitterShapeNode = useCallback((emitterId: string, baseObject?: SceneObject): EmitterShapeObject => {
-    const now = Date.now();
-    const shapeId = `emitter_shape_${now}_${Math.floor(Math.random() * 1000)}`;
-    return {
-      id: shapeId,
-      name: `shape_${now}`,
-      type: 'EmitterShape',
-      parentId: emitterId,
-      position: baseObject ? { ...baseObject.position } : { x: 0, y: 0, z: 0 },
-      rotation: baseObject ? { ...baseObject.rotation } : { x: 0, y: 0, z: 0 },
-      scale: baseObject ? { ...baseObject.scale } : { x: 1, y: 1, z: 1 },
-      properties: {
-        emitterType: 'point',
-        emissionMode: 'volume',
-        layerImageDataUrl: '',
-      },
-    };
-  }, []);
 
-  const inferEmitterShapeTypeFromObjectType = useCallback((objectType: string): EmitterShapeProperties['emitterType'] => {
-    if (objectType === 'Cube') return 'cube';
-    if (objectType === 'Sphere') return 'ball';
-    if (objectType === 'Circle') return 'circle';
-    if (objectType === 'Rectangle' || objectType === 'Triangle' || objectType === 'Polygon' || objectType === 'Plane') return 'square';
-    if (objectType === 'Line' || objectType === 'Arc') return 'curve';
-    if (objectType === 'Cylinder' || objectType === 'Cone' || objectType === 'Torus') return 'ball';
-    return 'point';
-  }, []);
 
   const handleUpdateEmitterProperty = useCallback((property: string, value: number | string | boolean | string[]) => {
     if (!selectedObjectId) return;
@@ -523,23 +1141,6 @@ export function App() {
     }));
   }, [selectedObjectId]);
 
-  const handleUpdateEmitterShapeProperty = useCallback((property: string, value: number | string | boolean | string[]) => {
-    if (!selectedObjectId) return;
-    setSceneObjects((prev) => prev.map((obj) => {
-      const isEmitterShapeNode = obj.type === 'EmitterShape';
-      const isChildOfEmitter = !!obj.parentId && prev.some((parent) => parent.id === obj.parentId && parent.type === 'Emitter');
-      if (obj.id === selectedObjectId && (isEmitterShapeNode || (obj.type !== 'Emitter' && isChildOfEmitter))) {
-        return {
-          ...obj,
-          properties: {
-            ...(obj.properties ?? {}),
-            [property]: value,
-          },
-        };
-      }
-      return obj;
-    }));
-  }, [selectedObjectId]);
 
   const handleLayerImageUpload = useCallback((file: File | null) => {
     if (!selectedObjectId || !file) return;
@@ -553,17 +1154,6 @@ export function App() {
     reader.readAsDataURL(file);
   }, [selectedObjectId, handleUpdateEmitterProperty]);
 
-  const handleEmitterShapeLayerImageUpload = useCallback((file: File | null) => {
-    if (!selectedObjectId || !file) return;
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = typeof reader.result === 'string' ? reader.result : '';
-      if (!dataUrl) return;
-      handleUpdateEmitterShapeProperty('layerImageDataUrl', dataUrl);
-    };
-    reader.readAsDataURL(file);
-  }, [selectedObjectId, handleUpdateEmitterShapeProperty]);
 
   const readFileAsDataUrl = useCallback((file: File) => {
     return new Promise<string>((resolve, reject) => {
@@ -806,6 +1396,7 @@ export function App() {
         particleSeed: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleSeed ?? 0),
       showPathCurves: Boolean((selectedObject.properties as EmitterObject['properties'] | undefined)?.showPathCurves ?? false),
       pathCurveKeyCount: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.pathCurveKeyCount ?? 5),
+      emitFromSpineAttachmentId: String((selectedObject.properties as any)?.emitFromSpineAttachmentId ?? ''),
     }
     : null;
 
@@ -815,56 +1406,7 @@ export function App() {
 
   const selectedActsAsEmitterSource = !!selectedObject && selectedObject.type !== 'Emitter' && selectedObjectIsEmitterChild;
 
-  const selectedEmitterShapeProperties = selectedActsAsEmitterSource
-    ? {
-      emitterType: String((selectedObject.properties as EmitterShapeProperties | undefined)?.emitterType ?? inferEmitterShapeTypeFromObjectType(selectedObject.type)) as EmitterShapeProperties['emitterType'],
-      emissionMode: String((selectedObject.properties as EmitterShapeProperties | undefined)?.emissionMode ?? 'volume') as EmitterShapeProperties['emissionMode'],
-      layerImageDataUrl: String((selectedObject.properties as EmitterShapeProperties | undefined)?.layerImageDataUrl ?? ''),
-      useFractalNoiseMap: Boolean((selectedObject.properties as EmitterShapeProperties | undefined)?.useFractalNoiseMap ?? false),
-      fractalNoiseScale: Number((selectedObject.properties as EmitterShapeProperties | undefined)?.fractalNoiseScale ?? 1),
-      fractalNoiseDetail: Number((selectedObject.properties as EmitterShapeProperties | undefined)?.fractalNoiseDetail ?? 3),
-      fractalNoiseSpeed: Number((selectedObject.properties as EmitterShapeProperties | undefined)?.fractalNoiseSpeed ?? 1),
-      fractalNoiseThreshold: Number((selectedObject.properties as EmitterShapeProperties | undefined)?.fractalNoiseThreshold ?? 0.5),
-    }
-    : null;
 
-  const getEmissionModeOptions = useCallback((shapeType: EmitterShapeProperties['emitterType']) => {
-    if (shapeType === 'cube' || shapeType === 'ball') {
-      return [
-        { value: 'volume', label: 'Volume/Inside' },
-        { value: 'surface', label: 'Surface' },
-      ] as const;
-    }
-
-    if (shapeType === 'circle' || shapeType === 'square' || shapeType === 'layer') {
-      return [
-        { value: 'surface', label: 'Surface' },
-        { value: 'edge', label: 'Edge' },
-      ] as const;
-    }
-
-    if (shapeType === 'curve') {
-      return [
-        { value: 'edge', label: 'Curve' },
-      ] as const;
-    }
-
-    return [
-      { value: 'volume', label: 'Volume' },
-      { value: 'surface', label: 'Surface' },
-    ] as const;
-  }, []);
-
-  const normalizeEmissionModeForShape = useCallback((
-    shapeType: EmitterShapeProperties['emitterType'],
-    mode: EmitterShapeProperties['emissionMode']
-  ): EmitterShapeProperties['emissionMode'] => {
-    const options = getEmissionModeOptions(shapeType).map((option) => option.value);
-    if (options.includes(mode)) {
-      return mode;
-    }
-    return options[0] as EmitterShapeProperties['emissionMode'];
-  }, [getEmissionModeOptions]);
 
   const clampFrame = useCallback((value: number) => {
     const minFrame = Math.max(0, timelineIn);
@@ -1163,8 +1705,8 @@ export function App() {
         layerImageDataUrl: '',
         particleLifetime: 3,
         particleSpeed: 50,
-          particleSpreadAngle: 36,
-          particleColor: '#ffffff',
+        particleSpreadAngle: 36,
+        particleColor: '#ffffff',
         particleSize: 0.8,
         particleOpacity: 1,
         particleType: 'dots',
@@ -1172,7 +1714,9 @@ export function App() {
         particleRotation: 0,
         particleRotationVariation: 0,
         particleRotationSpeed: 0,
-        particleRotationSpeedVariation: 0, particleStretch: false, particleStretchAmount: 0.05,
+        particleRotationSpeedVariation: 0,
+        particleStretch: false,
+        particleStretchAmount: 0.05,
         particleSpriteImageDataUrl: '',
         particleSpriteImageName: '',
         particleSpriteSequenceDataUrls: [],
@@ -1185,26 +1729,25 @@ export function App() {
         particleColorOverLife: false,
         particleColorOverLifeTarget: '#000000',
         particleSizeOverLife: 'none',
-          particleSeed: Math.floor(Math.random() * 1000000),
+        particleSeed: Math.floor(Math.random() * 1000000),
         showPathCurves: false,
         pathCurveKeyCount: 5,
       };
 
-      const emitterShapeNode = createEmitterShapeNode(newObject.id, newObject);
-      setSceneObjects((prev) => [...prev, newObject, emitterShapeNode]);
+      setSceneObjects((prev) => [...prev, newObject]);
       setSelectedObjectId(newObject.id);
       setShowCreateMenu(false);
-          setShowPresetsMenu(false);
+      setShowPresetsMenu(false);
       return;
     }
 
     setSceneObjects((prev) => [...prev, newObject]);
     setShowCreateMenu(false);
-  }, [createEmitterShapeNode]);
+  }, []);
 
     const [customPresets, setCustomPresets] = useState<Record<string, Record<string, any>>>(() => { try { const saved = localStorage.getItem('customEmitterPresets'); return saved ? JSON.parse(saved) : {}; } catch (e) { return {}; } });
   const handleSaveCustomPreset = useCallback(() => { const selectedObj = sceneObjects.find(obj => obj.id === selectedObjectId); if (!selectedObj || selectedObj.type !== 'Emitter') { alert('Please select an Emitter object to save its preset.'); return; } const presetName = prompt('Enter a name for the custom emitter preset (must be unique):'); if (!presetName || presetName.trim() === '') return; const savedProps = JSON.parse(JSON.stringify(selectedObj.properties)); setCustomPresets(prev => { const next = { ...prev, [presetName.trim()]: savedProps }; localStorage.setItem('customEmitterPresets', JSON.stringify(next)); return next; }); alert('Preset saved!'); }, [sceneObjects, selectedObjectId]);
-  const handleLoadCustomPreset = useCallback((presetName: string) => { const props = customPresets[presetName]; if (!props) return; const newEmitter: SceneObject = { id: 'emitter_' + Date.now(), name: presetName, type: 'Emitter', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: null, properties: JSON.parse(JSON.stringify(props)) }; const emitterShapeNode = createEmitterShapeNode(newEmitter.id, newEmitter); setSceneObjects((prev) => [...prev, newEmitter, emitterShapeNode]); setSelectedObjectId(newEmitter.id); }, [customPresets, createEmitterShapeNode]);
+  const handleLoadCustomPreset = useCallback((presetName: string) => { const props = customPresets[presetName]; if (!props) return; const newEmitter: SceneObject = { id: 'emitter_' + Date.now(), name: presetName, type: 'Emitter', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: null, properties: JSON.parse(JSON.stringify(props)) }; setSceneObjects((prev) => [...prev, newEmitter]); setSelectedObjectId(newEmitter.id); }, [customPresets]);
 
   const handleCreateFirePreset = useCallback(async (presetType: 'campfire' | 'torch') => {
     let dataUrls: string[] = [];
@@ -1267,11 +1810,7 @@ export function App() {
     const shapeScaleX = presetType === 'campfire' ? 1.5 : 0.5;
     const shapeScaleZ = presetType === 'campfire' ? 1.5 : 0.5;
 
-    const baseShapeNode = createEmitterShapeNode(emitterId, newEmitter);
-    const emitterShapeNode = {
-      ...baseShapeNode,
-      scale: { x: shapeScaleX, y: 1, z: shapeScaleZ }
-    };
+    // No EmitterShape creation
 
     // Physics forces
     const windForceId = `force-${Date.now()}-wind`;
@@ -1300,15 +1839,15 @@ export function App() {
       enabled: true,
     };
 
-    setSceneObjects((prev) => [...prev, newEmitter, emitterShapeNode]);
+    setSceneObjects((prev) => [...prev, newEmitter]);
     setPhysicsForces((prev) => [...prev, windForce, turbulenceForce]);
     setSelectedObjectId(newEmitter.id);
     setShowCreateMenu(false);
     setShowCreateSubmenu(null);
-  }, [createEmitterShapeNode]);
+  }, []);
 
 
-  const handleCreateClassicPreset = useCallback((presetType: 'sparks' | 'smoke' | 'fire' | 'fireflies') => {
+  const handleCreateClassicPreset = useCallback((presetType: 'sparks' | 'smoke' | 'fire') => {
     // Generate simple dot texture
     const canvas = document.createElement('canvas');
     canvas.width = 64; canvas.height = 64;
@@ -1412,22 +1951,6 @@ export function App() {
       turbStrength = 10; // wind turbulence
       turbRadius = 30;
       updraftStrength = 20;
-    } else if (presetType === 'fireflies') {
-      props = {
-         ...props,
-         emissionRate: 40,
-         particleLifetime: 5,
-         particleSpeed: 2,
-         particleSize: 2,
-         particleColor: '#aaff00',
-         particleSizeOverLifeCurve: [ { t: 0, v: 0 }, { t: 0.2, v: 1 }, { t: 0.8, v: 1 }, { t: 1, v: 0 } ],
-         particleBlendMode: 'lighter'
-      };
-      shapeProps = { emitterType: 'cube', emissionMode: 'volume' };
-      shapeScale = { x: 8, y: 4, z: 8 };
-      turbStrength = 10;
-      turbRadius = 30;
-      updraftStrength = 2;
     }
 
     const emitterId = 'emitter_' + Date.now();
@@ -1442,12 +1965,7 @@ export function App() {
       properties: props
     };
 
-    const emitterShapeNode = createEmitterShapeNode? createEmitterShapeNode(emitterId, newEmitter) : null;
-    if (emitterShapeNode) {
-      emitterShapeNode.properties = { ...emitterShapeNode.properties, ...shapeProps };
-      emitterShapeNode.scale = shapeScale;
-      emitterShapeNode.name = presetType.charAt(0).toUpperCase() + presetType.slice(1) + ' Shape';
-    }
+    // No EmitterShape creation
 
     const forceId = 'force_' + Date.now();
     const newForce: PhysicsForce = {
@@ -1503,7 +2021,7 @@ export function App() {
        newForce.affectedEmitterIds.push(sparkId);
        newForce2.affectedEmitterIds.push(sparkId);
     }
-    if (emitterShapeNode) els.push(emitterShapeNode);
+    // No EmitterShape added
     setSceneObjects(prev => [...prev, ...els]);
 
     const newForces: PhysicsForce[] = [];
@@ -1514,7 +2032,7 @@ export function App() {
     }
     setSelectedObjectId(newEmitter.id);
     setShowPresetsMenu(false);
-  }, [createEmitterShapeNode]);
+  }, []);
 
 
 
@@ -1982,6 +2500,13 @@ export function App() {
         return;
       }
 
+      // Space: toggle quad viewport
+      if (key === ' ') {
+        event.preventDefault();
+        setQuadViewport(prev => !prev);
+        return;
+      }
+
       // Delete or Backspace: Delete selected keyframe
       if ((key === 'delete' || key === 'backspace') && selectedObjectId && selectedKeyframeFrame !== null) {
         event.preventDefault();
@@ -2235,7 +2760,13 @@ export function App() {
 
   // Render Particle System mode
   return (
-    <div className="workspace">
+    <div className="workspace" style={{ zoom: guiScale }}>
+      <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 10, pointerEvents: 'none' }}>
+        <button style={{ pointerEvents: 'all' }} onClick={handleStartDrawBezierCurve} disabled={drawBezierCurveMode}>
+          Draw Bezier Curve
+        </button>
+        {drawBezierCurveMode && <span style={{ marginLeft: 8, color: '#ff6600', pointerEvents: 'none' }}>Drawing: Click in 3D view to add points. Double-click or ESC to finish.</span>}
+      </div>
       <div className="menu-bar">
         <div className="menu-item">
           <button
@@ -2265,6 +2796,14 @@ export function App() {
                 <span>Open</span>
                 <span className="shortcut">Alt+O</span>
               </button>
+              <button
+                className="menu-option"
+                onClick={handleImportSpine}
+                type="button"
+              >
+                <span>Import Spine File (.spine)…</span>
+              </button>
+              <div className="menu-separator"></div>
               <button
                 className="menu-option"
                 onClick={handleSave}
@@ -2313,6 +2852,33 @@ export function App() {
               </button>
               <div className="menu-separator"></div>
               <button
+                className="menu-option menu-option-submenu"
+                onMouseEnter={() => setShowPrefsSubmenu(true)}
+                onMouseLeave={() => setShowPrefsSubmenu(false)}
+                type="button"
+              >
+                <span>Preferences</span>
+                <span className="submenu-indicator">▶</span>
+                {showPrefsSubmenu && (
+                  <div className="menu-submenu" style={{ minWidth: 170 }} onMouseEnter={() => setShowPrefsSubmenu(true)} onMouseLeave={() => setShowPrefsSubmenu(false)}>
+                    <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2 }}>GUI Size</div>
+                    {([['Compact', 0.8], ['Normal', 1.0], ['Large', 1.15], ['X-Large', 1.3]] as [string, number][]).map(([label, val]) => (
+                      <button
+                        key={label}
+                        className="menu-option"
+                        style={guiScale === val ? { color: '#e8803a', fontWeight: 700 } : {}}
+                        onClick={() => { setGuiScale(val); setShowPrefsSubmenu(false); setShowFileMenu(false); }}
+                        type="button"
+                      >
+                        <span>{label}</span>
+                        {guiScale === val && <span style={{ color: '#e8803a', fontSize: '0.7rem' }}>✓</span>}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </button>
+              <div className="menu-separator"></div>
+              <button
                 className="menu-option"
                 onClick={() => {
                   setShowFileMenu(false);
@@ -2337,389 +2903,28 @@ export function App() {
         <div className="menu-item">
           <button
             className="menu-button"
-            style={drawMode ? {background: '#4a90e2'} : {}}
-            onClick={() => setDrawMode(!drawMode)}
-            type="button"
-          >
-            ✑ Draw Path
-          </button>
-          <button
-            className="menu-button"
             onClick={() => setShowCreateMenu(!showCreateMenu)}
             type="button"
           >
-            Create
+            + Create
           </button>
           {showCreateMenu && (
             <div className="menu-dropdown">
-              <button
-                className="menu-option menu-option-submenu"
-                onMouseEnter={() => setShowCreateSubmenu('3D')}
-                type="button"
-              >
-                <span>3D</span>
-                <span className="submenu-indicator">▶</span>
-              </button>
-              {showCreateSubmenu === '3D' && (
-                <div className="menu-submenu">
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Cube');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Cube</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Sphere');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Sphere</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Cylinder');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Cylinder</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Cone');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Cone</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Plane');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Plane</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Torus');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Torus</span>
-                  </button>
-                </div>
-              )}
-              <button
-                className="menu-option menu-option-submenu"
-                onMouseEnter={() => setShowCreateSubmenu('2D')}
-                type="button"
-              >
-                <span>2D</span>
-                <span className="submenu-indicator">▶</span>
-              </button>
-              {showCreateSubmenu === '2D' && (
-                <div className="menu-submenu">
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Circle');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Circle</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Rectangle');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Rectangle</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Triangle');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Triangle</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Line');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Line</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Arc');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Arc</span>
-                  </button>
-                  <button
-                    className="menu-option"
-                    onClick={() => {
-                      handleCreateObject('Polygon');
-                      setShowCreateMenu(false);
-                      setShowCreateSubmenu(null);
-                    }}
-                    type="button"
-                  >
-                    <span>Polygon</span>
-                  </button>
-                </div>
-              )}
-              <div className="menu-separator"></div>
+              <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2 }}>Objects</div>
               <button
                 className="menu-option"
                 onClick={() => {
                   handleCreateObject('Emitter');
                   setShowCreateMenu(false);
-                  setShowCreateSubmenu(null);
                 }}
-                onMouseEnter={() => setShowCreateSubmenu(null)}
                 type="button"
               >
                 <span>Emitter</span>
-              </button>
-              
-            </div>
-          )}
-        </div>
-
-        
-        <div className="menu-item">
-          <button
-            className="menu-button"
-            onClick={() => setShowPresetsMenu(!showPresetsMenu)}
-            type="button"
-            style={{ backgroundColor: '#2a9d8f', color: '#fff', fontWeight: 'bold' }}
-          >
-            Presets
-          </button>
-          {showPresetsMenu && (
-            <div className="menu-dropdown">
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleCreateFirePreset('campfire');
-                  setShowPresetsMenu(false);
-                }}
-                type="button"
-              >
-                <span>Campfire</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleCreateFirePreset('torch');
-                  setShowPresetsMenu(false);
-                }}
-                type="button"
-              >
-                <span>Torch</span></button>
-
-            <div style={{ padding: '8px 12px', background: '#333', fontSize: '11px', fontWeight: 'bold', color: '#999' }}>Classic Native FX</div>
-            <button className="menu-option" onClick={() => { handleCreateClassicPreset('sparks'); setShowPresetsMenu(false); }} type="button">
-                <span>🪄 Magic Sparks</span>
-            </button>
-            <button className="menu-option" onClick={() => { handleCreateClassicPreset('fire'); setShowPresetsMenu(false); }} type="button">
-                <span>🔥 Stylized Fire</span>
-            </button>
-            <button className="menu-option" onClick={() => { handleCreateClassicPreset('smoke'); setShowPresetsMenu(false); }} type="button">
-                <span>💨 Soft Smoke</span>
-            </button>
-            <button className="menu-option" onClick={() => { handleCreateClassicPreset('fireflies'); setShowPresetsMenu(false); }} type="button">
-                <span>✨ Fireflies</span>
-            </button>
-
-<div style={{ height: '1px', background: '#444', margin: '4px 0' }} />
-<button className="menu-option" onClick={() => { handleSaveCustomPreset(); setShowPresetsMenu(false); }} type="button">
-<span style={{ color: '#4cc9f0' }}>+ Save Selected Emitter</span>
-</button>
-{Object.keys(customPresets).map((presetName) => (
-<button key={presetName} className="menu-option" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} onClick={() => { handleLoadCustomPreset(presetName); setShowPresetsMenu(false); }} type="button" title="Load Preset">
-<span>{presetName}</span>
-<span style={{ color: '#e76f51', marginLeft: '10px', fontSize: '0.8em', padding: '2px 6px', borderRadius: '4px', background: 'rgba(231, 111, 81, 0.1)' }} onClick={(e) => { e.stopPropagation(); if (confirm('Delete reset: ' + presetName + '?')) { setCustomPresets(prev => { const next = { ...prev }; delete next[presetName]; localStorage.setItem('customEmitterPresets', JSON.stringify(next)); return next; }); } }} title="Delete Preset">✕</span>
-</button>
-))}
-</div>
-          )}
-        </div>
-
-        <div className="menu-item">
-          <button
-            className="menu-button"
-            onClick={() => setShowPhysicsPanel(!showPhysicsPanel)}
-            type="button"
-          >
-            Physics
-          </button>
-          {showPhysicsPanel && (
-            <div className="menu-dropdown physics-menu">
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('gravity');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Gravity</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('wind');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Wind</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('tornado');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Tornado</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('drag');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Drag</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('damping');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Damping</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('attractor');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Attractor</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('repulsor');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Repulsor</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('collider');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Collider</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('flow-curve');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Flow Along Curve</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('vortex');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Vortex</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('turbulence');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Turbulence</span>
-              </button>
-              <button
-                className="menu-option"
-                onClick={() => {
-                  handleAddPhysicsForce('thermal-updraft');
-                  setShowPhysicsPanel(false);
-                }}
-                type="button"
-              >
-                <span>Add Thermal Updraft</span>
+                <span style={{ fontSize: '0.68rem', color: '#666' }}>point · 100/s</span>
               </button>
             </div>
           )}
         </div>
-
         <div className="menu-item">
           <button
             className="menu-button"
@@ -2757,7 +2962,7 @@ export function App() {
         {showScenePropertiesPanel && (
           <aside className="file-panel panel-left">
             <div className="panel-header">
-              <h3>{leftPanelTab === 'scene' ? 'Scene Properties' : 'Hierarchy & Physics'}</h3>
+              <h3>{leftPanelTab === 'scene' ? 'Scene Properties' : leftPanelTab === 'spine' ? 'Spine Import' : 'Hierarchy & Physics'}</h3>
               <button
                 className="close-button"
                 onClick={() => setShowScenePropertiesPanel(false)}
@@ -2782,6 +2987,13 @@ export function App() {
                   onClick={() => setLeftPanelTab('hierarchy')}
                 >
                   Hierarchy
+                </button>
+                <button
+                  type="button"
+                  className={leftPanelTab === 'spine' ? 'active' : ''}
+                  onClick={() => setLeftPanelTab('spine')}
+                >
+                  Spine
                 </button>
               </div>
 
@@ -3246,6 +3458,174 @@ export function App() {
                   </div>
                 </div>
               )}
+
+              {leftPanelTab === 'spine' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', padding: '0.5rem 0' }}>
+                  {!importedSpineSource ? (
+                    <div style={{ color: '#888', fontSize: '0.8rem', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                      <div>No Spine file imported yet.</div>
+                      <button
+                        type="button"
+                        onClick={handleImportSpine}
+                        style={{
+                          display: 'inline-block',
+                          padding: '0.4rem 0.7rem',
+                          background: '#1e3a5f',
+                          color: '#7db8f0',
+                          border: '1px solid #2e5a8f',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontSize: '0.8rem',
+                        }}
+                      >
+                        📂 Import .spine File…
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      {/* File info */}
+                      <div style={{ fontSize: '0.72rem', color: '#a9b5ca', padding: '0 0.25rem 0.25rem', borderBottom: '1px solid #3b455c', display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                        <span style={{ flex: 1 }}>
+                          {importedSpineSource.fileName}
+                          <span style={{ marginLeft: '0.5rem', color: '#666' }}>
+                            · {importedSpineSource.json.bones?.length ?? 0} bones
+                            · {importedSpineSource.json.slots?.length ?? 0} slots
+                          </span>
+                        </span>
+                        <button
+                          type="button"
+                          title="Re-import .spine file"
+                          onClick={handleImportSpine}
+                          style={{ padding: '1px 5px', background: '#1e3a5f', color: '#7db8f0', border: '1px solid #2e5a8f', borderRadius: '3px', cursor: 'pointer', fontSize: '0.7rem', flexShrink: 0 }}
+                        >
+                          ↺
+                        </button>
+                      </div>
+
+                      {/* Skins list — only when multiple skins exist */}
+                      {spineSkinNames.length > 1 && (
+                        <div>
+                          <div style={{ fontSize: '0.72rem', color: '#a9b5ca', fontWeight: 'bold', padding: '0.25rem 0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                            Skins
+                          </div>
+                          {spineSkinNames.map((skinName) => {
+                            const isActive = activeSpineSkin ? activeSpineSkin === skinName : (skinName === 'default' || spineSkinNames.indexOf(skinName) === 0);
+                            return (
+                              <button
+                                key={skinName}
+                                type="button"
+                                onClick={() => setActiveSpineSkin(skinName)}
+                                style={{
+                                  display: 'block',
+                                  width: '100%',
+                                  textAlign: 'left',
+                                  padding: '0.3rem 0.5rem',
+                                  marginBottom: '2px',
+                                  background: isActive ? '#2a4a2a' : '#232b38',
+                                  color: isActive ? '#80e080' : '#c0cfe0',
+                                  border: isActive ? '1px solid #4aaa4a' : '1px solid transparent',
+                                  borderRadius: '3px',
+                                  cursor: 'pointer',
+                                  fontSize: '0.8rem',
+                                }}
+                              >
+                                ◆ {skinName}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+
+                      {/* Animations list */}
+                      <div>
+                        <div style={{ fontSize: '0.72rem', color: '#a9b5ca', fontWeight: 'bold', padding: '0.25rem 0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                          Animations
+                        </div>
+                        {Object.keys(importedSpineSource.json.animations ?? {}).length === 0 ? (
+                          <div style={{ color: '#666', fontSize: '0.75rem' }}>No animations found</div>
+                        ) : (
+                          Object.keys(importedSpineSource.json.animations).map((animName) => (
+                            <button
+                              key={animName}
+                              type="button"
+                              onClick={() => switchSpineAnimation(animName)}
+                              style={{
+                                display: 'block',
+                                width: '100%',
+                                textAlign: 'left',
+                                padding: '0.3rem 0.5rem',
+                                marginBottom: '2px',
+                                background: activeSpineAnimation === animName ? '#1a4a8a' : '#232b38',
+                                color: activeSpineAnimation === animName ? '#fff' : '#c0cfe0',
+                                border: activeSpineAnimation === animName ? '1px solid #3a7fd4' : '1px solid transparent',
+                                borderRadius: '3px',
+                                cursor: 'pointer',
+                                fontSize: '0.8rem',
+                              }}
+                            >
+                              ▶ {animName}
+                            </button>
+                          ))
+                        )}
+                      </div>
+
+                      {/* Layer spread */}
+                      <div style={{ borderTop: '1px solid #3b455c', paddingTop: '0.5rem' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                          <span style={{ fontSize: '0.72rem', color: '#a9b5ca', fontWeight: 'bold', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Layer Spread</span>
+                          <span style={{ fontSize: '0.72rem', color: '#7db8f0' }}>{spineLayerSpread.toFixed(1)}</span>
+                        </div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={0.5}
+                          value={spineLayerSpread}
+                          onChange={(e) => setSpineLayerSpread(parseFloat(e.target.value))}
+                          style={{ width: '100%', accentColor: '#3a7fd4' }}
+                        />
+                      </div>
+
+                      {/* Attachments / slots */}
+                      {spineAllAttachments.length > 0 && (
+                        <div style={{ borderTop: '1px solid #3b455c', paddingTop: '0.5rem' }}>
+                          <div style={{ fontSize: '0.72rem', color: '#a9b5ca', fontWeight: 'bold', padding: '0.25rem 0', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                            Attachments ({spineAllAttachments.length})
+                          </div>
+                          {spineAllAttachments.map((att) => (
+                            <div
+                              key={att.id}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '0.4rem',
+                                padding: '0.2rem 0.4rem',
+                                marginBottom: '2px',
+                                background: '#1c2430',
+                                borderRadius: '3px',
+                                fontSize: '0.75rem',
+                                color: '#9ab',
+                              }}
+                            >
+                              {att.imageDataUrl ? (
+                                <img
+                                  src={att.imageDataUrl}
+                                  alt={att.slotName}
+                                  style={{ width: 24, height: 24, objectFit: 'contain', borderRadius: '2px', background: '#111', flexShrink: 0 }}
+                                />
+                              ) : (
+                                <div style={{ width: 24, height: 24, background: '#333', borderRadius: '2px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.6rem', color: '#666' }}>?</div>
+                              )}
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.slotName}</span>
+                              <span style={{ marginLeft: 'auto', color: '#555', flexShrink: 0 }}>{att.width}×{att.height}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           </aside>
         )}
@@ -3258,7 +3638,9 @@ export function App() {
             setShowCreateSubmenu(null);
           }}
         >
-          <Scene3D
+            <Scene3D
+              drawBezierCurveMode={drawBezierCurveMode}
+              onFinishDrawBezierCurve={handleFinishDrawBezierCurve}
               ref={scene3DRef}
               onCameraChange={(s) => { console.log('CAMERA MOVED'); setParticleCameraState(s); }}
               sceneSize={sceneSize} 
@@ -3284,6 +3666,10 @@ export function App() {
             onCacheFrameCountChange={setCachedFrameCount}
             cacheResetToken={cacheResetToken}
             onUpdateSceneSettings={(updates) => setSceneSettings(prev => ({ ...prev, ...updates }))}
+            spineAttachments={spineAllAttachments}
+            spineFrameOverrides={spineFrameOverrides}
+            spineLayerSpread={spineLayerSpread}
+            quadViewport={quadViewport}
           />
         </main>
 
@@ -3628,18 +4014,7 @@ export function App() {
 
                     {showEmitterProperties && (
                       <div className="subpanel-content">
-                        <button
-                          type="button"
-                          className="apply-button"
-                          onClick={() => {
-                            if (!selectedObject || selectedObject.type !== 'Emitter') return;
-                            const newShape = createEmitterShapeNode(selectedObject.id, selectedObject);
-                            setSceneObjects((prev) => [...prev, newShape]);
-                            setSelectedObjectId(newShape.id);
-                          }}
-                        >
-                          Add Shape Node
-                        </button>
+
 
                         <label htmlFor="emission-rate">
                           Emission Rate: {selectedEmitterProperties.emissionRate} particles/sec
@@ -3655,6 +4030,21 @@ export function App() {
                         />
 
                         <hr style={{ margin: '0.8rem 0', borderColor: '#3b455c' }} />
+
+                        <label htmlFor="emit-spine-attach">Emit from Spine Attachment</label>
+                        <select
+                          id="emit-spine-attach"
+                          value={selectedEmitterProperties.emitFromSpineAttachmentId || ''}
+                          onChange={(e) => handleUpdateEmitterProperty('emitFromSpineAttachmentId', e.target.value)}
+                          style={{ width: '100%', marginBottom: '0.4rem' }}
+                        >
+                          <option value="">None (use emitter position)</option>
+                          {spineAllAttachments.map(att => (
+                            <option key={att.id} value={att.id}>
+                              {att.slotName}
+                            </option>
+                          ))}
+                        </select>
 
                         <div className={`transform-slots ${selectedObject.type === 'Emitter' ? 'compact-emitter' : ''}`}>
 
@@ -3922,77 +4312,6 @@ export function App() {
                   </div>
                 )}
 
-                <hr style={{ margin: '0.8rem 0', borderColor: '#3b455c' }} />
-
-                {selectedActsAsEmitterSource && selectedEmitterShapeProperties && (
-                  <>
-                    <button
-                      type="button"
-                      className="collapsible-section"
-                      onClick={() => setShowEmitterProperties((prev) => !prev)}
-                    >
-                      <span>Shape Source</span>
-                      <span>{showEmitterProperties ? '▾' : '▸'}</span>
-                    </button>
-
-                    {showEmitterProperties && (
-                      <div className="subpanel-content">
-                        <label htmlFor="shape-emitter-type">Shape Type</label>
-                        <select
-                          id="shape-emitter-type"
-                          value={selectedEmitterShapeProperties.emitterType}
-                          onChange={(event) => {
-                            const nextType = event.target.value as EmitterShapeProperties['emitterType'];
-                            const nextMode = normalizeEmissionModeForShape(nextType, selectedEmitterShapeProperties.emissionMode);
-                            handleUpdateEmitterShapeProperty('emitterType', nextType);
-                            handleUpdateEmitterShapeProperty('emissionMode', nextMode);
-                          }}
-                        >
-                          <option value="point">Point</option>
-                          <option value="circle">Circle</option>
-                          <option value="square">Square</option>
-                          <option value="cube">Cube</option>
-                          <option value="ball">Ball</option>
-                          <option value="curve">Curve</option>
-                          <option value="layer">Layer</option>
-                        </select>
-
-                        <label htmlFor="shape-emission-mode">Emission Mode</label>
-                        <select
-                          id="shape-emission-mode"
-                          value={normalizeEmissionModeForShape(selectedEmitterShapeProperties.emitterType, selectedEmitterShapeProperties.emissionMode)}
-                          onChange={(event) => handleUpdateEmitterShapeProperty('emissionMode', event.target.value)}
-                        >
-                          {getEmissionModeOptions(selectedEmitterShapeProperties.emitterType).map((option) => (
-                            <option key={option.value} value={option.value}>{option.label}</option>
-                          ))}
-                        </select>
-
-                        {selectedEmitterShapeProperties.emitterType === 'layer' && (
-                          <>
-                            <label htmlFor="shape-layer-image">Layer Image</label>
-                            <input
-                              id="shape-layer-image"
-                              type="file"
-                              accept="image/*"
-                              onChange={(event) => handleEmitterShapeLayerImageUpload(event.target.files?.[0] ?? null)}
-                            />
-                            {selectedEmitterShapeProperties.layerImageDataUrl && (
-                              <button
-                                type="button"
-                                className="apply-button"
-                                onClick={() => handleUpdateEmitterShapeProperty('layerImageDataUrl', '')}
-                              >
-                                Clear Layer Image
-                              </button>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </>
-                )}
-
                 {selectedObject.type === 'Emitter' && selectedEmitterProperties && (
                   <>
                     <button
@@ -4015,9 +4334,10 @@ export function App() {
                           onChange={(event) => handleUpdateEmitterProperty('particleType', event.target.value)}
                         >
                           <option value="dots">Dots</option>
-                          <option value="stars">Stars</option>
                           <option value="circles">Circles</option>
                           <option value="glow-circles">Glow Circles</option>
+                          <option value="stars">Stars (4-point)</option>
+                          <option value="sparkle">Sparkle (8-point lens flare)</option>
                           <option value="sprites">Sprites</option>
                           <option value="3d-model">Live 3D Model</option>
                         </select>
@@ -4596,6 +4916,22 @@ export function App() {
           >
             🔑
           </button>
+          <label className="timeline-input-group" htmlFor="timeline-fps" style={{ marginLeft: '0.5rem' }}>
+            FPS
+            <input
+              id="timeline-fps"
+              type="number"
+              min={1}
+              max={120}
+              step={1}
+              value={fps}
+              onChange={(e) => {
+                const v = Math.max(1, Math.min(120, Number.parseInt(e.target.value, 10) || 24));
+                setFps(v);
+              }}
+              style={{ width: '3rem' }}
+            />
+          </label>
           <label className="timeline-input-group" htmlFor="timeline-in">
             In
             <input

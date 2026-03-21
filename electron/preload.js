@@ -6,5 +6,6 @@ contextBridge.exposeInMainWorld('vertebrae', {
   onShowProperties: (callback) => {
     ipcRenderer.on('show-properties', callback);
   },
-  saveSpineExport: (payload) => ipcRenderer.invoke('save-spine-export', payload)
+  saveSpineExport: (payload) => ipcRenderer.invoke('save-spine-export', payload),
+  importSpineFile: (opts) => ipcRenderer.invoke('import-spine-file', opts ?? {}),
 });

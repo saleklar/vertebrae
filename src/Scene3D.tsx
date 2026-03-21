@@ -4,7 +4,7 @@ const flippedTextureCache = new WeakMap<THREE.Texture, THREE.Texture>();
 
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
-import { SceneObject, EmitterObject, EmitterShapeObject, SnapSettings, PhysicsForce } from './App';
+import { SceneObject, EmitterObject, SnapSettings, PhysicsForce } from './App';
 
 // --- Simple 3D Noise for Turbulence ---
 const F3 = 1.0 / 3.0;
@@ -96,6 +96,31 @@ const DEFAULT_THETA = Math.PI / 4;
 const DEFAULT_PHI = Math.PI / 4;
 const DEFAULT_EMISSION_AXIS = new THREE.Vector3(0, 1, 0);
 
+export type SpineAttachmentInfo = {
+  id: string;
+  slotName: string;
+  boneObjectId: string;
+  imageDataUrl: string;
+  localX: number;
+  localY: number;
+  localRotationDeg: number;
+  width: number;
+  height: number;
+  scaleX: number;
+  scaleY: number;
+  /** Pre-resolved data URLs for each frame of a sequence attachment */
+  sequenceFrames?: string[];
+  /** Slot order index (0 = back, higher = front) */
+  slotIndex: number;
+  /** Spine blend mode: 'normal' | 'additive' | 'multiply' | 'screen' */
+  blendMode?: string;
+  /** Slot base color as RGBA hex string e.g. 'ffffffff' */
+  color?: string;
+};
+
+/** Per-frame override: visibility + optional sequence frame index + optional animated alpha */
+export type SpineFrameOverrides = Record<string, { visible: boolean; seqFrame?: number; alpha?: number; tintR?: number; tintG?: number; tintB?: number }>;
+
 type Scene3DProps = {
   sceneSize: SceneSize;
   sceneSettings: SceneSettings;
@@ -109,7 +134,7 @@ type Scene3DProps = {
   isPlaying: boolean;
   isCaching: boolean;
   timelineIn: number;
-timelineOut: number;
+  timelineOut: number;
   physicsForces: PhysicsForce[];
   selectedObjectId: string | null;
   selectedForceId?: string | null;
@@ -122,6 +147,12 @@ timelineOut: number;
   cacheResetToken?: number;
   onUpdateSceneSettings?: (settings: Partial<SceneSettings>) => void;
   onCameraChange?: (cameraState: { position: THREE.Vector3, quaternion: THREE.Quaternion }) => void;
+  drawBezierCurveMode?: boolean;
+  onFinishDrawBezierCurve?: () => void;
+  spineAttachments?: SpineAttachmentInfo[];
+  spineFrameOverrides?: SpineFrameOverrides;
+  spineLayerSpread?: number;
+  quadViewport?: boolean;
 };
 
 type CachedParticleState = {
@@ -136,7 +167,7 @@ type CachedParticleState = {
   size: number;
 };
 
-type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sprites' | '3d-model' | 'volumetric-fire';
+type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sparkle' | 'sprites' | '3d-model' | 'volumetric-fire';
 
 export interface Scene3DRef {
   exportSpineData: (options?: any) => any;
@@ -213,7 +244,81 @@ function evaluateCurve(curveJson: string | undefined, t: number, defaultValue: n
   return defaultValue;
 }
 
-export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawComplete, sceneSize, sceneSettings, onCameraChange, snapSettings, viewMode, onViewModeChange, sceneObjects, currentFrame, isPlaying, isCaching, timelineIn, timelineOut, physicsForces, selectedObjectId, selectedForceId, onObjectSelect, onForceSelect, onObjectTransform, onForceTransform, handleScale = 1.0, onCacheFrameCountChange, cacheResetToken = 0, onUpdateSceneSettings }, ref) => {
+export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawComplete, sceneSize, sceneSettings, onCameraChange, snapSettings, viewMode, onViewModeChange, sceneObjects, currentFrame, isPlaying, isCaching, timelineIn, timelineOut, physicsForces, selectedObjectId, selectedForceId, onObjectSelect, onForceSelect, onObjectTransform, onForceTransform, handleScale = 1.0, onCacheFrameCountChange, cacheResetToken = 0, onUpdateSceneSettings, drawBezierCurveMode = false, onFinishDrawBezierCurve, spineAttachments = [], spineFrameOverrides, spineLayerSpread = 0, quadViewport = false }, ref) => {
+    // State for Bezier curve drawing
+    const [bezierCurvePoints, setBezierCurvePoints] = useState<{x: number, y: number, z: number}[]>([]);
+    const bezierCurveMeshRef = useRef<THREE.Line | null>(null);
+
+    // Helper: convert screen (client) coordinates to 3D world position on XZ plane (y=0)
+    function screenToWorld(x: number, y: number): THREE.Vector3 | null {
+      if (!rendererRef.current || !currentCameraRef.current) return null;
+      const rect = rendererRef.current.domElement.getBoundingClientRect();
+      const ndcX = ((x - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -((y - rect.top) / rect.height) * 2 + 1;
+      const ndc = new THREE.Vector3(ndcX, ndcY, 0.5);
+      ndc.unproject(currentCameraRef.current);
+      // Project onto y=0 plane
+      const camera = currentCameraRef.current;
+      const camPos = camera.position.clone();
+      const dir = ndc.clone().sub(camPos).normalize();
+      const t = -camPos.y / dir.y;
+      if (!isFinite(t)) return null;
+      return camPos.clone().add(dir.multiplyScalar(t));
+    }
+
+    // Mouse click handler for Bezier curve drawing
+    useEffect(() => {
+      if (!drawBezierCurveMode) return;
+      const handleClick = (event: MouseEvent) => {
+        if (event.button !== 0) return; // Only LMB
+        if (!rendererRef.current) return;
+        const pos = screenToWorld(event.clientX, event.clientY);
+        if (pos) {
+          setBezierCurvePoints(prev => [...prev, { x: pos.x, y: pos.y, z: pos.z }]);
+        }
+      };
+      window.addEventListener('mousedown', handleClick);
+      return () => window.removeEventListener('mousedown', handleClick);
+    }, [drawBezierCurveMode]);
+
+    // Render/update the Bezier curve as points are added
+    useEffect(() => {
+      if (!sceneRef.current) return;
+      // Remove previous curve
+      if (bezierCurveMeshRef.current) {
+        sceneRef.current.remove(bezierCurveMeshRef.current);
+        bezierCurveMeshRef.current.geometry.dispose();
+        bezierCurveMeshRef.current = null;
+      }
+      if (bezierCurvePoints.length < 2) return;
+      // Create a simple Bezier curve (CatmullRom for now, can upgrade to true Bezier)
+      const curve = new THREE.CatmullRomCurve3(bezierCurvePoints.map(p => new THREE.Vector3(p.x, p.y, p.z)));
+      const curveGeometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(100));
+      const curveMaterial = new THREE.LineBasicMaterial({ color: 0x00ffcc, linewidth: 2 });
+      const curveLine = new THREE.Line(curveGeometry, curveMaterial);
+      sceneRef.current.add(curveLine);
+      bezierCurveMeshRef.current = curveLine;
+    }, [bezierCurvePoints]);
+
+    // Finish drawing (double-click or ESC to complete)
+    useEffect(() => {
+      if (!drawBezierCurveMode) return;
+      const handleFinish = (event: KeyboardEvent | MouseEvent) => {
+        if ((event instanceof KeyboardEvent && event.key === 'Escape') || (event instanceof MouseEvent && event.detail === 2)) {
+          if (bezierCurvePoints.length >= 2) {
+            // TODO: Add curve to scene objects or call onDrawComplete/onFinishDrawBezierCurve
+          }
+          setBezierCurvePoints([]);
+          if (onFinishDrawBezierCurve) onFinishDrawBezierCurve();
+        }
+      };
+      window.addEventListener('keydown', handleFinish);
+      window.addEventListener('dblclick', handleFinish);
+      return () => {
+        window.removeEventListener('keydown', handleFinish);
+        window.removeEventListener('dblclick', handleFinish);
+      };
+    }, [drawBezierCurveMode, bezierCurvePoints, onFinishDrawBezierCurve]);
   const containerRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -260,6 +365,12 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   
   // Scene objects tracking
   const sceneObjectMeshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const spineAttachmentMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
+  const spineLayerSpreadRef = useRef(0);
+  const spineAttachPixelDataRef = useRef<Map<string, { data: Uint8ClampedArray; w: number; h: number } | null>>(new Map());
+  const quadViewportRef = useRef(false);
+  const quadCamerasRef = useRef<{ front: THREE.OrthographicCamera; top: THREE.OrthographicCamera; side: THREE.OrthographicCamera } | null>(null);
+  const sceneExtentRef = useRef(500);
   const physicsForceGizmosRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const particleSystemsRef = useRef<Map<string, {
     particles: Array<{
@@ -342,24 +453,6 @@ const timelineOutRef = useRef(timelineOut);
   const [manipulatorMode, setManipulatorMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const manipulatorModeRef = useRef<'translate' | 'rotate' | 'scale'>('translate');
 
-  const createEmitterDirectionLine = (_emitterType: string, sourceExtent: number) => {
-    const end = DEFAULT_EMISSION_AXIS.clone().multiplyScalar(sourceExtent * 1.4);
-    const directionGeometry = new THREE.BufferGeometry();
-    directionGeometry.setAttribute('position', new THREE.BufferAttribute(
-      new Float32Array([0, 0, 0, end.x, end.y, end.z]),
-      3
-    ));
-
-    const directionMaterial = new THREE.LineBasicMaterial({
-      color: 0xffcc33,
-      transparent: true,
-      opacity: 0.95,
-    });
-
-    const directionLine = new THREE.Line(directionGeometry, directionMaterial);
-    directionLine.name = 'emitter-normal-line';
-    return directionLine;
-  };
 
   const createStandardObjectMesh = (objectType: string) => {
     const meshMaterial = new THREE.MeshStandardMaterial({
@@ -498,6 +591,7 @@ const timelineOutRef = useRef(timelineOut);
     const sceneSizeY = Math.max(100, sceneSize.y || 0);
     const sceneSizeZ = Math.max(100, sceneSize.z || 0);
     const sceneExtent = Math.max(sceneSizeX, sceneSizeY, sceneSizeZ);
+    sceneExtentRef.current = sceneExtent;
 
     const raycaster = new THREE.Raycaster();
     const mouseNdc = new THREE.Vector2();
@@ -541,6 +635,27 @@ const timelineOutRef = useRef(timelineOut);
     renderer.setPixelRatio(window.devicePixelRatio);
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
+    renderer.setScissorTest(true);
+
+    // Quad-viewport cameras (front/top/side orthographic)
+    const _qAspect = width / height;
+    const _qExtent = sceneExtent * 0.75;
+    const _qD = sceneExtent * 8;
+    const _mkOrtho = (aspect: number) =>
+      new THREE.OrthographicCamera(-_qExtent * aspect, _qExtent * aspect, _qExtent, -_qExtent, -_qD, _qD);
+    const _frontCam = _mkOrtho(_qAspect);
+    _frontCam.position.set(0, 0, _qD * 0.5);
+    _frontCam.up.set(0, 1, 0);
+    _frontCam.lookAt(0, 0, 0);
+    const _topCam = _mkOrtho(_qAspect);
+    _topCam.position.set(0, _qD * 0.5, 0);
+    _topCam.up.set(0, 0, -1);
+    _topCam.lookAt(0, 0, 0);
+    const _sideCam = _mkOrtho(_qAspect);
+    _sideCam.position.set(_qD * 0.5, 0, 0);
+    _sideCam.up.set(0, 1, 0);
+    _sideCam.lookAt(0, 0, 0);
+    quadCamerasRef.current = { front: _frontCam, top: _topCam, side: _sideCam };
 
           const stats = new Stats();
 
@@ -1477,100 +1592,164 @@ const timelineOutRef = useRef(timelineOut);
         const textureType = particleType === 'dots' && !customGlow ? 'circles' : particleType;
         const key = `${textureType}:${customGlow ? '1' : '0'}`;
         const cached = particleTextureCache.get(key);
-        if (cached) {
-          return cached;
-        }
+        if (cached) return cached;
 
-        const size = 64;
+        // High-res for glow types, standard for simple shapes
+        const isGlowType = textureType === 'glow-circles' || textureType === 'stars' || textureType === 'sparkle';
+        const size = isGlowType ? 256 : 128;
         const canvas = document.createElement('canvas');
         canvas.width = size;
         canvas.height = size;
         const ctx = canvas.getContext('2d');
         if (!ctx) return undefined;
-
         ctx.clearRect(0, 0, size, size);
-        const center = size / 2;
-        const radius = size * 0.4;
+        const C = size / 2; // center
+        const R = size * 0.45; // max radius
 
-        const makeGlowGradient = () => {
-          const gradient = ctx.createRadialGradient(center, center, 0, center, center, radius * 1.15);
-          gradient.addColorStop(0, 'rgba(255,255,255,1)');
-          gradient.addColorStop(0.45, 'rgba(255,255,255,0.85)');
-          gradient.addColorStop(1, 'rgba(255,255,255,0)');
-          return gradient;
+        // ── Shared helpers ────────────────────────────────────────────────
+        const radGrad = (r0: number, r1: number, stops: [number, string][]) => {
+          const g = ctx.createRadialGradient(C, C, r0, C, C, r1);
+          stops.forEach(([t, c]) => g.addColorStop(t, c));
+          return g;
+        };
+        const fillSpike = (angleRad: number, widthScale: number, lengthScale: number) => {
+          // Draw a very narrow spike rotated to angleRad
+          const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, R * lengthScale);
+          grad.addColorStop(0,   'rgba(255,255,255,1.0)');
+          grad.addColorStop(0.12,'rgba(255,255,255,0.98)');
+          grad.addColorStop(0.4, 'rgba(255,255,255,0.45)');
+          grad.addColorStop(0.8, 'rgba(255,255,255,0.12)');
+          grad.addColorStop(1,   'rgba(255,255,255,0)');
+          ctx.save();
+          ctx.translate(C, C);
+          ctx.rotate(angleRad);
+          ctx.scale(widthScale, lengthScale);
+          ctx.beginPath();
+          ctx.arc(0, 0, R, 0, Math.PI * 2);
+          ctx.fillStyle = grad;
+          ctx.fill();
+          ctx.restore();
         };
 
-        if (textureType === 'stars') {
-          const makeFlare = () => {
-            const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius);
-            grad.addColorStop(0, 'rgba(255,255,255,1)');
-            grad.addColorStop(0.2, 'rgba(255,255,255,0.8)');
-            grad.addColorStop(0.5, 'rgba(255,255,255,0.2)');
-            grad.addColorStop(1, 'rgba(255,255,255,0)');
-            ctx.fillStyle = grad;
-            ctx.beginPath();
-            ctx.arc(0, 0, radius, 0, Math.PI * 2);
-            ctx.fill();
-          };
-
-          ctx.save();
-          if (customGlow) ctx.globalCompositeOperation = 'lighter';
-
-          // Vertical flare
-          ctx.save();
-          ctx.translate(center, center);
-          ctx.scale(0.15, 1.0);
-          makeFlare();
-          ctx.restore();
-
-          // Horizontal flare
-          ctx.save();
-          ctx.translate(center, center);
-          ctx.scale(1.0, 0.15);
-          makeFlare();
-          ctx.restore();
-
-          // Core
-          ctx.save();
-          ctx.translate(center, center);
-          ctx.beginPath();
-          ctx.arc(0, 0, radius * 0.25, 0, Math.PI * 2);
-          const coreGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, radius * 0.25);
-          coreGrad.addColorStop(0, 'rgba(255,255,255,1)');
-          coreGrad.addColorStop(1, 'rgba(255,255,255,0)');
-          ctx.fillStyle = coreGrad;
-          ctx.fill();
-          ctx.restore();
-          
-          ctx.restore();
-        } else if ((textureType === 'sprites' || textureType === '3d-model' || textureType === 'volumetric-fire')) {
-          const gradient = ctx.createRadialGradient(center, center, 0, center, center, radius * 1.2);
-          gradient.addColorStop(0, 'rgba(255,255,255,1)');
-          gradient.addColorStop(0.25, 'rgba(255,255,255,0.95)');
-          gradient.addColorStop(0.6, 'rgba(255,255,255,0.5)');
-          gradient.addColorStop(1, 'rgba(255,255,255,0)');
-          ctx.fillStyle = gradient;
+        if (textureType === 'glow-circles') {
+          // ── Premium Bloom bokeh circle: 3 concentric gradient layers ──────────
+          // Layer 1 – super wide, very soft halo for deep bloom
+          ctx.fillStyle = radGrad(0, R, [
+            [0,    'rgba(255,255,255,1.0)'],
+            [0.15, 'rgba(255,255,255,0.85)'],
+            [0.35, 'rgba(255,255,255,0.45)'],
+            [0.65, 'rgba(255,255,255,0.15)'],
+            [1.0,  'rgba(255,255,255,0)'],
+          ]);
           ctx.fillRect(0, 0, size, size);
-        } else if (textureType === 'glow-circles') {
-          ctx.beginPath();
-          ctx.arc(center, center, radius, 0, Math.PI * 2);
-          ctx.closePath();
-          ctx.fillStyle = makeGlowGradient();
-          ctx.fill();
+          // Layer 2 – bright mid corona (additive blend)
+          if (customGlow) ctx.globalCompositeOperation = 'lighter';
+          ctx.fillStyle = radGrad(0, R * 0.45, [
+            [0,   'rgba(255,255,255,1.0)'],
+            [0.4, 'rgba(255,255,255,0.7)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+          // Layer 3 – intense hot white core
+          ctx.fillStyle = radGrad(0, R * 0.15, [
+            [0,   'rgba(255,255,255,1.0)'],
+            [0.6, 'rgba(255,255,255,0.95)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+
+        } else if (textureType === 'stars') {
+          // ── 4-point starburst lens flare (enhanced) ──────────────────────────────
+          // Background bloom halo
+          ctx.fillStyle = radGrad(0, R, [
+            [0,   'rgba(255,255,255,0.80)'],
+            [0.2, 'rgba(255,255,255,0.45)'],
+            [0.55, 'rgba(255,255,255,0.15)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+          if (customGlow) ctx.globalCompositeOperation = 'lighter';
+          // 4 primary cross spikes – slightly thicker & longer
+          fillSpike(0,           0.065, 1.7);
+          fillSpike(Math.PI / 2, 0.065, 1.7);
+          // 4 diagonal secondary spikes – shorter
+          fillSpike(Math.PI / 4,       0.035, 1.15);
+          fillSpike(Math.PI * 3 / 4,   0.035, 1.15);
+          // Bright, sharp core
+          ctx.fillStyle = radGrad(0, R * 0.18, [
+            [0,   'rgba(255,255,255,1.0)'],
+            [0.5, 'rgba(255,255,255,0.9)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+
+        } else if (textureType === 'sparkle') {
+          // ── 8-point lens-flare sparkle (enhanced dynamic range) ────────────
+          // Massive bloom aura
+          ctx.fillStyle = radGrad(0, R, [
+            [0,    'rgba(255,255,255,0.9)'],
+            [0.15, 'rgba(255,255,255,0.65)'],
+            [0.4,  'rgba(255,255,255,0.25)'],
+            [0.75, 'rgba(255,255,255,0.08)'],
+            [1.0,  'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+          ctx.globalCompositeOperation = 'lighter';
+          // 4 extra-long primary spikes
+          fillSpike(0,              0.040, 2.0);
+          fillSpike(Math.PI / 2,    0.040, 2.0);
+          // 4 medium diagonal spikes
+          fillSpike(Math.PI / 4,         0.028, 1.35);
+          fillSpike(Math.PI * 3 / 4,     0.028, 1.35);
+          // 4 short tertiary spikes
+          fillSpike(Math.PI / 8,         0.018, 0.85);
+          fillSpike(Math.PI * 3 / 8,     0.018, 0.85);
+          fillSpike(Math.PI * 5 / 8,     0.018, 0.85);
+          fillSpike(Math.PI * 7 / 8,     0.018, 0.85);
+          // Chromatic inner halo
+          ctx.fillStyle = radGrad(0, R * 0.35, [
+            [0,   'rgba(255,255,255,1.0)'],
+            [0.4, 'rgba(255,255,255,0.8)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+          // Blinding PIN/core
+          ctx.fillStyle = radGrad(0, R * 0.08, [
+            [0,   'rgba(255,255,255,1.0)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+
+        } else if (textureType === 'sprites' || textureType === '3d-model' || textureType === 'volumetric-fire') {
+          ctx.fillStyle = radGrad(0, R * 1.1, [
+            [0,    'rgba(255,255,255,1.0)'],
+            [0.25, 'rgba(255,255,255,0.98)'],
+            [0.6,  'rgba(255,255,255,0.6)'],
+            [1,    'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+
+        } else if (customGlow) {
+          // simple dots / circles with glow enabled → dense bloom version
+          ctx.fillStyle = radGrad(0, R, [
+            [0,    'rgba(255,255,255,1.0)'],
+            [0.2,  'rgba(255,255,255,0.85)'],
+            [0.5,  'rgba(255,255,255,0.4)'],
+            [0.8,  'rgba(255,255,255,0.1)'],
+            [1,    'rgba(255,255,255,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+
         } else {
-          if (customGlow) {
-            ctx.beginPath();
-            ctx.arc(center, center, radius, 0, Math.PI * 2);
-            ctx.closePath();
-            ctx.fillStyle = makeGlowGradient();
-            ctx.fill();
-          } else {
-            ctx.beginPath();
-            ctx.arc(center, center, radius, 0, Math.PI * 2);
-            ctx.closePath();
-            ctx.fillStyle = 'rgba(255,255,255,1)';
-            ctx.fill();
-          }
+          // plain crisp dot, softened edge for AA
+          ctx.beginPath();
+          ctx.arc(C, C, R * 0.82, 0, Math.PI * 2);
+          ctx.fillStyle = radGrad(0, R * 0.82, [
+            [0,   'rgba(255,255,255,1.0)'],
+            [0.85, 'rgba(255,255,255,0.98)'],
+            [1,   'rgba(255,255,255,0)'],
+          ]);
+          ctx.fill();
         }
 
         const texture = new THREE.CanvasTexture(canvas);
@@ -1619,23 +1798,24 @@ const timelineOutRef = useRef(timelineOut);
         }
       };
 
-      const previewMode = sceneSettingsRef.current.particlePreviewMode ?? 'real';
-      const isWhiteDotPreview = previewMode === 'white-dots';
-      const previewDotSize = Math.max(0.2, Number(sceneSettingsRef.current.particlePreviewSize ?? 1.2));
-
       const getPreviewedParticleType = (particleType: ParticleVisualType): ParticleVisualType => {
+        const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
         return isWhiteDotPreview ? 'dots' : particleType;
       };
 
       const getPreviewedParticleColor = (color: string) => {
+        const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
         return isWhiteDotPreview ? '#ffffff' : color;
       };
 
       const getPreviewedParticleSize = (size: number) => {
+        const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
+        const previewDotSize = Math.max(0.2, Number(sceneSettingsRef.current.particlePreviewSize ?? 1.2));
         return isWhiteDotPreview ? previewDotSize : size;
       };
 
       const getPreviewedGlow = (customGlow: boolean) => {
+        const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
         return isWhiteDotPreview ? false : customGlow;
       };
 
@@ -1693,7 +1873,7 @@ const timelineOutRef = useRef(timelineOut);
           blendMode: string = 'normal'
       ) => {
         const resolvedParticleType = (particleType ?? 'dots') as ParticleVisualType;
-        const shouldUseSprite = resolvedParticleType === 'circles' || resolvedParticleType === 'glow-circles' || resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'stars' || resolvedParticleType === 'volumetric-fire';
+        const shouldUseSprite = resolvedParticleType === 'circles' || resolvedParticleType === 'glow-circles' || resolvedParticleType === 'sparkle' || resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'stars' || resolvedParticleType === 'volumetric-fire';
         const texture = getParticleTexture(resolvedParticleType, customGlow);
 
         if (shouldUseSprite) {
@@ -1915,41 +2095,9 @@ const timelineOutRef = useRef(timelineOut);
               const maxContinuousEmission = (particleBudget / totalEmitters) / Math.max(0.1, emitterLifetimeBase);
               const safeEmissionRate = isAdaptive ? Math.min(rawSafeEmissionRate, maxContinuousEmission) : rawSafeEmissionRate;
               const emissionInterval = 1000 / safeEmissionRate;
-              const inferEmitterTypeFromSource = (source: SceneObject): string => {
-                if (source.type === 'EmitterShape') {
-                  const shapeProps = (source.properties ?? {}) as Record<string, any>;
-                  return String(shapeProps.emitterType ?? 'point');
-                }
 
-                if (source.type === 'Cube') return 'cube';
-                if (source.type === 'Sphere') return 'ball';
-                if (source.type === 'Circle') return 'circle';
-                if (source.type === 'Rectangle' || source.type === 'Triangle' || source.type === 'Polygon' || source.type === 'Plane') return 'square';
-                if (source.type === 'Line' || source.type === 'Arc' || source.type === 'DrawnPath' || source.type === 'Path') return 'curve';
-                                  if (source.type === 'Cylinder' || source.type === 'Cone' || source.type === 'Torus') return 'ball';
-                  if (source.type === 'Spine' || source.type === 'Animator3D' || source.type === '3DModel') return 'mesh_bounds';
-                return 'point';
-              };
-
-              const linkedSourceNodes = sceneObjectsRef.current.filter((source) => (
-                source.parentId === obj.id && source.type !== 'Emitter'
-              ));
-              const activeSources = linkedSourceNodes.length > 0
-                ? linkedSourceNodes
-                : [{
-                  id: obj.id,
-                  name: obj.name,
-                  type: 'EmitterShape',
-                  parentId: null,
-                  position: obj.position,
-                  rotation: obj.rotation,
-                  scale: obj.scale,
-                  properties: {
-                    emitterType: emitterProps.emitterType ?? 'point',
-                    emissionMode: emitterProps.emissionMode ?? 'volume',
-                    layerImageDataUrl: emitterProps.layerImageDataUrl ?? '',
-                  },
-                } as EmitterShapeObject];
+              // Only use the Emitter itself as the emission source
+              const activeSources = [obj];
               const sourceExtent = 25;
 
               // Emit new particles when playing or actively caching
@@ -1961,7 +2109,7 @@ const timelineOutRef = useRef(timelineOut);
                 
                 const sourceNode = activeSources[Math.floor(Math.random() * activeSources.length)];
                 const sourceProps = (sourceNode.properties ?? {}) as Record<string, any>;
-                const emitterType = sourceProps.emitterType ?? inferEmitterTypeFromSource(sourceNode);
+                const emitterType = sourceProps.emitterType ?? 'point';
                 const emissionMode = sourceProps.emissionMode ?? emitterProps.emissionMode ?? 'volume';
                 const isSurfaceMode = emissionMode === 'surface';
                 const isEdgeMode = emissionMode === 'edge';
@@ -2166,8 +2314,43 @@ const timelineOutRef = useRef(timelineOut);
                   localNormal.set(0, 1, 0);
                 }
 
-                const spawnPosition = sourceMesh.localToWorld(localOffset.clone());
-                
+                // Determine spawn position.
+                // When emitFromSpineAttachmentId is set, sample a random opaque pixel
+                // from that attachment's alpha map. If the attachment is not selected,
+                // not yet loaded, or all sampled pixels are transparent, fall back to
+                // the emitter's own world position so it always emits.
+                const _spineEmitId = (emitterProps.emitFromSpineAttachmentId as string | undefined) || '';
+                let spawnPosition: THREE.Vector3;
+                if (_spineEmitId) {
+                  const attMesh = spineAttachmentMeshesRef.current.get(_spineEmitId);
+                  const pixData = spineAttachPixelDataRef.current.get(_spineEmitId);
+                  let foundSpinePos: THREE.Vector3 | null = null;
+                  if (attMesh && pixData) {
+                    const { data, w, h } = pixData;
+                    for (let _t = 0; _t < 32; _t++) {
+                      const su = Math.random(), sv = Math.random();
+                      const px = Math.min(Math.floor(su * w), w - 1);
+                      const py = Math.min(Math.floor(sv * h), h - 1);
+                      if (data[(py * w + px) * 4 + 3] > 10) {
+                        const geom = attMesh.geometry as THREE.PlaneGeometry;
+                        foundSpinePos = attMesh.localToWorld(
+                          new THREE.Vector3(
+                            (su - 0.5) * geom.parameters.width,
+                            (0.5 - sv) * geom.parameters.height,
+                            0
+                          )
+                        );
+                        break;
+                      }
+                    }
+                  }
+                  // Fall back to emitter position if attachment not ready / all transparent
+                  spawnPosition = foundSpinePos ?? sourceMesh.localToWorld(localOffset.clone());
+                } else {
+                  // No spine attachment selected — always use original emitter position
+                  spawnPosition = sourceMesh.localToWorld(localOffset.clone());
+                }
+
                 // Get particle properties from emitter
                 const emitterColor = emitterProps.particleColor ?? '#ffffff';
                 const emitterSize = emitterProps.particleSize ?? 0.8;
@@ -2574,7 +2757,7 @@ const timelineOutRef = useRef(timelineOut);
                 particle.rotation = emitterRotation + (particle.rotationOffset ?? 0) + particle.rotationSpeed * particle.age;
 
                 const effectiveParticleType = getPreviewedParticleType(emitterParticleType);
-                const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars';
+                const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sparkle' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars' || effectiveParticleType === 'volumetric-fire';
                 const needsMeshSwap = expectedSprite !== (particle.mesh instanceof THREE.Sprite);
                 const currentEmitterFps = getResampledSequenceProps(emitterProps, sceneSettingsRef.current.particleSequenceBudget, sceneSettingsRef.current.particleSequenceBudgetLoop).fps;
                 if (needsMeshSwap) {
@@ -2646,6 +2829,7 @@ const timelineOutRef = useRef(timelineOut);
                 setParticleRotation(particle.mesh, particle.rotation);
 
                 if (particle.colorOverLife) {
+                  const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
                   if (isWhiteDotPreview) {
                     material.color.copy(new THREE.Color('#ffffff'));
                   } else {
@@ -2659,6 +2843,8 @@ const timelineOutRef = useRef(timelineOut);
 
                 const sizeOverLife = particle.sizeOverLife ?? 'none';
                 const baseSize = particle.baseSize ?? 3;
+                const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
+                const previewDotSize = Math.max(0.2, Number(sceneSettingsRef.current.particlePreviewSize ?? 1.2));
                 if (isWhiteDotPreview) {
                   setParticleSize(particle.mesh, previewDotSize, particle.flipX);
                 } else if (sizeOverLife === 'curve') {
@@ -2753,7 +2939,67 @@ const timelineOutRef = useRef(timelineOut);
 Emitters: ${numEmitters}`;
       }
 
-      renderer.render(scene, activeCamera);
+      // ── Spine layer Z spread + renderOrder (zero matrix traversal) ──
+      // All spine bone positions have z=0, so world Z of each plane = 1 + slotIndex * spread.
+      // renderOrder is flipped when the camera is behind the rig (camera.z < 1).
+      const _spineMap = spineAttachmentMeshesRef.current;
+      const spread = spineLayerSpreadRef.current;
+      const camBehind = activeCamera.position.z < 1;
+      if (_spineMap.size > 0) {
+        _spineMap.forEach((mesh) => {
+          const si: number = mesh.userData.slotIndex ?? 0;
+          mesh.position.z = 1 + si * spread;
+          mesh.renderOrder = camBehind ? -si : si;
+        });
+      }
+
+      // ── Particle renderOrder: slot into spine layer Z space ──────────
+      // When spread > 0, each particle's world Z maps to a fractional spine slot.
+      // This allows particles to appear between — or in front of / behind — individual
+      // spine layers rather than all landing behind or all on top.
+      if (spread > 0.0001) {
+        const invSpread = 1 / spread;
+        particleSystemsRef.current.forEach((system) => {
+          system.particles.forEach((p) => {
+            const slot = (p.mesh.position.z - 1) * invSpread;
+            p.mesh.renderOrder = camBehind ? -slot : slot;
+          });
+        });
+      }
+
+      if (quadViewportRef.current && quadCamerasRef.current) {
+        // ── Quad viewport (Maya-style) ───────────────────────────────
+        const rW = renderer.domElement.clientWidth;
+        const rH = renderer.domElement.clientHeight;
+        const qW = Math.floor(rW / 2);
+        const qH = Math.floor(rH / 2);
+        const { front, top, side } = quadCamerasRef.current;
+        // Top-left: overhead (top) view
+        renderer.setScissor(0, rH - qH, qW, qH);
+        renderer.setViewport(0, rH - qH, qW, qH);
+        renderer.render(scene, top);
+        // Top-right: front view
+        renderer.setScissor(rW - qW, rH - qH, qW, qH);
+        renderer.setViewport(rW - qW, rH - qH, qW, qH);
+        renderer.render(scene, front);
+        // Bottom-left: side view
+        renderer.setScissor(0, 0, qW, qH);
+        renderer.setViewport(0, 0, qW, qH);
+        renderer.render(scene, side);
+        // Bottom-right: perspective
+        renderer.setScissor(rW - qW, 0, qW, qH);
+        renderer.setViewport(rW - qW, 0, qW, qH);
+        renderer.render(scene, activeCamera);
+        // Restore full viewport
+        renderer.setScissor(0, 0, rW, rH);
+        renderer.setViewport(0, 0, rW, rH);
+      } else {
+        const rW = renderer.domElement.clientWidth;
+        const rH = renderer.domElement.clientHeight;
+        renderer.setScissor(0, 0, rW, rH);
+        renderer.setViewport(0, 0, rW, rH);
+        renderer.render(scene, activeCamera);
+      }
     };
     animate();
 
@@ -2768,6 +3014,23 @@ Emitters: ${numEmitters}`;
         camera.updateProjectionMatrix();
       }
       
+      // Update quad ortho cameras aspect
+      if (quadCamerasRef.current) {
+        const newAspect = newWidth / newHeight;
+        const se = sceneExtentRef.current;
+        const ext = se * 0.75;
+        const updateOrtho = (cam: THREE.OrthographicCamera) => {
+          cam.left = -ext * newAspect;
+          cam.right = ext * newAspect;
+          cam.top = ext;
+          cam.bottom = -ext;
+          cam.updateProjectionMatrix();
+        };
+        updateOrtho(quadCamerasRef.current.front);
+        updateOrtho(quadCamerasRef.current.top);
+        updateOrtho(quadCamerasRef.current.side);
+      }
+
       renderer.setSize(newWidth, newHeight);
     };
     window.addEventListener('resize', handleResize);
@@ -2882,6 +3145,11 @@ Emitters: ${numEmitters}`;
     }
   }, [viewMode, sceneSize]);
 
+  // Sync quadViewport prop into ref (read by render loop without causing re-renders)
+  useEffect(() => {
+    quadViewportRef.current = quadViewport;
+  }, [quadViewport]);
+
   // Clear particles when stopped (frame reset to 0)
   useEffect(() => {
     if (!sceneRef.current || currentFrame !== 0 || isPlaying) return;
@@ -2942,191 +3210,52 @@ Emitters: ${numEmitters}`;
     sceneObjects.forEach(obj => {
       if (!sceneObjectMeshesRef.current.has(obj.id)) {
         let mesh: THREE.Object3D | null = null;
-        
-        if (obj.type === 'Path') { mesh = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 })); (mesh as any).isPathRender = true; scene.add(mesh); } else if (obj.type === 'PathPoint') { mesh = new THREE.Mesh(new THREE.BoxGeometry(6, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.8 })); (mesh as any).isPathPointRender = true; scene.add(mesh); } else if (obj.type === 'Emitter' || obj.type === 'EmitterShape') {
-          // Create visual representation based on emitter type
-          const emitterGroup = new THREE.Group();
-          const lineMaterial = new THREE.LineBasicMaterial({ 
-            color: 0xff6600,
-            transparent: true,
-            opacity: 0.7
-          });
 
-          const isEmitterRoot = obj.type === 'Emitter';
-          const hasLinkedShapes = isEmitterRoot && sceneObjects.some((candidate) => (
-            candidate.type === 'EmitterShape' && candidate.parentId === obj.id
+        if (obj.type === 'Path') {
+          mesh = new THREE.Line(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 }));
+          (mesh as any).isPathRender = true;
+          scene.add(mesh);
+        } else if (obj.type === 'PathPoint') {
+          mesh = new THREE.Mesh(new THREE.BoxGeometry(6, 6, 6), new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true, transparent: true, opacity: 0.8 }));
+          (mesh as any).isPathPointRender = true;
+          scene.add(mesh);
+        } else if (obj.type === 'EmitterShape') {
+          // EmitterShape is a data-only child node — no 3D visual representation needed
+          mesh = null;
+        } else if (obj.type === 'Emitter') {
+          // Render Emitter as a 3D crosshair only
+          const crosshairGroup = new THREE.Group();
+          const lineMaterial = new THREE.LineBasicMaterial({ color: 0xff6600, transparent: true, opacity: 0.9 });
+          const size = 18;
+          const crossGeometry = new THREE.BufferGeometry();
+          crossGeometry.setAttribute('position', new THREE.BufferAttribute(
+            new Float32Array([
+              -size, 0, 0, size, 0, 0,
+              0, -size, 0, 0, size, 0,
+              0, 0, -size, 0, 0, size,
+            ]),
+            3
           ));
-          const emitterType = hasLinkedShapes ? '__root__' : ((obj.properties as any).emitterType ?? 'point');
-          const sourceExtent = 25; // Match the spawn logic value
-
-          if (emitterType === '__root__') {
-            const rootGeometry = new THREE.BufferGeometry();
-            rootGeometry.setAttribute('position', new THREE.BufferAttribute(
-              new Float32Array([
-                -6, 0, 0, 6, 0, 0,
-                0, -6, 0, 0, 6, 0,
-                0, 0, -6, 0, 0, 6,
-              ]),
-              3
-            ));
-            emitterGroup.add(new THREE.LineSegments(rootGeometry, lineMaterial));
-          } else if (emitterType === 'point') {
-            // Small sphere for point emitter
-            const sphereGeometry = new THREE.IcosahedronGeometry(5, 1);
-            const pointMesh = new THREE.LineSegments(
-              sphereGeometry,
-              lineMaterial
-            );
-            emitterGroup.add(pointMesh);
-          } else if (emitterType === 'circle') {
-            // Wireframe disk in XZ plane
-            const circleRadius = sourceExtent;
-            const circlePoints = [];
-            for (let i = 0; i <= 32; i++) {
-              const angle = (i / 32) * Math.PI * 2;
-              circlePoints.push(Math.cos(angle) * circleRadius, 0, Math.sin(angle) * circleRadius);
-            }
-            const circleGeometry = new THREE.BufferGeometry();
-            circleGeometry.setAttribute('position', new THREE.BufferAttribute(
-              new Float32Array(circlePoints),
-              3
-            ));
-            const circleLine = new THREE.Line(circleGeometry, lineMaterial);
-            emitterGroup.add(circleLine);
-            
-            // Add radial lines to show disk filling
-            for (let i = 0; i < 8; i++) {
-              const angle = (i / 8) * Math.PI * 2;
-              const radialGeometry = new THREE.BufferGeometry();
-              radialGeometry.setAttribute('position', new THREE.BufferAttribute(
-                new Float32Array([0, 0, 0, Math.cos(angle) * circleRadius, 0, Math.sin(angle) * circleRadius]),
-                3
-              ));
-              const radialLine = new THREE.Line(radialGeometry, lineMaterial);
-              emitterGroup.add(radialLine);
-            }
-          } else if (emitterType === 'square') {
-            // Wireframe square in XZ plane
-            const halfExtent = sourceExtent;
-            const squarePoints = [
-              -halfExtent, 0, -halfExtent,
-              halfExtent, 0, -halfExtent,
-              halfExtent, 0, halfExtent,
-              -halfExtent, 0, halfExtent,
-              -halfExtent, 0, -halfExtent
-            ];
-            const squareGeometry = new THREE.BufferGeometry();
-            squareGeometry.setAttribute('position', new THREE.BufferAttribute(
-              new Float32Array(squarePoints),
-              3
-            ));
-            const squareLine = new THREE.Line(squareGeometry, lineMaterial);
-            emitterGroup.add(squareLine);
-            
-            // Add grid lines
-            for (let i = -2; i <= 2; i++) {
-              if (i !== 0) { // Skip center (already in outline)
-                const offset = (i * halfExtent) / 2;
-                // Vertical lines (parallel to Z)
-                const vGeometry = new THREE.BufferGeometry();
-                vGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array([-halfExtent, 0, offset, halfExtent, 0, offset]),
-                  3
-                ));
-                emitterGroup.add(new THREE.Line(vGeometry, lineMaterial));
-                
-                // Horizontal lines (parallel to X)
-                const hGeometry = new THREE.BufferGeometry();
-                hGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array([offset, 0, -halfExtent, offset, 0, halfExtent]),
-                  3
-                ));
-                emitterGroup.add(new THREE.Line(hGeometry, lineMaterial));
-              }
-            }
-          } else if (emitterType === 'cube') {
-            // Wireframe cube
-            const halfExtent = sourceExtent;
-            const cubeGeometry = new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2);
-            const cubeMesh = new THREE.LineSegments(cubeGeometry, lineMaterial);
-            emitterGroup.add(cubeMesh);
-          } else if (emitterType === 'ball') {
-            // Wireframe sphere
-            const sphereGeometry = new THREE.IcosahedronGeometry(sourceExtent, 3);
-            const sphereMesh = new THREE.LineSegments(sphereGeometry, lineMaterial);
-            emitterGroup.add(sphereMesh);
-          } else if (emitterType === 'curve') {
-            // Placeholder: simple curved line
-            const curvePoints = [];
-            for (let i = 0; i <= 32; i++) {
-              const t = i / 32;
-              const angle = t * Math.PI * 2;
-              const x = Math.cos(angle) * sourceExtent * (1 - t * 0.5);
-              const y = (t - 0.5) * sourceExtent;
-              const z = Math.sin(angle) * sourceExtent * (1 - t * 0.5);
-              curvePoints.push(x, y, z);
-            }
-            const curveGeometry = new THREE.BufferGeometry();
-            curveGeometry.setAttribute('position', new THREE.BufferAttribute(
-              new Float32Array(curvePoints),
-              3
-            ));
-            const curveLine = new THREE.Line(curveGeometry, lineMaterial);
-            emitterGroup.add(curveLine);
-          } else if (emitterType === 'layer') {
-            // Placeholder: plane to represent image-based emission
-            const halfExtent = sourceExtent;
-            const planePoints = [
-              -halfExtent, 0, -halfExtent,
-              halfExtent, 0, -halfExtent,
-              halfExtent, 0, halfExtent,
-              -halfExtent, 0, halfExtent,
-              -halfExtent, 0, -halfExtent
-            ];
-            const planeGeometry = new THREE.BufferGeometry();
-            planeGeometry.setAttribute('position', new THREE.BufferAttribute(
-              new Float32Array(planePoints),
-              3
-            ));
-            const planeLine = new THREE.Line(planeGeometry, lineMaterial);
-            emitterGroup.add(planeLine);
-            
-            // Add dashed appearance with small crosses
-            for (let i = 0; i < 5; i++) {
-              for (let j = 0; j < 5; j++) {
-                const x = (i / 4 - 0.5) * 2 * halfExtent;
-                const z = (j / 4 - 0.5) * 2 * halfExtent;
-                const crossSize = 5;
-                
-                const crossGeometry = new THREE.BufferGeometry();
-                crossGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array([
-                    x - crossSize, 0, z, x + crossSize, 0, z,
-                    x, 0, z - crossSize, x, 0, z + crossSize
-                  ]),
-                  3
-                ));
-                emitterGroup.add(new THREE.LineSegments(crossGeometry, lineMaterial));
-              }
-            }
+          crosshairGroup.add(new THREE.LineSegments(crossGeometry, lineMaterial));
+          mesh = crosshairGroup;
+          // Ensure a particle system exists for this emitter
+          if (!particleSystemsRef.current.has(obj.id)) {
+            particleSystemsRef.current.set(obj.id, { particles: [], lastEmit: Date.now() });
           }
-          emitterGroup.add(createEmitterDirectionLine(emitterType, sourceExtent));
-          
-          // Wrap in another group for transform compatibility
-          mesh = new THREE.Group();
-          (mesh as any).userData.emitterType = emitterType;
-          mesh.add(emitterGroup);
-          
-          if (isEmitterRoot) {
-            particleSystemsRef.current.set(obj.id, {
-              particles: [],
-              lastEmit: Date.now()
-            });
-          }
+        } else if (obj.type === 'Bone') {
+          // Render bone as a small yellow diamond (octahedron) with thin bone-spine line toward parent
+          const boneGroup = new THREE.Group();
+          const diamondGeo = new THREE.OctahedronGeometry(7, 0);
+          const diamondMat = new THREE.MeshBasicMaterial({ color: 0xffe066, transparent: true, opacity: 0.85, depthTest: false });
+          boneGroup.add(new THREE.Mesh(diamondGeo, diamondMat));
+          // Wireframe overlay for crisp edge visibility
+          const wireframeMat = new THREE.LineBasicMaterial({ color: 0xffd700, transparent: true, opacity: 1, depthTest: false });
+          boneGroup.add(new THREE.LineSegments(new THREE.WireframeGeometry(diamondGeo), wireframeMat));
+          mesh = boneGroup;
         } else {
           mesh = createStandardObjectMesh(obj.type);
         }
-        
+
         if (mesh) {
           mesh.position.set(obj.position.x, obj.position.y, obj.position.z);
           mesh.rotation.set(obj.rotation.x, obj.rotation.y, obj.rotation.z);
@@ -3138,168 +3267,29 @@ Emitters: ${numEmitters}`;
         // Check if emitter type changed, if so rebuild the mesh
         const mesh = sceneObjectMeshesRef.current.get(obj.id);
         if (obj.type === 'Emitter' && mesh) {
-          const storedEmitterType = (mesh as any).userData.emitterType;
-          const currentEmitterType = (obj.properties as any).emitterType ?? 'point';
-          
-          if (storedEmitterType !== currentEmitterType) {
-            // Remove old mesh and recreate
-            scene.remove(mesh);
-            sceneObjectMeshesRef.current.delete(obj.id);
-            
-            // Add it back to be recreated in the next iteration or add it directly
-            let newMesh: THREE.Object3D | null = null;
-            {
-              const emitterGroup = new THREE.Group();
-              const lineMaterial = new THREE.LineBasicMaterial({ 
-                color: 0xff6600,
-                transparent: true,
-                opacity: 0.7
-              });
-              
-              const emitterType = currentEmitterType;
-              const sourceExtent = 25;
-              
-              if (emitterType === 'point') {
-                const sphereGeometry = new THREE.IcosahedronGeometry(5, 1);
-                const pointMesh = new THREE.LineSegments(sphereGeometry, lineMaterial);
-                emitterGroup.add(pointMesh);
-              } else if (emitterType === 'circle') {
-                const circleRadius = sourceExtent;
-                const circlePoints = [];
-                for (let i = 0; i <= 32; i++) {
-                  const angle = (i / 32) * Math.PI * 2;
-                  circlePoints.push(Math.cos(angle) * circleRadius, 0, Math.sin(angle) * circleRadius);
-                }
-                const circleGeometry = new THREE.BufferGeometry();
-                circleGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array(circlePoints),
-                  3
-                ));
-                const circleLine = new THREE.Line(circleGeometry, lineMaterial);
-                emitterGroup.add(circleLine);
-                
-                for (let i = 0; i < 8; i++) {
-                  const angle = (i / 8) * Math.PI * 2;
-                  const radialGeometry = new THREE.BufferGeometry();
-                  radialGeometry.setAttribute('position', new THREE.BufferAttribute(
-                    new Float32Array([0, 0, 0, Math.cos(angle) * circleRadius, 0, Math.sin(angle) * circleRadius]),
-                    3
-                  ));
-                  const radialLine = new THREE.Line(radialGeometry, lineMaterial);
-                  emitterGroup.add(radialLine);
-                }
-              } else if (emitterType === 'square') {
-                const halfExtent = sourceExtent;
-                const squarePoints = [
-                  -halfExtent, 0, -halfExtent,
-                  halfExtent, 0, -halfExtent,
-                  halfExtent, 0, halfExtent,
-                  -halfExtent, 0, halfExtent,
-                  -halfExtent, 0, -halfExtent
-                ];
-                const squareGeometry = new THREE.BufferGeometry();
-                squareGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array(squarePoints),
-                  3
-                ));
-                const squareLine = new THREE.Line(squareGeometry, lineMaterial);
-                emitterGroup.add(squareLine);
-                
-                for (let i = -2; i <= 2; i++) {
-                  if (i !== 0) {
-                    const offset = (i * halfExtent) / 2;
-                    const vGeometry = new THREE.BufferGeometry();
-                    vGeometry.setAttribute('position', new THREE.BufferAttribute(
-                      new Float32Array([-halfExtent, 0, offset, halfExtent, 0, offset]),
-                      3
-                    ));
-                    emitterGroup.add(new THREE.Line(vGeometry, lineMaterial));
-                    
-                    const hGeometry = new THREE.BufferGeometry();
-                    hGeometry.setAttribute('position', new THREE.BufferAttribute(
-                      new Float32Array([offset, 0, -halfExtent, offset, 0, halfExtent]),
-                      3
-                    ));
-                    emitterGroup.add(new THREE.Line(hGeometry, lineMaterial));
-                  }
-                }
-              } else if (emitterType === 'cube') {
-                const halfExtent = sourceExtent;
-                const cubeGeometry = new THREE.BoxGeometry(halfExtent * 2, halfExtent * 2, halfExtent * 2);
-                const cubeMesh = new THREE.LineSegments(cubeGeometry, lineMaterial);
-                emitterGroup.add(cubeMesh);
-              } else if (emitterType === 'ball') {
-                const sphereGeometry = new THREE.IcosahedronGeometry(sourceExtent, 3);
-                const sphereMesh = new THREE.LineSegments(sphereGeometry, lineMaterial);
-                emitterGroup.add(sphereMesh);
-              } else if (emitterType === 'curve') {
-                const curvePoints = [];
-                for (let i = 0; i <= 32; i++) {
-                  const t = i / 32;
-                  const angle = t * Math.PI * 2;
-                  const x = Math.cos(angle) * sourceExtent * (1 - t * 0.5);
-                  const y = (t - 0.5) * sourceExtent;
-                  const z = Math.sin(angle) * sourceExtent * (1 - t * 0.5);
-                  curvePoints.push(x, y, z);
-                }
-                const curveGeometry = new THREE.BufferGeometry();
-                curveGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array(curvePoints),
-                  3
-                ));
-                const curveLine = new THREE.Line(curveGeometry, lineMaterial);
-                emitterGroup.add(curveLine);
-              } else if (emitterType === 'layer') {
-                const halfExtent = sourceExtent;
-                const planePoints = [
-                  -halfExtent, 0, -halfExtent,
-                  halfExtent, 0, -halfExtent,
-                  halfExtent, 0, halfExtent,
-                  -halfExtent, 0, halfExtent,
-                  -halfExtent, 0, -halfExtent
-                ];
-                const planeGeometry = new THREE.BufferGeometry();
-                planeGeometry.setAttribute('position', new THREE.BufferAttribute(
-                  new Float32Array(planePoints),
-                  3
-                ));
-                const planeLine = new THREE.Line(planeGeometry, lineMaterial);
-                emitterGroup.add(planeLine);
-                
-                for (let i = 0; i < 5; i++) {
-                  for (let j = 0; j < 5; j++) {
-                    const x = (i / 4 - 0.5) * 2 * halfExtent;
-                    const z = (j / 4 - 0.5) * 2 * halfExtent;
-                    const crossSize = 5;
-                    
-                    const crossGeometry = new THREE.BufferGeometry();
-                    crossGeometry.setAttribute('position', new THREE.BufferAttribute(
-                      new Float32Array([
-                        x - crossSize, 0, z, x + crossSize, 0, z,
-                        x, 0, z - crossSize, x, 0, z + crossSize
-                      ]),
-                      3
-                    ));
-                    emitterGroup.add(new THREE.LineSegments(crossGeometry, lineMaterial));
-                  }
-                }
-              }
-              emitterGroup.add(createEmitterDirectionLine(emitterType, sourceExtent));
-              
-              newMesh = new THREE.Group();
-              (newMesh as any).userData.emitterType = emitterType;
-              (newMesh as THREE.Group).add(emitterGroup);
-            }
-            
-            if (newMesh) {
-              newMesh.position.set(obj.position.x, obj.position.y, obj.position.z);
-              newMesh.rotation.set(obj.rotation.x, obj.rotation.y, obj.rotation.z);
-              newMesh.scale.set(obj.scale.x, obj.scale.y, obj.scale.z);
-              scene.add(newMesh);
-              sceneObjectMeshesRef.current.set(obj.id, newMesh);
-            }
-            return;
-          }
+          // Remove all legacy emitterType visualizations. Only render crosshair for emitters.
+          scene.remove(mesh);
+          sceneObjectMeshesRef.current.delete(obj.id);
+          // Add crosshair only
+          const crosshairGroup = new THREE.Group();
+          const lineMaterial = new THREE.LineBasicMaterial({ color: 0xff6600, transparent: true, opacity: 0.9 });
+          const size = 18;
+          const crossGeometry = new THREE.BufferGeometry();
+          crossGeometry.setAttribute('position', new THREE.BufferAttribute(
+            new Float32Array([
+              -size, 0, 0, size, 0, 0,
+              0, -size, 0, 0, size, 0,
+              0, 0, -size, 0, 0, size,
+            ]),
+            3
+          ));
+          crosshairGroup.add(new THREE.LineSegments(crossGeometry, lineMaterial));
+          crosshairGroup.position.set(obj.position.x, obj.position.y, obj.position.z);
+          crosshairGroup.rotation.set(obj.rotation.x, obj.rotation.y, obj.rotation.z);
+          crosshairGroup.scale.set(obj.scale.x, obj.scale.y, obj.scale.z);
+          scene.add(crosshairGroup);
+          sceneObjectMeshesRef.current.set(obj.id, crosshairGroup);
+          return;
         }
         
       
@@ -3334,6 +3324,146 @@ Emitters: ${numEmitters}`;
       }
     });
   }, [sceneObjects]);
+
+  // ── Spine attachment planes: textured quads parented to bone meshes ──
+  useEffect(() => {
+    // Remove old attachment meshes
+    spineAttachmentMeshesRef.current.forEach((mesh) => {
+      if (mesh.parent) mesh.parent.remove(mesh);
+      (mesh.geometry as THREE.BufferGeometry).dispose();
+      const mat = mesh.material as THREE.MeshBasicMaterial;
+      if (mat.map) mat.map.dispose();
+      mat.dispose();
+      // Dispose preloaded sequence textures
+      if (mesh.userData.seqTextures) {
+        for (const t of mesh.userData.seqTextures) { if (t) t.dispose(); }
+        mesh.userData.seqTextures = undefined;
+      }
+    });
+    spineAttachmentMeshesRef.current.clear();
+
+    for (const att of spineAttachments) {
+      const boneMesh = sceneObjectMeshesRef.current.get(att.boneObjectId);
+      if (!boneMesh) continue;
+      const geo = new THREE.PlaneGeometry(att.width * att.scaleX, att.height * att.scaleY);
+
+      // Parse slot color tint (RGBA hex 'rrggbbaa')
+      let tintColor = 0xffffff;
+      let tintOpacity = 1.0;
+      if (att.color && att.color.length >= 8) {
+        tintColor = parseInt(att.color.substring(0, 6), 16);
+        tintOpacity = parseInt(att.color.substring(6, 8), 16) / 255;
+      }
+
+      // Blend mode
+      let blending: THREE.Blending = THREE.NormalBlending;
+      if (att.blendMode === 'additive') blending = THREE.AdditiveBlending;
+      else if (att.blendMode === 'multiply') blending = THREE.MultiplyBlending;
+      else if (att.blendMode === 'screen') {
+        blending = THREE.CustomBlending;
+      }
+
+      let texture: THREE.Texture | null = null;
+      if (att.imageDataUrl) {
+        texture = new THREE.TextureLoader().load(att.imageDataUrl);
+        texture.colorSpace = THREE.SRGBColorSpace;
+      }
+      const mat = new THREE.MeshBasicMaterial({
+        map: texture ?? undefined,
+        color: texture ? tintColor : 0x7799bb,
+        transparent: true,
+        opacity: texture ? tintOpacity : 0.45,
+        side: THREE.DoubleSide,
+        blending,
+        depthTest: false,
+        depthWrite: false,
+      });
+      // Store base opacity so per-frame alpha can blend with it
+      mat.userData = { baseOpacity: texture ? tintOpacity : 0.45 };
+      // Screen blending: ONE / ONE_MINUS_SRC_COLOR
+      if (att.blendMode === 'screen') {
+        mat.blendEquation = THREE.AddEquation;
+        mat.blendSrc = THREE.OneFactor;
+        mat.blendDst = THREE.OneMinusSrcColorFactor;
+      }
+      const planeMesh = new THREE.Mesh(geo, mat);
+      planeMesh.userData.localX = att.localX;
+      planeMesh.userData.localY = att.localY;
+      planeMesh.userData.slotIndex = att.slotIndex;
+      planeMesh.position.set(att.localX, att.localY, 1);
+      planeMesh.rotation.z = (att.localRotationDeg * Math.PI) / 180;
+      planeMesh.renderOrder = att.slotIndex;
+      planeMesh.name = `spine-att-${att.id}`;
+      // Preload sequence textures so per-frame swaps don’t stall
+      if (att.sequenceFrames && att.sequenceFrames.length > 0) {
+        planeMesh.userData.seqTextures = att.sequenceFrames.map((url) => {
+          if (!url) return null;
+          const t = new THREE.TextureLoader().load(url);
+          t.colorSpace = THREE.SRGBColorSpace;
+          return t;
+        });
+      }
+      boneMesh.add(planeMesh);
+      spineAttachmentMeshesRef.current.set(att.id, planeMesh);
+    }
+  }, [spineAttachments]);
+
+  // Pre-cache each attachment's image as raw pixel data for alpha-based spawn sampling
+  useEffect(() => {
+    spineAttachPixelDataRef.current.clear();
+    for (const att of spineAttachments) {
+      if (!att.imageDataUrl) continue;
+      const attId = att.id;
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = img.naturalWidth;
+          canvas.height = img.naturalHeight;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          ctx.drawImage(img, 0, 0);
+          const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+          spineAttachPixelDataRef.current.set(attId, { data, w: canvas.width, h: canvas.height });
+        } catch (_e) { /* cross-origin or decode error — leave entry absent */ }
+      };
+      img.src = att.imageDataUrl;
+    }
+  }, [spineAttachments]);
+
+  // Sync spineLayerSpread into ref so the render loop can access it without stale closure
+  useEffect(() => { spineLayerSpreadRef.current = spineLayerSpread; }, [spineLayerSpread]);
+
+  // ── Fast per-frame: toggle visibility + swap sequence textures + apply animated alpha/tint ──
+  useEffect(() => {
+    if (!spineFrameOverrides) return;
+    spineAttachmentMeshesRef.current.forEach((mesh, id) => {
+      const ov = spineFrameOverrides[id];
+      if (!ov) { mesh.visible = false; return; }
+      mesh.visible = ov.visible;
+      if (!ov.visible) return;
+      const mat = mesh.material as THREE.MeshBasicMaterial;
+      // Animated alpha: multiply with base setup-pose opacity
+      if (ov.alpha !== undefined) {
+        const base: number = mat.userData?.baseOpacity ?? 1.0;
+        mat.opacity = base * ov.alpha;
+        mat.needsUpdate = true;
+      }
+      // Animated tint color
+      if (ov.tintR !== undefined && ov.tintG !== undefined && ov.tintB !== undefined) {
+        mat.color.setRGB(ov.tintR, ov.tintG, ov.tintB);
+        mat.needsUpdate = true;
+      }
+      // Sequence texture swap
+      if (ov.seqFrame !== undefined && mesh.userData.seqTextures) {
+        const tex = mesh.userData.seqTextures[ov.seqFrame];
+        if (tex && mat.map !== tex) {
+          mat.map = tex;
+          mat.needsUpdate = true;
+        }
+      }
+    });
+  }, [spineFrameOverrides]);
 
   // Update object materials based on selection
   useEffect(() => {
