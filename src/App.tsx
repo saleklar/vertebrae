@@ -2808,11 +2808,11 @@ export function App() {
   // Render Particle System mode
   return (
     <div className="workspace" style={{ zoom: guiScale }}>
-      <div style={{ position: 'absolute', top: 10, left: 10, zIndex: 10, pointerEvents: 'none' }}>
-        <button style={{ pointerEvents: 'all' }} onClick={handleStartDrawBezierCurve} disabled={drawBezierCurveMode}>
-          Draw Bezier Curve
+      <div style={{ position: 'absolute', top: 50, left: '50%', transform: 'translateX(-50%)', zIndex: 100, pointerEvents: 'none', background: 'rgba(0,0,0,0.6)', padding: '8px 12px', borderRadius: '6px', border: '1px solid #444', display: 'flex', alignItems: 'center', boxShadow: '0 4px 6px rgba(0,0,0,0.3)' }}>
+        <button style={{ pointerEvents: 'all', background: drawBezierCurveMode ? '#ff6600' : '#222', color: '#fff', border: '1px solid #555', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={handleStartDrawBezierCurve} disabled={drawBezierCurveMode}>
+          {drawBezierCurveMode ? 'Drawing Curve...' : '✏️ Draw Bezier Curve (Path)'}
         </button>
-        {drawBezierCurveMode && <span style={{ marginLeft: 8, color: '#ff6600', pointerEvents: 'none' }}>Drawing: Click in 3D view to add points. Double-click or ESC to finish.</span>}
+        {drawBezierCurveMode && <span style={{ marginLeft: 12, color: '#ffcc00', pointerEvents: 'none', fontSize: '13px' }}>Click inside the 3D scene to place points. Double-Click or ESC to finish.</span>}
       </div>
       <div className="menu-bar">
         <div className="menu-item">
