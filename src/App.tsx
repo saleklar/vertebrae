@@ -74,7 +74,7 @@ export type EmitterObject = SceneObject & {
     particleColor: string;
     particleSize: number;
     particleOpacity: number;
-    particleType: "dots" | "stars" | "circles" | "glow-circles" | "sparkle" | "sprites" | "3d-model" | "volumetric-fire";
+    particleType: "dots" | "stars" | "circles" | "glow-circles" | "sparkle" | "glitter" | "sprites" | "3d-model" | "volumetric-fire";
     particleGlow: boolean;
     particleBlendMode?: string;
     particleRotation: number;
@@ -4338,6 +4338,7 @@ export function App() {
                           <option value="glow-circles">Glow Circles</option>
                           <option value="stars">Stars (4-point)</option>
                           <option value="sparkle">Sparkle (8-point lens flare)</option>
+                            <option value="glitter">Glitter (Metallic Bloom)</option>
                           <option value="sprites">Sprites</option>
                           <option value="3d-model">Live 3D Model</option>
                         </select>

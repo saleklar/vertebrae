@@ -167,7 +167,7 @@ type CachedParticleState = {
   size: number;
 };
 
-type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sparkle' | 'sprites' | '3d-model' | 'volumetric-fire';
+type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sparkle' | 'glitter' | 'sprites' | '3d-model' | 'volumetric-fire';
 
 export interface Scene3DRef {
   exportSpineData: (options?: any) => any;
@@ -1595,7 +1595,7 @@ const timelineOutRef = useRef(timelineOut);
         if (cached) return cached;
 
         // High-res for glow types, standard for simple shapes
-        const isGlowType = textureType === 'glow-circles' || textureType === 'stars' || textureType === 'sparkle';
+        const isGlowType = textureType === 'glow-circles' || textureType === 'stars' || textureType === 'sparkle' || textureType === 'glitter';
         const size = isGlowType ? 256 : 128;
         const canvas = document.createElement('canvas');
         canvas.width = size;
@@ -1873,7 +1873,7 @@ const timelineOutRef = useRef(timelineOut);
           blendMode: string = 'normal'
       ) => {
         const resolvedParticleType = (particleType ?? 'dots') as ParticleVisualType;
-        const shouldUseSprite = resolvedParticleType === 'circles' || resolvedParticleType === 'glow-circles' || resolvedParticleType === 'sparkle' || resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'stars' || resolvedParticleType === 'volumetric-fire';
+        const shouldUseSprite = resolvedParticleType === 'circles' || resolvedParticleType === 'glow-circles' || resolvedParticleType === 'sparkle' || resolvedParticleType === 'glitter' || resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'stars' || resolvedParticleType === 'volumetric-fire';
         const texture = getParticleTexture(resolvedParticleType, customGlow);
 
         if (shouldUseSprite) {
@@ -2757,7 +2757,7 @@ const timelineOutRef = useRef(timelineOut);
                 particle.rotation = emitterRotation + (particle.rotationOffset ?? 0) + particle.rotationSpeed * particle.age;
 
                 const effectiveParticleType = getPreviewedParticleType(emitterParticleType);
-                const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sparkle' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars' || effectiveParticleType === 'volumetric-fire';
+                const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sparkle' || effectiveParticleType === 'glitter' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars' || effectiveParticleType === 'volumetric-fire';
                 const needsMeshSwap = expectedSprite !== (particle.mesh instanceof THREE.Sprite);
                 const currentEmitterFps = getResampledSequenceProps(emitterProps, sceneSettingsRef.current.particleSequenceBudget, sceneSettingsRef.current.particleSequenceBudgetLoop).fps;
                 if (needsMeshSwap) {
