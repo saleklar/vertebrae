@@ -81,6 +81,7 @@ type SceneSettings = {
   particlePreviewSize: number;
   particleBudget: number;
   adaptiveEmission?: boolean;
+  particleLivePreview?: boolean;
   particleSequenceBudget?: number;
   particleSequenceBudgetLoop?: boolean;
   exportProjectionMode?: 'orthographic' | 'perspective';
@@ -415,11 +416,16 @@ const timelineOutRef = useRef(timelineOut);
   const currentFrameRef = useRef(currentFrame);
   const lastTimelineFrameRef = useRef(currentFrame);
   const particleFrameCacheRef = useRef<Map<number, CachedParticleState[]>>(new Map());
+  const pathAnimTimesRef = useRef<Map<string, number>>(new Map());
+  const pathAnimFreeStateRef = useRef<Map<string, { pos: THREE.Vector3; vel: THREE.Vector3 }>>(new Map());
+  const lastFrameTimeRef = useRef<number>(Date.now());
   const cacheCountRef = useRef(0);
   const selectedObjectIdRef = useRef<string | null>(selectedObjectId);
   const selectedForceIdRef = useRef<string | null>(selectedForceId ?? null);
   const isDraggingTransformRef = useRef(false);
     const isDrawingRef = useRef(false);
+  // Tracks last-seen sprite key per emitter to detect changes and flush stale particles
+  const emitterSpriteKeyRef = useRef<Map<string, string>>(new Map());
     const drawnPointsRef = useRef<THREE.Vector3[]>([]);
     const drawnLineRef = useRef<THREE.Line | null>(null);
     const drawModeRef = useRef(drawMode);
@@ -427,11 +433,19 @@ const timelineOutRef = useRef(timelineOut);
       drawModeRef.current = drawMode; 
     }, [drawMode]);
 
+  const [isMarqueeSelectMode, setIsMarqueeSelectMode] = useState(false);
+  const isMarqueeSelectModeRef = useRef(false);
+  useEffect(() => {
+    isMarqueeSelectModeRef.current = isMarqueeSelectMode;
+  }, [isMarqueeSelectMode]);
+  const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const marqueeRef = useRef<HTMLDivElement>(null);
+
   const dragOrbitTargetRef = useRef<THREE.Vector3 | null>(null);
   const handlesRef = useRef<{ xArrow: THREE.Mesh; yArrow: THREE.Mesh; zArrow: THREE.Mesh } | null>(null);
   const dragStateRef = useRef<{
     active: boolean;
-    axis: 'x' | 'y' | 'z' | 'free' | null;
+    axis: 'x' | 'y' | 'z' | 'free' | 'free-rotate' | null;
     startX: number;
     startY: number;
     startPos: THREE.Vector3;
@@ -899,6 +913,20 @@ const timelineOutRef = useRef(timelineOut);
         }
       containerRef.current?.focus();
 
+      if (isMarqueeSelectModeRef.current && event.button === 0 && !event.altKey && !event.shiftKey) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        marqueeStartRef.current = { x: event.clientX, y: event.clientY };
+        
+        if (marqueeRef.current) {
+          marqueeRef.current.style.display = 'block';
+          marqueeRef.current.style.left = `${event.clientX - rect.left}px`;
+          marqueeRef.current.style.top = `${event.clientY - rect.top}px`;
+          marqueeRef.current.style.width = '0px';
+          marqueeRef.current.style.height = '0px';
+        }
+        return;
+      }
+
       // Check if clicking on transform handles (only if Alt is not pressed for camera rotation)
       if (!event.altKey && handlesRef.current && selectedObjectIdRef.current) {
         const rect = renderer.domElement.getBoundingClientRect();
@@ -942,21 +970,67 @@ const timelineOutRef = useRef(timelineOut);
           return;
         }
         
-        // Check if clicking on the selected object itself (for free drag or closest axis)
-        if (!event.altKey && event.button === 0 && selectedObjectIdRef.current) {
+        // Check if clicking on any object to select and start drag
+        if (!event.altKey && event.button === 0) {
           const rect = renderer.domElement.getBoundingClientRect();
           mouseNdcHandles.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
           mouseNdcHandles.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-          
+
           raycasterHandles.setFromCamera(mouseNdcHandles, camera);
-          const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
-          if (selectedMesh) {
-            const objectHits = raycasterHandles.intersectObject(selectedMesh, true);
-            if (objectHits.length > 0) {
-              const mode = manipulatorModeRef.current;
+          
+          let clickedObjectId: string | null = null;
+          let selectedMesh: THREE.Object3D | null = null;
+          let hitPoint: THREE.Vector3 | null = null;
+
+          const selectableObjects: THREE.Object3D[] = [];
+          sceneObjectMeshesRef.current.forEach(mesh => selectableObjects.push(mesh));
+          const objectHits = raycasterHandles.intersectObjects(selectableObjects, true);
+
+          if (objectHits.length > 0) {
+            for (const [id, mesh] of sceneObjectMeshesRef.current.entries()) {
+              let obj: THREE.Object3D | null = objectHits[0].object;
+              while (obj) {
+                if (obj === mesh) {
+                  clickedObjectId = id;
+                  break;
+                }
+                obj = obj.parent;
+              }
+              if (clickedObjectId) {
+                selectedMesh = mesh;
+                hitPoint = objectHits[0].point;
+                break;
+              }
+            }
+          }
+
+          if (clickedObjectId && selectedMesh && hitPoint) {
+            if (clickedObjectId !== selectedObjectIdRef.current) {
+              onObjectSelect(clickedObjectId);
+              selectedObjectIdRef.current = clickedObjectId;
+              selectedObjectRef.current = selectedMesh;
+            }
+            const objectHits = [{ point: hitPoint }]; // Mock structure for underlying logic
+            if (true) {              const mode = manipulatorModeRef.current;
               
-              // For rotate and scale modes, find the closest handle
-              if (mode === 'rotate' || mode === 'scale') {
+              // Rotate mode: free-rotate with mouse. Scale: closest axis. Translate: free drag.
+              if (mode === 'rotate') {
+                // Free rotation — no axis constraint
+                dragStateRef.current.active = true;
+                dragStateRef.current.axis = 'free-rotate';
+                dragStateRef.current.startX = event.clientX;
+                dragStateRef.current.startY = event.clientY;
+                dragStateRef.current.startPos.copy(selectedMesh.position);
+                dragStateRef.current.startRot.copy(selectedMesh.rotation);
+                dragStateRef.current.startScale.copy(selectedMesh.scale);
+                isDraggingTransformRef.current = true;
+                const cameraState0 = cameraStateRef.current;
+                dragOrbitTargetRef.current = new THREE.Vector3(
+                  cameraState0.viewOffsetX,
+                  cameraState0.viewOffsetY,
+                  cameraState0.viewOffsetZ
+                );
+              } else if (mode === 'scale') {
                 // Get mouse position in 3D
                 const hitPoint = objectHits[0].point;
                 const objPos = selectedMesh.position;
@@ -1107,6 +1181,28 @@ const timelineOutRef = useRef(timelineOut);
           }
           return;
         }
+
+      if (isMarqueeSelectModeRef.current && marqueeStartRef.current && mouseStateRef.current.isDown && mouseStateRef.current.button === 0) {
+        if (marqueeRef.current) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          const startX = marqueeStartRef.current.x - rect.left;
+          const startY = marqueeStartRef.current.y - rect.top;
+          const currentX = event.clientX - rect.left;
+          const currentY = event.clientY - rect.top;
+          
+          const left = Math.min(startX, currentX);
+          const top = Math.min(startY, currentY);
+          const width = Math.abs(currentX - startX);
+          const height = Math.abs(currentY - startY);
+          
+          marqueeRef.current.style.left = `${left}px`;
+          marqueeRef.current.style.top = `${top}px`;
+          marqueeRef.current.style.width = `${width}px`;
+          marqueeRef.current.style.height = `${height}px`;
+        }
+        return;
+      }
+
       // Handle free dragging
       if (dragStateRef.current.active && dragStateRef.current.axis === 'free' && selectedObjectIdRef.current) {
         const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
@@ -1152,6 +1248,47 @@ const timelineOutRef = useRef(timelineOut);
         return;
       }
       
+      // Handle free rotation (rotate mode, no axis handle)
+      if (dragStateRef.current.active && dragStateRef.current.axis === 'free-rotate' && selectedObjectIdRef.current) {
+        const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
+        if (selectedMesh) {
+          const dx = event.clientX - dragStateRef.current.startX;
+          const dy = event.clientY - dragStateRef.current.startY;
+          const sensitivity = 0.007;
+
+          // Yaw: mouse X → rotate around world Y axis
+          const yawQuat = new THREE.Quaternion().setFromAxisAngle(
+            new THREE.Vector3(0, 1, 0), -dx * sensitivity
+          );
+          // Pitch: mouse Y → rotate around camera's right axis
+          const cameraForward = new THREE.Vector3();
+          camera.getWorldDirection(cameraForward);
+          const cameraRight = new THREE.Vector3().crossVectors(cameraForward, new THREE.Vector3(0, 1, 0)).normalize();
+          const pitchQuat = new THREE.Quaternion().setFromAxisAngle(cameraRight, -dy * sensitivity);
+
+          // Apply incremental world-space rotation
+          const deltaQuat = new THREE.Quaternion().multiplyQuaternions(pitchQuat, yawQuat);
+          selectedMesh.quaternion.multiplyQuaternions(deltaQuat, selectedMesh.quaternion);
+          selectedMesh.rotation.setFromQuaternion(selectedMesh.quaternion);
+
+          // Update outline and handles
+          if (sceneRef.current) {
+            const outline = sceneRef.current.getObjectByName('selection-outline');
+            if (outline) {
+              outline.rotation.copy(selectedMesh.rotation);
+            }
+            const handles = sceneRef.current.getObjectByName('transform-handles');
+            if (handles) {
+              handles.rotation.copy(selectedMesh.rotation);
+            }
+          }
+
+          dragStateRef.current.startX = event.clientX;
+          dragStateRef.current.startY = event.clientY;
+        }
+        return;
+      }
+
       // Handle arrow dragging
       if (dragStateRef.current.active && dragStateRef.current.axis && selectedObjectIdRef.current) {
         const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
@@ -1319,19 +1456,51 @@ const timelineOutRef = useRef(timelineOut);
           drawnPointsRef.current = [];
           return;
         }
-        if (drawModeRef.current && isDrawingRef.current) {
-          isDrawingRef.current = false;
-          if (drawnPointsRef.current.length > 2 && onDrawComplete) {
-            onDrawComplete(drawnPointsRef.current.map(p => ({ x: p.x, y: p.y, z: p.z })));
+
+        if (marqueeStartRef.current && isMarqueeSelectModeRef.current) {
+          if (marqueeRef.current) marqueeRef.current.style.display = 'none';
+          const endX = event.clientX;
+          const endY = event.clientY;
+          const startX = marqueeStartRef.current.x;
+          const startY = marqueeStartRef.current.y;
+          
+          if (Math.abs(endX - startX) > 5 || Math.abs(endY - startY) > 5) {
+             const rect = renderer.domElement.getBoundingClientRect();
+             const minX = Math.min(startX, endX) - rect.left;
+             const maxX = Math.max(startX, endX) - rect.left;
+             const minY = Math.min(startY, endY) - rect.top;
+             const maxY = Math.max(startY, endY) - rect.top;
+             
+             let selectedId: string | null = null;
+             // project objects
+             for (const [id, mesh] of sceneObjectMeshesRef.current.entries()) {
+               const pos = new THREE.Vector3();
+               mesh.getWorldPosition(pos);
+               pos.project(camera);
+               // POS is in NDC (-1 to +1)
+               const screenX = (pos.x * 0.5 + 0.5) * rect.width;
+               const screenY = (-(pos.y) * 0.5 + 0.5) * rect.height;
+               
+               if (screenX >= minX && screenX <= maxX && screenY >= minY && screenY <= maxY) {
+                 selectedId = id;
+                 break; // Single select behavior for marquee box
+               }
+             }
+             if (selectedId) {
+                onObjectSelect(selectedId);
+                selectedObjectRef.current = sceneObjectMeshesRef.current.get(selectedId) || null;
+             } else {
+                onObjectSelect(null);
+                selectedObjectRef.current = null;
+             }
+             
+             marqueeStartRef.current = null;
+             mouseStateRef.current.isDown = false;
+             mouseStateRef.current.button = -1;
+             return;
+          } else {
+             marqueeStartRef.current = null; // Too small to be a marquee drag, fall through to click select
           }
-          if (drawnLineRef.current) {
-            scene.remove(drawnLineRef.current);
-            drawnLineRef.current.geometry.dispose();
-            (drawnLineRef.current.material as THREE.Material).dispose();
-            drawnLineRef.current = null;
-          }
-          drawnPointsRef.current = [];
-          return;
         }
       // End arrow drag
       if (dragStateRef.current.active) {
@@ -2064,6 +2233,143 @@ const timelineOutRef = useRef(timelineOut);
       };
 
       const now = Date.now();
+      const frameDeltaTime = Math.min((now - lastFrameTimeRef.current) / 1000, 0.1);
+      lastFrameTimeRef.current = now;
+
+      // ── Path Animation ──────────────────────────────────────────────────────
+      if (isPlayingRef.current) {
+        sceneObjectsRef.current.forEach(obj => {
+          const props = (obj.properties ?? {}) as Record<string, any>;
+          const pathId = props.pathAnimPathId as string | undefined;
+          if (!pathId) return;
+          const mesh = sceneObjectMeshesRef.current.get(obj.id);
+          if (!mesh) return;
+
+          const speed = Number(props.pathAnimSpeed ?? 0.1);
+          const loop = props.pathAnimLoop !== false; // default: loop
+          const orient = !!props.pathAnimOrient;
+          const alignUp = !!props.pathAnimAlignUp;
+          const twistDeg = Number(props.pathAnimTwist ?? 0);
+          const falloffStart = Math.min(0.9999, Number(props.pathAnimFalloff ?? 100) / 100);
+          // falloffStart = 1.0 means no falloff (slider at 100%)
+
+          // Build CatmullRom curve from the path's PathPoint children
+          const pathPointObjs = sceneObjectsRef.current.filter(
+            o => o.type === 'PathPoint' && o.parentId === pathId
+          );
+          if (pathPointObjs.length < 2) return;
+          const pts = pathPointObjs.map(p => {
+            const pm = sceneObjectMeshesRef.current.get(p.id);
+            return pm
+              ? pm.position.clone()
+              : new THREE.Vector3(p.position.x, p.position.y, p.position.z);
+          });
+
+          const curve = new THREE.CatmullRomCurve3(pts, loop);
+
+          // Advance normalised parameter t
+          let t = pathAnimTimesRef.current.get(obj.id) ?? 0;
+          t += speed * frameDeltaTime;
+          if (loop) {
+            t = t % 1;
+            if (t < 0) t = 1 + t;
+          } else {
+            t = Math.min(t, 0.9999);
+          }
+          pathAnimTimesRef.current.set(obj.id, t);
+
+          // When loop resets clear free-state so momentum restarts cleanly
+          const prevT = pathAnimTimesRef.current.get(obj.id + '_prev') ?? t;
+          pathAnimTimesRef.current.set(obj.id + '_prev', t);
+          if (t < prevT) pathAnimFreeStateRef.current.delete(obj.id);
+
+          const pathPos = curve.getPointAt(t);
+
+          // ── Falloff: after falloffStart, object leaves path with momentum ──
+          let adherence = 1.0;
+          if (falloffStart < 0.9999) {
+            if (t <= falloffStart) {
+              adherence = 1.0;
+              // Keep free-state in sync with path so release is smooth
+              const seg0 = curve.getPointAt(Math.max(0, t - 0.001));
+              const seg1 = curve.getPointAt(Math.min(0.9999, t + 0.001));
+              const pathVel = seg1.clone().sub(seg0).normalize().multiplyScalar(
+                speed * (curve.getLength() / Math.max(0.0001, 0.002))
+              );
+              pathAnimFreeStateRef.current.set(obj.id, { pos: pathPos.clone(), vel: pathVel });
+            } else {
+              adherence = 1 - (t - falloffStart) / (1 - falloffStart);
+              const free = pathAnimFreeStateRef.current.get(obj.id);
+              if (!free) {
+                const seg0 = curve.getPointAt(Math.max(0, falloffStart - 0.001));
+                const seg1 = curve.getPointAt(Math.min(0.9999, falloffStart + 0.001));
+                const pathVel = seg1.clone().sub(seg0).normalize().multiplyScalar(
+                  speed * (curve.getLength() / Math.max(0.0001, 0.002))
+                );
+                pathAnimFreeStateRef.current.set(obj.id, { pos: pathPos.clone(), vel: pathVel });
+              } else {
+                free.pos.addScaledVector(free.vel, frameDeltaTime);
+              }
+              const freePos = pathAnimFreeStateRef.current.get(obj.id)!.pos;
+              pathPos.lerp(freePos, 1 - adherence);
+            }
+          }
+
+          const pos = pathPos;
+          mesh.position.copy(pos);
+
+          if (orient) {
+            const tangent = curve.getTangentAt(t).normalize();
+            if (alignUp) {
+              // Full free-roll: align Z-forward to tangent, derive up from path curvature
+              const p0 = curve.getPointAt(Math.max(0, t - 0.001));
+              const p2 = curve.getPointAt(Math.min(0.9999, t + 0.01));
+              const curveUp = new THREE.Vector3().subVectors(p2, p0).normalize();
+              const right = new THREE.Vector3().crossVectors(curveUp, tangent).normalize();
+              const up2 = new THREE.Vector3().crossVectors(tangent, right).normalize();
+              const m = new THREE.Matrix4().makeBasis(right, up2, tangent);
+              mesh.quaternion.setFromRotationMatrix(m);
+            } else {
+              // Keep world-Y up, only yaw to face tangent direction
+              const worldUp = new THREE.Vector3(0, 1, 0);
+              const right = new THREE.Vector3().crossVectors(worldUp, tangent);
+              if (right.lengthSq() < 0.0001) right.set(1, 0, 0);
+              right.normalize();
+              const up = new THREE.Vector3().crossVectors(tangent, right).normalize();
+              const m = new THREE.Matrix4().makeBasis(right, up, tangent);
+              mesh.quaternion.setFromRotationMatrix(m);
+            }
+            // Apply twist: rotate around tangent (forward) axis by twistDeg * t
+            if (twistDeg !== 0) {
+              const tangent2 = curve.getTangentAt(t).normalize();
+              const twistQuat = new THREE.Quaternion().setFromAxisAngle(
+                tangent2,
+                (twistDeg * t * Math.PI) / 180
+              );
+              mesh.quaternion.premultiply(twistQuat);
+            }
+            mesh.rotation.setFromQuaternion(mesh.quaternion);
+          } else if (twistDeg !== 0) {
+            // Orient not enabled but twist still applies — rotate around tangent from current orientation
+            const tangent2 = curve.getTangentAt(t).normalize();
+            const twistQuat = new THREE.Quaternion().setFromAxisAngle(
+              tangent2,
+              (twistDeg * t * Math.PI) / 180
+            );
+            mesh.quaternion.premultiply(twistQuat);
+            mesh.rotation.setFromQuaternion(mesh.quaternion);
+          }
+
+          // Keep selection outline + handles in sync
+          if (selectedObjectIdRef.current === obj.id && sceneRef.current) {
+            const outline = sceneRef.current.getObjectByName('selection-outline');
+            if (outline) outline.position.copy(pos);
+            const handles = sceneRef.current.getObjectByName('transform-handles');
+            if (handles) handles.position.copy(pos);
+          }
+        });
+      }
+      // ── End Path Animation ──────────────────────────────────────────────────
       const timelineFrame = Math.max(0, Math.floor(currentFrameRef.current));
       const previousTimelineFrame = lastTimelineFrameRef.current;
       const frameChanged = timelineFrame !== previousTimelineFrame;
@@ -2096,26 +2402,58 @@ const timelineOutRef = useRef(timelineOut);
               const safeEmissionRate = isAdaptive ? Math.min(rawSafeEmissionRate, maxContinuousEmission) : rawSafeEmissionRate;
               const emissionInterval = 1000 / safeEmissionRate;
 
-              // Only use the Emitter itself as the emission source
-              const activeSources = [obj];
-              const sourceExtent = 25;
+              // Use connected shapes as emission sources if available, otherwise just use the emitter itself
+              const childShapes = Array.from(sceneObjectsRef.current.values()).filter(o =>
+                  o.parentId === obj.id && o.type !== 'PathPoint' && o.type !== 'Emitter' && o.type !== 'Force'
+                );
+              const activeSources = childShapes.length > 0 ? childShapes : [obj];
+              // Dynamic sourceExtent placeholder — computed per-source below
 
               // Emit new particles when playing or actively caching
               const isUnderBudget = globalActiveParticles < particleBudget;
 
-              if (isUnderBudget && (isPlayingRef.current || isCachingRef.current) && timeSinceLastEmit >= emissionInterval && activeSources.length > 0 && timelineFrame >= timelineInRef.current) {
+              if (isUnderBudget && (isPlayingRef.current || isCachingRef.current || sceneSettingsRef.current.particleLivePreview) && timeSinceLastEmit >= emissionInterval && activeSources.length > 0 && (timelineFrame >= timelineInRef.current || sceneSettingsRef.current.particleLivePreview)) {
                 // Keep budget tracked correctly if multiple particles spawn across different emitters in the same frame
                 globalActiveParticles++;
                 
                 const sourceNode = activeSources[Math.floor(Math.random() * activeSources.length)];
                 const sourceProps = (sourceNode.properties ?? {}) as Record<string, any>;
-                const emitterType = sourceProps.emitterType ?? 'point';
+                  let emitterType = sourceNode.id === obj.id
+                    ? (sourceProps.emitterType ?? 'point')   // standalone emitter: use its own setting
+                    : 'mesh_bounds';                          // child shape fallback: bounding box
+                  if (sourceNode.type === 'Path') emitterType = 'curve';
+                  else if (sourceNode.type === 'Cube' || sourceNode.type === 'Box') emitterType = 'cube';
+                  else if (sourceNode.type === 'Sphere' || sourceNode.type === 'Torus') emitterType = 'ball';
+                  else if (sourceNode.type === 'Cylinder' || sourceNode.type === 'Cone') emitterType = 'ball';
+                  else if (sourceNode.type === 'Plane' || sourceNode.type === 'Rectangle') emitterType = 'square';
+                  else if (sourceNode.type === 'Circle') emitterType = 'circle';
+                  else if (sourceNode.id === obj.id) emitterType = sourceProps.emitterType ?? 'point'; // own emitter type
                 const emissionMode = sourceProps.emissionMode ?? emitterProps.emissionMode ?? 'volume';
                 const isSurfaceMode = emissionMode === 'surface';
                 const isEdgeMode = emissionMode === 'edge';
                 const sourceMesh = sceneObjectMeshesRef.current.get(sourceNode.id) ?? emitterMesh;
                 const localOffset = new THREE.Vector3(0, 0, 0);
                 const localNormal = new THREE.Vector3(0, 1, 0);
+
+                // Compute local-space half-extents from the source mesh geometry
+                let seX = 25, seY = 25, seZ = 25;
+                if (sourceNode.id !== obj.id) {
+                  const geom = (sourceMesh as THREE.Mesh)?.geometry;
+                  if (geom) {
+                    if (!geom.boundingBox) geom.computeBoundingBox();
+                    const bb = geom.boundingBox;
+                    if (bb) {
+                      const ex = (bb.max.x - bb.min.x) / 2;
+                      const ey = (bb.max.y - bb.min.y) / 2;
+                      const ez = (bb.max.z - bb.min.z) / 2;
+                      // Only use computed extents if non-zero; keep default otherwise
+                      if (ex > 0) seX = ex;
+                      if (ey > 0) seY = ey;
+                      if (ez > 0) seZ = ez;
+                    }
+                  }
+                }
+                const sourceExtent = Math.max(seX, seY, seZ);
 
                 if (emitterType === 'circle') {
                   const angle = Math.random() * Math.PI * 2;
@@ -2156,41 +2494,48 @@ const timelineOutRef = useRef(timelineOut);
                   }
                   localNormal.set(0, 1, 0);
                 } else if (emitterType === 'cube') {
-                  if (isSurfaceMode || isEdgeMode) {
-                    // Emit uniformly across cube shell (face areas weighted by current scale)
-                    const scaleX = Math.max(1e-6, Math.abs(sourceMesh.scale.x));
-                    const scaleY = Math.max(1e-6, Math.abs(sourceMesh.scale.y));
-                    const scaleZ = Math.max(1e-6, Math.abs(sourceMesh.scale.z));
-                    const areaX = scaleY * scaleZ; // ±X faces
-                    const areaY = scaleX * scaleZ; // ±Y faces
-                    const areaZ = scaleX * scaleY; // ±Z faces
-                    const totalArea = areaX + areaY + areaZ;
-                    const pick = Math.random() * totalArea;
-
-                    let axis: 'x' | 'y' | 'z' = 'z';
-                    if (pick < areaX) axis = 'x';
-                    else if (pick < areaX + areaY) axis = 'y';
-
-                    const sign = Math.random() < 0.5 ? -1 : 1;
-                    const u = (Math.random() * 2 - 1) * sourceExtent;
-                    const v = (Math.random() * 2 - 1) * sourceExtent;
-
-                    if (axis === 'x') {
-                      localOffset.set(sign * sourceExtent, u, v);
-                      localNormal.set(sign, 0, 0);
-                    } else if (axis === 'y') {
-                      localOffset.set(u, sign * sourceExtent, v);
-                      localNormal.set(0, sign, 0);
-                    } else {
-                      localOffset.set(u, v, sign * sourceExtent);
-                      localNormal.set(0, 0, sign);
-                    }
+                    if (isEdgeMode) {
+                      // 12 edges of the bounding box
+                      const edge = Math.floor(Math.random() * 12);
+                      const tx = (Math.random() * 2 - 1) * seX;
+                      const ty = (Math.random() * 2 - 1) * seY;
+                      const tz = (Math.random() * 2 - 1) * seZ;
+                      const signs = [
+                        [seY, seZ], [seY, -seZ], [-seY, seZ], [-seY, -seZ]
+                      ];
+                      const sgn = signs[edge % 4];
+                      if (edge < 4) { // X-axis parallel edges
+                        localOffset.set(tx, sgn[0], sgn[1]);
+                      } else if (edge < 8) { // Y-axis parallel edges
+                        localOffset.set(sgn[0], ty, sgn[1]);
+                      } else { // Z-axis parallel edges
+                        localOffset.set(sgn[0], sgn[1], tz);
+                      }
+                      localNormal.copy(localOffset).normalize();
+                    } else if (isSurfaceMode) {
+                      // Weight faces by actual face area (seY*seZ for ±X, etc.)
+                      const areaX = seY * seZ;
+                      const areaY = seX * seZ;
+                      const areaZ = seX * seY;
+                      const totalArea = 2 * (areaX + areaY + areaZ);
+                      const pick = Math.random() * totalArea;
+                      const sign = Math.random() < 0.5 ? -1 : 1;
+                      if (pick < 2 * areaX) {
+                        localOffset.set(sign * seX, (Math.random() * 2 - 1) * seY, (Math.random() * 2 - 1) * seZ);
+                        localNormal.set(sign, 0, 0);
+                      } else if (pick < 2 * (areaX + areaY)) {
+                        localOffset.set((Math.random() * 2 - 1) * seX, sign * seY, (Math.random() * 2 - 1) * seZ);
+                        localNormal.set(0, sign, 0);
+                      } else {
+                        localOffset.set((Math.random() * 2 - 1) * seX, (Math.random() * 2 - 1) * seY, sign * seZ);
+                        localNormal.set(0, 0, sign);
+                      }
                   } else {
                     // Emit from entire volume
                     localOffset.set(
-                      (Math.random() * 2 - 1) * sourceExtent,
-                      (Math.random() * 2 - 1) * sourceExtent,
-                      (Math.random() * 2 - 1) * sourceExtent
+                      (Math.random() * 2 - 1) * seX,
+                      (Math.random() * 2 - 1) * seY,
+                      (Math.random() * 2 - 1) * seZ
                     );
                     if (localOffset.lengthSq() > 1e-6) {
                       localNormal.copy(localOffset).normalize();
@@ -2223,80 +2568,74 @@ const timelineOutRef = useRef(timelineOut);
                       localNormal.copy(localOffset).normalize();
                     }
                   }
-                                  } else if (emitterType === 'mesh_bounds') {
-                    sourceMesh.updateMatrixWorld(true);
-                    let lx = 0, ly = 0, lz = 0;
-                    
-                    const globalBox = new THREE.Box3().setFromObject(sourceMesh);
-                    if (!globalBox.isEmpty()) {
-                        const size = new THREE.Vector3();
-                        globalBox.getSize(size);
-                        
-                        const worldX = globalBox.min.x + Math.random() * size.x;
-                        const worldY = globalBox.min.y + Math.random() * size.y;
-                        const worldZ = globalBox.min.z + Math.random() * size.z;
-                        let worldPos = new THREE.Vector3(worldX, worldY, worldZ);
-                        
-                        if (isEdgeMode || isSurfaceMode) {
-                            const c = new THREE.Vector3();
-                            globalBox.getCenter(c);
-                            const dx = worldX - c.x;
-                            const dy = worldY - c.y;
-                            const dz = worldZ - c.z;
-                            const nx = Math.abs(dx) / (size.x/2);
-                            const ny = Math.abs(dy) / (size.y/2);
-                            const nz = Math.abs(dz) / (size.z/2);
-                            const m = Math.max(nx, ny, nz);
-                            if (m === nx) worldPos.x = c.x + Math.sign(dx) * size.x / 2;
-                            else if (m === ny) worldPos.y = c.y + Math.sign(dy) * size.y / 2;
-                            else worldPos.z = c.z + Math.sign(dz) * size.z / 2;
-                        }
-                        
-                        const smWorldPos = new THREE.Vector3();
-                        sourceMesh.getWorldPosition(smWorldPos);
-                        
-                        const diff = worldPos.clone().sub(smWorldPos);
-                        diff.applyEuler(new THREE.Euler(-sourceMesh.rotation.x, -sourceMesh.rotation.y, -sourceMesh.rotation.z));
-                        diff.set(diff.x / sourceMesh.scale.x, diff.y / sourceMesh.scale.y, diff.z / sourceMesh.scale.z);
-                        
-                        lx = diff.x; ly = diff.y; lz = diff.z;
+                } else if (emitterType === 'mesh_bounds') {
+                  sourceMesh.updateMatrixWorld(true);
+                  let lx = 0, ly = 0, lz = 0;
+                  const globalBox = new THREE.Box3().setFromObject(sourceMesh);
+                  if (!globalBox.isEmpty()) {
+                    const size = new THREE.Vector3();
+                    globalBox.getSize(size);
+                    const worldX = globalBox.min.x + Math.random() * size.x;
+                    const worldY = globalBox.min.y + Math.random() * size.y;
+                    const worldZ = globalBox.min.z + Math.random() * size.z;
+                    let worldPos = new THREE.Vector3(worldX, worldY, worldZ);
+                    if (isEdgeMode || isSurfaceMode) {
+                      const c = new THREE.Vector3();
+                      globalBox.getCenter(c);
+                      const dx = worldX - c.x;
+                      const dy = worldY - c.y;
+                      const dz = worldZ - c.z;
+                      const nx = Math.abs(dx) / (size.x / 2);
+                      const ny = Math.abs(dy) / (size.y / 2);
+                      const nz = Math.abs(dz) / (size.z / 2);
+                      const m = Math.max(nx, ny, nz);
+                      if (m === nx) worldPos.x = c.x + Math.sign(dx) * size.x / 2;
+                      else if (m === ny) worldPos.y = c.y + Math.sign(dy) * size.y / 2;
+                      else worldPos.z = c.z + Math.sign(dz) * size.z / 2;
                     }
-
-                    localOffset.set(lx, ly, lz);
-                    localNormal.set(0, 1, 0);
-                  } else if (emitterType === 'point') {
-                      localNormal.set(0, -0.5, 1).normalize();
-                    } else if (emitterType === 'curve' || sourceNode.type === 'Path') { let pts = []; if (sourceNode.type === 'Path') { const pathPoints = sceneObjectsRef.current.filter(o => o.type === 'PathPoint' && o.parentId === sourceNode.id); pts = pathPoints.map(p => { const pm = sceneObjectMeshesRef.current.get(p.id); return pm ? pm.position.clone() : new THREE.Vector3(p.position.x, p.position.y, p.position.z); }); } else if (sourceProps.points) { pts = sourceProps.points.map((p: any) => new THREE.Vector3(p.x, p.y, p.z)); } if (pts.length > 1) {
-                      
-                         
-                         let t = Math.random();
-                         if (isSurfaceMode || isEdgeMode) {
-                            t = Math.random();
-                         }
-
-                         const cur = new THREE.CatmullRomCurve3(pts);
-                         const pt = cur.getPoint(t);
-                         const tang = cur.getTangent(t).normalize();
-                         const normal = new THREE.Vector3();
-                            if (Math.abs(tang.y) > 0.99) {
-                                normal.set(1, 0, 0);
-                            } else {
-                                normal.set(0, 1, 0);
-                            }
-                         normal.cross(tang).normalize();
-                         
-                         localNormal.copy(normal);
-
-                         const smWorldPos = new THREE.Vector3();
-                         sourceMesh.getWorldPosition(smWorldPos);
-                         
-                         const diff = pt.clone().sub(smWorldPos);
-                         diff.applyEuler(new THREE.Euler(-sourceMesh.rotation.x, -sourceMesh.rotation.y, -sourceMesh.rotation.z));
-                         diff.set(diff.x / sourceMesh.scale.x, diff.y / sourceMesh.scale.y, diff.z / sourceMesh.scale.z);
-
-                         localOffset.set(diff.x, diff.y, diff.z);
-                      }
-                    } else if (emitterType === 'layer') {
+                    const smWorldPos = new THREE.Vector3();
+                    sourceMesh.getWorldPosition(smWorldPos);
+                    const diff = worldPos.clone().sub(smWorldPos);
+                    diff.applyEuler(new THREE.Euler(-sourceMesh.rotation.x, -sourceMesh.rotation.y, -sourceMesh.rotation.z));
+                    diff.set(diff.x / sourceMesh.scale.x, diff.y / sourceMesh.scale.y, diff.z / sourceMesh.scale.z);
+                    lx = diff.x; ly = diff.y; lz = diff.z;
+                  }
+                  localOffset.set(lx, ly, lz);
+                  localNormal.set(0, 1, 0);
+                } else if (emitterType === 'point') {
+                  localNormal.set(0, -0.5, 1).normalize();
+                } else if (emitterType === 'curve' || sourceNode.type === 'Path') {
+                  let pts: THREE.Vector3[] = [];
+                  if (sourceNode.type === 'Path') {
+                    const pathPoints = sceneObjectsRef.current.filter(o => o.type === 'PathPoint' && o.parentId === sourceNode.id);
+                    pts = pathPoints.map(p => {
+                      const pm = sceneObjectMeshesRef.current.get(p.id);
+                      return pm ? pm.position.clone() : new THREE.Vector3(p.position.x, p.position.y, p.position.z);
+                    });
+                  } else if (sourceProps.points) {
+                    pts = sourceProps.points.map((p: any) => new THREE.Vector3(p.x, p.y, p.z));
+                  }
+                  if (pts.length > 1) {
+                    const t = Math.random();
+                    const cur = new THREE.CatmullRomCurve3(pts);
+                    const pt = cur.getPoint(t);
+                    const tang = cur.getTangent(t).normalize();
+                    const normal = new THREE.Vector3();
+                    if (Math.abs(tang.y) > 0.99) {
+                      normal.set(1, 0, 0);
+                    } else {
+                      normal.set(0, 1, 0);
+                    }
+                    normal.cross(tang).normalize();
+                    localNormal.copy(normal);
+                    const smWorldPos = new THREE.Vector3();
+                    sourceMesh.getWorldPosition(smWorldPos);
+                    const diff = pt.clone().sub(smWorldPos);
+                    diff.applyEuler(new THREE.Euler(-sourceMesh.rotation.x, -sourceMesh.rotation.y, -sourceMesh.rotation.z));
+                    diff.set(diff.x / sourceMesh.scale.x, diff.y / sourceMesh.scale.y, diff.z / sourceMesh.scale.z);
+                    localOffset.set(diff.x, diff.y, diff.z);
+                  }
+                } else if (emitterType === 'layer') {
                   if (isEdgeMode) {
                     const side = Math.floor(Math.random() * 4);
                     const t = (Math.random() * 2 - 1) * sourceExtent;
@@ -2457,7 +2796,7 @@ const timelineOutRef = useRef(timelineOut);
                   .multiplyScalar(speed);
                 
                 const velocity = baseVelocity;
-                
+
                 // Apply lifetime variation
                 const emitterLifetime = emitterProps.particleLifetime ?? 3;
                 const emitterLifetimeVariation = emitterProps.particleLifetimeVariation ?? 0;
@@ -2499,12 +2838,31 @@ const timelineOutRef = useRef(timelineOut);
                 particleSystem.lastEmit = now;
               }
               
+              // Flush stale particles when the sprite asset changes so fresh ones spawn with the new texture
+              const _newSpriteKey =
+                String(emitterProps.particleSpriteImageDataUrl ?? '') +
+                (Array.isArray(emitterProps.particleSpriteSequenceDataUrls) && emitterProps.particleSpriteSequenceDataUrls.length > 0
+                  ? (emitterProps.particleSpriteSequenceDataUrls[0] ?? '').slice(-32)
+                  : '');
+              const _prevSpriteKey = emitterSpriteKeyRef.current.get(obj.id) ?? '';
+              if (_prevSpriteKey !== '' && _prevSpriteKey !== _newSpriteKey) {
+                for (const _p of particleSystem.particles) {
+                  scene.remove(_p.mesh);
+                  const _pl = _p.mesh.userData.pathLine as THREE.Line;
+                  const _pp = _p.mesh.userData.pathPoints as THREE.Group;
+                  if (_pl) scene.remove(_pl);
+                  if (_pp) scene.remove(_pp);
+                }
+                particleSystem.particles = [];
+              }
+              emitterSpriteKeyRef.current.set(obj.id, _newSpriteKey);
+
               // Update existing particles; movement/lifetime only advance while playing or caching.
               const deltaTime = 0.016; // Approximate 60fps
               for (let i = particleSystem.particles.length - 1; i >= 0; i--) {
                 const particle = particleSystem.particles[i];
 
-                if (isPlayingRef.current || isCachingRef.current) {
+                if (isPlayingRef.current || isCachingRef.current || sceneSettingsRef.current.particleLivePreview) {
                   particle.age += deltaTime;
 
                   // Remove dead particles
@@ -2684,15 +3042,84 @@ const timelineOutRef = useRef(timelineOut);
                                    }
                                }
                                
-                               const tangent = curve.getTangentAt(closestT);
-                               particle.velocity.addScaledVector(tangent, force.strength * deltaTime);
+                               let tangent = curve.getTangentAt(closestT);
+                               if (force.reverseFlow) {
+                                   tangent.negate();
+                               }
+
+                               // Falloff: reduce pull/steer after falloffStart % of path
+                               const falloffStart = Math.min(0.9999, (force.falloff ?? 100) / 100);
+                               const falloffFactor = closestT <= falloffStart
+                                 ? 1.0
+                                 : 1.0 - (closestT - falloffStart) / (1.0 - falloffStart + 0.0001);
+
+                               // Twist: rotate desiredVel around tangent by twist angle at closestT
+                               const twistDeg = force.twist ?? 0;
                                
+                               // Calculate desired speed forward along path
+                               let desiredSpeed = force.strength * 2.0; 
+                               let desiredVel = tangent.clone().multiplyScalar(desiredSpeed);
+
+                               if (twistDeg !== 0) {
+                                 // Build a perpendicular to tangent
+                                 const anyUp = Math.abs(tangent.y) < 0.9
+                                   ? new THREE.Vector3(0, 1, 0)
+                                   : new THREE.Vector3(1, 0, 0);
+                                 const perp = new THREE.Vector3()
+                                   .crossVectors(tangent.clone().normalize(), anyUp)
+                                   .normalize();
+                                 // Rotate the perp around the tangent by the accumulated angle at closestT
+                                 const twistAngle = (twistDeg * closestT * Math.PI) / 180;
+                                 const twistQ = new THREE.Quaternion().setFromAxisAngle(
+                                   tangent.clone().normalize(), twistAngle
+                                 );
+                                 perp.applyQuaternion(twistQ);
+                                 // Blend forward + sideways keeping total magnitude = desiredSpeed
+                                 // revPerLoop controls how tight the helix is, NOT the speed
+                                 const revPerLoop = Math.abs(twistDeg) / 360;
+                                 const sideRatio = Math.tanh(revPerLoop); // approaches 1 asymptotically
+                                 const fwdRatio = Math.sqrt(Math.max(0, 1 - sideRatio * sideRatio));
+                                 desiredVel = new THREE.Vector3()
+                                   .copy(tangent.clone().normalize()).multiplyScalar(fwdRatio)
+                                   .addScaledVector(perp, sideRatio * Math.sign(twistDeg))
+                                   .normalize()
+                                   .multiplyScalar(desiredSpeed);
+                               }
+                               
+                               // Pull force toward path core
                                const nearestPoint = curve.getPointAt(closestT);
                                const toCurve = new THREE.Vector3().subVectors(nearestPoint, particle.mesh.position);
-                               if (toCurve.lengthSq() > 0.1) {
-                                   toCurve.normalize();
-                                   particle.velocity.addScaledVector(toCurve, Math.abs(force.strength * 0.5) * deltaTime);
+                               const distToCurveSq = toCurve.lengthSq();
+                               
+                               // Determine the "tube" radius
+                               const maxRadius = force.radius !== undefined ? Math.max(0.1, force.radius) : 50;
+                               
+                               let responsiveness = 5.0; // Base responsiveness
+                               
+                               if (distToCurveSq > 0.01) {
+                                   const distToCurve = Math.sqrt(distToCurveSq);
+                                   const normalizedDist = Math.max(0, distToCurve / maxRadius);
+                                   
+                                   // Inside the tube (normalizedDist < 1), we let the particle drift more, 
+                                   // applying a very weak pull. Once it hits or exceeds the radius, the pull heavily ramps up.
+                                   let pullStrength = Math.abs(force.strength) * 2.5 * Math.pow(normalizedDist, 4.0);
+                                   
+                                   // Cap the pull so it doesn't instantly snap back and jitter if it gets too far
+                                   pullStrength = Math.min(pullStrength, Math.abs(force.strength) * 10.0);
+                                   // Apply falloff to pull strength
+                                   pullStrength *= falloffFactor;
+                                   
+                                   desiredVel.add(toCurve.normalize().multiplyScalar(pullStrength));
+                                   
+                                   // If we're freely floating inside the radius, loosen the steering responsiveness 
+                                   // so particles can retain their own organic inertia and noise. 
+                                   // If drifting too far out, steering gets tight again.
+                                   responsiveness = Math.max(0.5, Math.min(5.0, 5.0 * Math.pow(normalizedDist, 2.0)));
                                }
+                               
+                               // Apply correction steering (damping existing outward velocity)
+                               let steer = desiredVel.clone().sub(particle.velocity);
+                               particle.velocity.add(steer.multiplyScalar(Math.min(1.0, responsiveness * falloffFactor * deltaTime)));
                             }
                           } else if (force.direction) {
                             const flowDir = new THREE.Vector3(force.direction.x, force.direction.y, force.direction.z).normalize();
@@ -3701,6 +4128,38 @@ Emitters: ${numEmitters}`;
         
         group.position.copy(forcePos);
         gizmo = group;
+      } else if (force.type === 'flow-curve') {
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = 'rgba(0, 150, 255, 0.4)';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          ctx.strokeStyle = 'white';
+          ctx.lineWidth = 16;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          
+          // Draw sine waves
+          for (let i = 0; i < 3; i++) {
+            const y = 70 + i * 58;
+            ctx.beginPath();
+            for (let x = 40; x <= 216; x += 4) {
+              const dx = (x - 40) / 176;
+              const waveY = y + Math.sin(dx * Math.PI * 2 * 1.5) * 18;
+              if (x === 40) ctx.moveTo(x, waveY);
+              else ctx.lineTo(x, waveY);
+            }
+            ctx.stroke();
+          }
+        }
+        const texture = new THREE.CanvasTexture(canvas);
+        const spriteMat = new THREE.SpriteMaterial({ map: texture, sizeAttenuation: true });
+        gizmo = new THREE.Sprite(spriteMat);
+        gizmo.scale.set(30, 30, 1);
+        gizmo.position.copy(gizmoPosition);
       } else {
         // Create arrow for directional forces
         gizmo = new THREE.ArrowHelper(direction, forcePos, length, color, 30, 20);
@@ -4714,6 +5173,17 @@ Emitters: ${numEmitters}`;
         />
       )}
       <div className="scene-canvas" ref={containerRef} tabIndex={0} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', zIndex: 1, pointerEvents: 'auto' }} />
+      <div
+        ref={marqueeRef}
+        style={{
+          display: 'none',
+          position: 'absolute',
+          border: '1px dashed #ffffff',
+          backgroundColor: 'rgba(255, 255, 255, 0.1)',
+          pointerEvents: 'none',
+          zIndex: 3,
+        }}
+      />
       <div
         className="viewport-shelf"
         style={{

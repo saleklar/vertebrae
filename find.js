@@ -1,0 +1,1 @@
+const fs = require('fs'); const s = fs.readFileSync('src/App.tsx', 'utf8'); console.log('Em: ' + s.indexOf('handleCreateObject(\\'Emitter\\')')); console.log('Ts: ' + s.indexOf('Target Shape (Optional)'));

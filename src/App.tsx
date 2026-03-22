@@ -4,6 +4,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { Scene3D, Scene3DRef, SpineAttachmentInfo, SpineFrameOverrides } from './Scene3D';
 import { Animator3D } from './Animator3D';
 import { CurveEditor } from './CurveEditor';
+import { ParticleCreator } from './ParticleCreator';
 
 type SceneSize = {
   x: number;
@@ -21,6 +22,7 @@ type SceneSettings = {
   particlePreviewSize: number;
   particleBudget: number;
   adaptiveEmission?: boolean;
+  particleLivePreview?: boolean;
   particleSequenceBudget: number;
   particleSequenceBudgetLoop: boolean;
   exportProjectionMode: 'orthographic' | 'perspective';
@@ -46,6 +48,9 @@ export type PhysicsForce = {
   radius?: number; // For attractor, repulsor, tornado, vortex
   direction?: { x: number; y: number; z: number }; // For wind
   curveId?: string; // For flow-curve: references a curve object
+  reverseFlow?: boolean; // For flow-curve: reverse path direction
+  twist?: number; // For flow-curve: spiral rotation of particles around path tangent (degrees per loop)
+  falloff?: number; // For flow-curve: % of path length after which force weakens (0–100)
   targetShapeId?: string; // For attractor/repulsor/collider: target shape to pull/push towards or collide with
   affectedEmitterIds: string[]; // Which emitters this force affects
   enabled: boolean;
@@ -133,6 +138,7 @@ const DEFAULT_SCENE_SETTINGS: SceneSettings = {
   particlePreviewSize: 1.2,
   particleBudget: 500,
   adaptiveEmission: true,
+  particleLivePreview: true,
   particleSequenceBudget: 30,
   particleSequenceBudgetLoop: true,
   exportProjectionMode: 'orthographic',
@@ -445,7 +451,7 @@ export function App() {
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
   const [showPresetsMenu, setShowPresetsMenu] = useState(false);
-  const [showCreateSubmenu, setShowCreateSubmenu] = useState<'3D' | '2D' | 'Presets' | null>(null);
+  const [showCreateSubmenu, setShowCreateSubmenu] = useState<'Shapes' | 'Modifiers' | 'Presets' | null>(null);
   const [showPrefsSubmenu, setShowPrefsSubmenu] = useState(false);
   const [guiScale, setGuiScaleState] = useState<number>(() => {
     try { const v = localStorage.getItem('vertebrae_gui_scale'); return v ? parseFloat(v) : 1.0; } catch { return 1.0; }
@@ -475,31 +481,10 @@ export function App() {
         rotation: { x: 0, y: 0, z: 0 },
         scale: { x: 1, y: 1, z: 1 },
         parentId: null,
-        properties: { emitterType: 'curve' }
-      };
+        properties: { }
+        };
 
-      const emitterId = 'emitter_' + Date.now();
-      const newEmitter: SceneObject = {
-        id: emitterId,
-        name: 'Bezier Emitter',
-        type: 'Emitter',
-        position: { x: 0, y: 0, z: 0 },
-        rotation: { x: 0, y: 0, z: 0 },
-        scale: { x: 1, y: 1, z: 1 },
-        parentId: null,
-        properties: {
-          emissionRate: 100,
-          particleSpeed: 10,
-          particleLifetime: 3,
-          particleSize: 5,
-          particleColor: '#ffffff',
-          shape_emitterType: 'curve'
-        }
-      };
-
-      pathObject.parentId = emitterId;
-
-      const pointObjects: SceneObject[] = points.map((pt, i) => ({
+        const pointObjects: SceneObject[] = points.map((pt, i) => ({
         id: 'bezier_pt_' + Date.now() + '_' + i,
         name: 'Point ' + i,
         type: 'PathPoint',
@@ -510,7 +495,7 @@ export function App() {
         properties: {}
       }));
       
-      setSceneObjects(prev => [...prev, newEmitter, pathObject, ...pointObjects]);
+      setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
     }, []);
 
     // ── applySpineJson: parse Spine JSON into scene bones + keyframes ──
@@ -774,6 +759,8 @@ export function App() {
   const [showTransformRotation, setShowTransformRotation] = useState(true);
   const [showTransformScale, setShowTransformScale] = useState(true);
   const [showParentEmitter, setShowParentEmitter] = useState(true);
+  const [showPathAnimation, setShowPathAnimation] = useState(false);
+  const [showParticleCreator, setShowParticleCreator] = useState(false);
   const [physicsForces, setPhysicsForces] = useState<PhysicsForce[]>([]);
   const [showPhysicsPanel, setShowPhysicsPanel] = useState(false);
   const [selectedForceId, setSelectedForceId] = useState<string | null>(null);
@@ -1130,31 +1117,10 @@ export function App() {
         rotation: { x: 0, y: 0, z: 0 },
         scale: { x: 1, y: 1, z: 1 },
         parentId: null,
-        properties: { emitterType: 'curve' }
-      };
+        properties: { }
+        };
 
-      const emitterId = 'emitter_' + Date.now();
-      const newEmitter: SceneObject = {
-        id: emitterId,
-        name: 'Bezier Emitter',
-        type: 'Emitter',
-        position: { x: 0, y: 0, z: 0 },
-        rotation: { x: 0, y: 0, z: 0 },
-        scale: { x: 1, y: 1, z: 1 },
-        parentId: null,
-        properties: {
-          emissionRate: 100,
-          particleSpeed: 10,
-          particleLifetime: 3,
-          particleSize: 5,
-          particleColor: '#ffffff',
-          shape_emitterType: 'curve'
-        }
-      };
-
-      pathObject.parentId = emitterId;
-
-      const pointObjects: SceneObject[] = simplifiedPoints.map((pt, i) => ({
+        const pointObjects: SceneObject[] = simplifiedPoints.map((pt, i) => ({
         id: 'path_pt_' + Date.now() + '_' + i,
         name: 'Point ' + i,
         type: 'PathPoint',
@@ -1165,8 +1131,8 @@ export function App() {
         properties: {}
       }));
 
-      setSceneObjects(prev => [...prev, newEmitter, pathObject, ...pointObjects]);
-      setSelectedObjectId(newEmitter.id);
+      setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
+      setSelectedObjectId(pathObject.id);
     }, []);
 
 
@@ -1175,15 +1141,15 @@ export function App() {
   const handleUpdateEmitterProperty = useCallback((property: string, value: number | string | boolean | string[]) => {
     if (!selectedObjectId) return;
     setSceneObjects(prev => prev.map(obj => {
-      if (obj.id === selectedObjectId && obj.type === 'Emitter') {
-        return {
-          ...obj,
-          properties: {
-            ...(obj as EmitterObject).properties,
-            [property]: value
-          }
-        };
-      }
+      if (obj.id === selectedObjectId) {
+          return {
+            ...obj,
+            properties: {
+              ...(obj.properties || {}),
+              [property]: value
+            }
+          };
+        }
       return obj;
     }));
   }, [selectedObjectId]);
@@ -1329,13 +1295,75 @@ export function App() {
   })();
 
   const normalizeObjectName = useCallback((value: string) => {
+    if (!value) return '';
     return value
       .toLowerCase()
-      .replace(/\s+/g, '_')
+      .replace(/[^a-z0-9_]/g, '_')
+      .replace(/_+/g, '_')
       .replace(/^_+|_+$/g, '');
   }, []);
 
-  const getObjectDisplayName = useCallback((obj: SceneObject) => {
+  useEffect(() => {
+    let changed = false;
+    const namesSeen = new Set<string>();
+    
+    const newForces = physicsForces.map(f => {
+      let freshName = normalizeObjectName(f.name || '');
+      if (!freshName) freshName = normalizeObjectName(f.type) || 'force';
+      
+      let newName = freshName;
+      let counter = 1;
+      const match = newName.match(/^(.*?)_([0-9]+)$/);
+      let stem = newName;
+      if (match) {
+        stem = match[1];
+        counter = parseInt(match[2], 10);
+      }
+      
+      while (namesSeen.has(newName)) {
+        newName = `${stem}_${counter}`;
+        counter++;
+      }
+      namesSeen.add(newName);
+      
+      if (newName !== f.name) {
+        changed = true;
+        return { ...f, name: newName };
+      }
+      return f;
+    });
+
+    const newObjects = sceneObjects.map(o => {
+      let freshName = normalizeObjectName(o.name || '');
+      if (!freshName) freshName = normalizeObjectName(o.type) || 'object';
+      
+      let newName = freshName;
+      let counter = 1;
+      const match = newName.match(/^(.*?)_([0-9]+)$/);
+      let stem = newName;
+      if (match) {
+        stem = match[1];
+        counter = parseInt(match[2], 10);
+      }
+      
+      while (namesSeen.has(newName)) {
+        newName = `${stem}_${counter}`;
+        counter++;
+      }
+      namesSeen.add(newName);
+      
+      if (newName !== o.name) {
+        changed = true;
+        return { ...o, name: newName };
+      }
+      return o;
+    });
+
+    if (changed) {
+      setPhysicsForces(newForces);
+      setSceneObjects(newObjects);
+    }
+  }, [sceneObjects, physicsForces, normalizeObjectName]);  const getObjectDisplayName = useCallback((obj: SceneObject) => {
     return obj.name && obj.name.trim().length > 0 ? obj.name : obj.id;
   }, []);
 
@@ -2808,12 +2836,11 @@ export function App() {
   // Render Particle System mode
   return (
     <div className="workspace" style={{ zoom: guiScale }}>
-      <div style={{ position: 'absolute', top: 50, left: '50%', transform: 'translateX(-50%)', zIndex: 100, pointerEvents: 'none', background: 'rgba(0,0,0,0.6)', padding: '8px 12px', borderRadius: '6px', border: '1px solid #444', display: 'flex', alignItems: 'center', boxShadow: '0 4px 6px rgba(0,0,0,0.3)' }}>
-        <button style={{ pointerEvents: 'all', background: drawBezierCurveMode ? '#ff6600' : '#222', color: '#fff', border: '1px solid #555', padding: '4px 10px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={handleStartDrawBezierCurve} disabled={drawBezierCurveMode}>
-          {drawBezierCurveMode ? 'Drawing Curve...' : '✏️ Draw Bezier Curve (Path)'}
-        </button>
-        {drawBezierCurveMode && <span style={{ marginLeft: 12, color: '#ffcc00', pointerEvents: 'none', fontSize: '13px' }}>Click inside the 3D scene to place points. Double-Click or ESC to finish.</span>}
-      </div>
+      {drawBezierCurveMode && (
+        <div style={{ position: 'absolute', top: 50, left: '50%', transform: 'translateX(-50%)', zIndex: 100, pointerEvents: 'none', background: 'rgba(0,0,0,0.6)', padding: '8px 12px', borderRadius: '6px', border: '1px solid #444', display: 'flex', alignItems: 'center', boxShadow: '0 4px 6px rgba(0,0,0,0.3)' }}>
+          <span style={{ color: '#ffcc00', pointerEvents: 'none', fontSize: '14px', fontWeight: 'bold' }}>✏️ Drawing Curve Mode - Click inside the 3D scene to place points. Double-Click or ESC to finish.</span>
+        </div>
+      )}
       <div className="menu-bar">
         <div className="menu-item">
           <button
@@ -2958,17 +2985,104 @@ export function App() {
           {showCreateMenu && (
             <div className="menu-dropdown">
               <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2 }}>Objects</div>
+              
               <button
                 className="menu-option"
-                onClick={() => {
-                  handleCreateObject('Emitter');
-                  setShowCreateMenu(false);
-                }}
+                onClick={() => { handleCreateObject('Emitter'); setShowCreateMenu(false); setShowCreateSubmenu(null); }}
+                onMouseEnter={() => setShowCreateSubmenu(null)}
                 type="button"
               >
                 <span>Emitter</span>
                 <span style={{ fontSize: '0.68rem', color: '#666' }}>point · 100/s</span>
               </button>
+              
+              <button
+                className="menu-option menu-option-submenu"
+                onMouseEnter={() => setShowCreateSubmenu('Shapes')}
+                type="button"
+              >
+                <span>Shapes</span>
+                <span className="submenu-indicator">▶</span>
+              </button>
+              
+              {showCreateSubmenu === 'Shapes' && (
+                <div className="menu-submenu">
+                  <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2 }}>3D Primitives</div>
+                  {['Cube', 'Sphere', 'Cylinder', 'Cone', 'Plane', 'Torus'].map(shape => (
+                    <button key={shape} className="menu-option" onClick={() => { handleCreateObject(shape); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                      <span>{shape}</span>
+                    </button>
+                  ))}
+                  <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2, marginTop: 4 }}>2D Primitives</div>
+                  {['Circle', 'Rectangle', 'Triangle', 'Line', 'Arc', 'Polygon'].map(shape => (
+                    <button key={shape} className="menu-option" onClick={() => { handleCreateObject(shape); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                      <span>{shape}</span>
+                    </button>
+                  ))}
+                  <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2, marginTop: 4 }}>Paths</div>
+                  <button className="menu-option" onClick={() => { handleStartDrawBezierCurve(); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                    <span>✏️ Draw Bezier Curve</span>
+                  </button>
+                </div>
+              )}
+              
+              <button
+                className="menu-option menu-option-submenu"
+                onMouseEnter={() => setShowCreateSubmenu('Modifiers')}
+                type="button"
+              >
+                <span>Modifiers</span>
+                <span className="submenu-indicator">▶</span>
+              </button>
+              
+              {showCreateSubmenu === 'Modifiers' && (
+                <div className="menu-submenu">
+                  <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2 }}>Physics Forces</div>
+                  {[
+                    { id: 'gravity', label: 'Gravity' },
+                    { id: 'wind', label: 'Wind' },
+                    { id: 'vortex', label: 'Vortex' },
+                    { id: 'turbulence', label: 'Turbulence' },
+                    { id: 'tornado', label: 'Tornado' },
+                    { id: 'attractor', label: 'Attractor' },
+                    { id: 'collider', label: 'Collider' }, { id: 'flow-curve', label: 'Follow Path' }, { id: 'repulsor', label: 'Repulsor' }, { id: 'thermal-updraft', label: 'Thermal Updraft' }, { id: 'drag', label: 'Drag' }, { id: 'damping', label: 'Damping' }
+                  ].map(force => (
+                    <button key={force.id} className="menu-option" onClick={() => { handleAddPhysicsForce(force.id as PhysicsForceType); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                      <span>{force.label}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              
+              <button
+                className="menu-option menu-option-submenu"
+                onMouseEnter={() => setShowCreateSubmenu('Presets')}
+                type="button"
+              >
+                <span>Presets</span>
+                <span className="submenu-indicator">▶</span>
+              </button>
+              
+              {showCreateSubmenu === 'Presets' && (
+                <div className="menu-submenu" style={{ minWidth: 160 }}>
+                  <button className="menu-option" onClick={() => { handleCreateFirePreset('campfire'); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                    <span>🔥 Campfire</span>
+                  </button>
+                  <button className="menu-option" onClick={() => { handleCreateFirePreset('torch'); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                    <span>🧨 Torch</span>
+                  </button>
+                  <div style={{ padding: '5px 10px 3px', fontSize: '0.65rem', color: '#888', textTransform: 'uppercase', letterSpacing: '0.5px', borderBottom: '1px solid #1a1a1a', marginBottom: 2, marginTop: 4 }}>Classic Native FX</div>
+                  <button className="menu-option" onClick={() => { handleCreateClassicPreset('sparks'); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                    <span>✨ Magic Sparks</span>
+                  </button>
+                  <button className="menu-option" onClick={() => { handleCreateClassicPreset('fire'); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                    <span>🔥 Stylized Fire</span>
+                  </button>
+                  <button className="menu-option" onClick={() => { handleCreateClassicPreset('smoke'); setShowCreateMenu(false); setShowCreateSubmenu(null); }} type="button">
+                    <span>💨 Soft Smoke</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -3158,6 +3272,15 @@ export function App() {
                     <option value="real">Real Particles</option>
                     <option value="white-dots">White Dots</option>
                   </select>
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginTop: '6px' }}>
+                    <input
+                      type="checkbox"
+                      checked={sceneSettings.particleLivePreview ?? true}
+                      onChange={(e) => setSceneSettings((prev) => ({ ...prev, particleLivePreview: e.target.checked }))}
+                    />
+                    Live Particle Preview (no play needed)
+                  </label>
 
                   <label htmlFor="particle-preview-size">
                     Preview Dot Size: {sceneSettings.particlePreviewSize.toFixed(1)}
@@ -3399,6 +3522,8 @@ export function App() {
                                   }}
                                 />
                               </div>
+                              {/* Child shapes/objects connected to this emitter as emission sources */}
+                              {(hierarchyChildrenByParent.get(obj.id) ?? []).map(child => renderHierarchyNode(child, 1))}
                             </div>
                           );
                         }))
@@ -3814,10 +3939,10 @@ export function App() {
                           onChange={(event) => handleUpdatePhysicsForce(force.id, { strength: Number.parseFloat(event.target.value) })}
                         />
 
-                        {(force.type === 'attractor' || force.type === 'repulsor' || force.type === 'tornado' || force.type === 'vortex' || force.type === 'turbulence') && (
+                        {(force.type === 'attractor' || force.type === 'repulsor' || force.type === 'tornado' || force.type === 'vortex' || force.type === 'turbulence' || force.type === 'flow-curve') && (
                           <>
                             <label htmlFor="force-radius">
-                              {force.type === 'turbulence' ? 'Size (Deformation Map)' : 'Radius'}: {force.radius?.toFixed(1) ?? 50}
+                              {force.type === 'turbulence' ? 'Size (Deformation Map)' : force.type === 'flow-curve' ? 'Tube Radius' : 'Radius'}: {force.radius?.toFixed(1) ?? 50}
                             </label>
                             <input
                               id="force-radius"
@@ -3967,7 +4092,74 @@ export function App() {
                           </>
                         )}
 
-                        <label>Affected Emitters</label>
+                        {force.type === 'flow-curve' && (
+                          <>
+                            <label>Target Path</label>
+                            <select
+                              value={force.curveId || ''}
+                              onChange={(event) => {
+                                handleUpdatePhysicsForce(force.id, { curveId: event.target.value || undefined });
+                              }}
+                            >
+                              <option value="">Select Path...</option>
+                              {sceneObjects
+                                .filter((obj) => obj.type === 'Path' || obj.type === 'Curve' || (obj.type || '').toLowerCase().includes('bezier'))
+                                .map((shape) => (
+                                  <option key={shape.id} value={shape.id}>
+                                    {shape.name || shape.id}
+                                  </option>
+                                ))}
+                            </select>
+                            
+                            <label style={{ display: 'flex', alignItems: 'center', marginTop: '10px', cursor: 'pointer' }}>
+                              <input
+                                type="checkbox"
+                                checked={!!force.reverseFlow}
+                                onChange={(event) => {
+                                  handleUpdatePhysicsForce(force.id, { reverseFlow: event.target.checked });
+                                }}
+                                style={{ marginRight: '8px' }}
+                              />
+                              Reverse Path Direction
+                            </label>
+
+                            <label htmlFor={`force-twist-${force.id}`} style={{ marginTop: '10px', display: 'block' }}>
+                              Twist: {(force.twist ?? 0).toFixed(0)}° / loop
+                            </label>
+                            <input
+                              id={`force-twist-${force.id}`}
+                              type="range"
+                              min={-720}
+                              max={720}
+                              step={5}
+                              value={force.twist ?? 0}
+                              onChange={(event) => handleUpdatePhysicsForce(force.id, { twist: Number.parseFloat(event.target.value) })}
+                            />
+
+                            <label htmlFor={`force-falloff-${force.id}`} style={{ marginTop: '10px', display: 'block' }}>
+                              Fall Off Start: {(force.falloff ?? 100).toFixed(0)}%
+                            </label>
+                            <input
+                              id={`force-falloff-${force.id}`}
+                              type="range"
+                              min={0}
+                              max={100}
+                              step={1}
+                              value={force.falloff ?? 100}
+                              onChange={(event) => handleUpdatePhysicsForce(force.id, { falloff: Number.parseFloat(event.target.value) })}
+                            />
+                            <p style={{ fontSize: '0.8rem', color: '#8a93a2', margin: '2px 0 6px' }}>
+                              After this point on the path the pull weakens, letting particles fly away.
+                            </p>
+
+                            <p style={{ fontSize: '0.85rem', color: '#8a93a2', marginTop: '0.5rem' }}>
+                              Particles will run along the selected 3D path.
+                            </p>
+                            <hr className="form-divider" />
+                          </>
+                        )}
+
+                          <label>Affected Emitters</label>
                         <div style={{ maxHeight: '200px', overflowY: 'auto', border: '1px solid #3b455c', borderRadius: '4px', padding: '8px' }}>
                           {sceneObjects
                             .filter((obj) => obj.type === 'Emitter')
@@ -4068,10 +4260,10 @@ export function App() {
                         </label>
                         <input
                           id="emission-rate"
-                          max={500}
+                          max={10000}
                           min={1}
                           onChange={(event) => handleUpdateEmitterProperty('emissionRate', Number.parseFloat(event.target.value))}
-                          step={1}
+                          step={10}
                           type="range"
                           value={selectedEmitterProperties.emissionRate}
                         />
@@ -4094,7 +4286,34 @@ export function App() {
                         </select>
 
                         <div className={`transform-slots ${selectedObject.type === 'Emitter' ? 'compact-emitter' : ''}`}>
+                          <label htmlFor="emitter-type">Emitter Shape</label>
+                          <select
+                            id="emitter-type"
+                            value={selectedEmitterProperties.emitterType}
+                            onChange={(event) => handleUpdateEmitterProperty('emitterType', event.target.value)}
+                          >
+                            <option value="point">Point</option>
+                            <option value="circle">Circle</option>
+                            <option value="square">Square</option>
+                            <option value="cube">Cube</option>
+                            <option value="ball">Ball (Sphere)</option>
+                            <option value="layer">Layer</option>
+                          </select>
 
+                          {selectedEmitterProperties.emitterType !== 'point' && (
+                            <>
+                              <label htmlFor="emitter-emission-mode">Emission Mode</label>
+                              <select
+                                id="emitter-emission-mode"
+                                value={selectedEmitterProperties.emissionMode}
+                                onChange={(event) => handleUpdateEmitterProperty('emissionMode', event.target.value as 'volume' | 'surface' | 'edge')}
+                              >
+                                <option value="volume">Volume (fill interior)</option>
+                                <option value="surface">Surface (outer shell)</option>
+                                <option value="edge">Edge (wireframe)</option>
+                              </select>
+                            </>
+                          )}
                         </div>
                       </div>
                     )}
@@ -4137,17 +4356,113 @@ export function App() {
                               </option>
                             ))}
                         </select>
-                        <p style={{ fontSize: '0.8rem', color: '#8a93a2', marginTop: '0.5rem' }}>
-                          {selectedObject.parentId 
-                            ? 'This shape is connected to an emitter and will be used as an emission source.' 
-                            : 'Select an emitter to use this shape as an emission source.'}
-                        </p>
-                      </div>
+                        <p style={{ fontSize: '0.8rem', color: '#8a93a2', marginTop: '0.5rem', marginBottom: '0.8rem' }}>
+                            {selectedObject.parentId
+                              ? 'This shape is connected to an emitter and will be used as an emission source.'
+                              : 'Select an emitter to use this shape as an emission source.'}
+                          </p>
+
+                          {selectedObject.parentId && (
+                            <>
+                              <label htmlFor="shape-emission-mode">Emission Mode</label>
+                              <select
+                                id="shape-emission-mode"
+                                value={(selectedObject.properties as any)?.emissionMode || 'volume'}
+                                onChange={(event) => {
+                                  handleUpdateEmitterProperty('emissionMode', event.target.value);
+                                }}
+                              >
+                                <option value="volume">Volume (Random fill / Inner)</option>
+                                <option value="surface">Surface (Outer Shell)</option>
+                                <option value="edge">Edge (Wireframe)</option>
+                              </select>
+                            </>
+                          )}
+                        </div>
                     )}
 
                     <hr style={{ margin: '0.8rem 0', borderColor: '#3b455c' }} />
                   </>
                 )}
+
+                {/* Path Animation Section */}
+                <button
+                  type="button"
+                  className="collapsible-section"
+                  onClick={() => setShowPathAnimation((prev) => !prev)}
+                >
+                  <span>Path Animation</span>
+                  <span>{showPathAnimation ? '▾' : '▸'}</span>
+                </button>
+
+                {showPathAnimation && (
+                  <div className="subpanel-content">
+                    <label htmlFor="path-anim-id">Follow Path</label>
+                    <select
+                      id="path-anim-id"
+                      value={(selectedObject.properties as any)?.pathAnimPathId || ''}
+                      onChange={(e) => handleUpdateEmitterProperty('pathAnimPathId', e.target.value)}
+                      style={{ width: '100%', marginBottom: '0.4rem' }}
+                    >
+                      <option value="">None</option>
+                      {sceneObjects
+                        .filter((obj) => obj.type === 'Path')
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name || p.id}
+                          </option>
+                        ))}
+                    </select>
+
+                    {!!(selectedObject.properties as any)?.pathAnimPathId && (
+                      <>
+                        <label htmlFor="path-anim-speed">
+                          Speed: {((selectedObject.properties as any)?.pathAnimSpeed ?? 0.1).toFixed(2)}
+                        </label>
+                        <input
+                          id="path-anim-speed"
+                          type="range"
+                          min={0.01}
+                          max={2.0}
+                          step={0.01}
+                          value={(selectedObject.properties as any)?.pathAnimSpeed ?? 0.1}
+                          onChange={(e) => handleUpdateEmitterProperty('pathAnimSpeed', Number.parseFloat(e.target.value))}
+                        />
+
+                        <hr style={{ margin: '0.6rem 0', borderColor: '#3b455c' }} />
+
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '6px' }}>
+                          <input
+                            type="checkbox"
+                            checked={(selectedObject.properties as any)?.pathAnimLoop !== false}
+                            onChange={(e) => handleUpdateEmitterProperty('pathAnimLoop', e.target.checked)}
+                          />
+                          Loop
+                        </label>
+
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '6px' }}>
+                          <input
+                            type="checkbox"
+                            checked={!!(selectedObject.properties as any)?.pathAnimOrient}
+                            onChange={(e) => handleUpdateEmitterProperty('pathAnimOrient', e.target.checked)}
+                          />
+                          Orient to path (align forward axis)
+                        </label>
+
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '6px' }}>
+                          <input
+                            type="checkbox"
+                            checked={!!(selectedObject.properties as any)?.pathAnimAlignUp}
+                            onChange={(e) => handleUpdateEmitterProperty('pathAnimAlignUp', e.target.checked)}
+                          />
+                          Lock up-axis to path normal
+                        </label>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                <hr style={{ margin: '0.8rem 0', borderColor: '#3b455c' }} />
 
                 {/* Position Transform Section */}
                 <button
@@ -4390,6 +4705,15 @@ export function App() {
                           <option value="3d-model">Live 3D Model</option>
                         </select>
 
+                        <button
+                          type="button"
+                          className="apply-button"
+                          style={{ marginBottom: '6px' }}
+                          onClick={() => setShowParticleCreator(true)}
+                        >
+                          ✨ Open Particle Creator
+                        </button>
+
                                                 <label htmlFor="particle-blend-mode">
                           Particle Blend Mode
                         </label>
@@ -4494,10 +4818,34 @@ export function App() {
                               </>
                             )}
 
-                            {selectedEmitterProperties.particleSpriteSequenceDataUrls.length === 0 && selectedEmitterProperties.particleSpriteImageName && (
-                              <label>
-                                Sprite: {selectedEmitterProperties.particleSpriteImageName}
-                              </label>
+                            {selectedEmitterProperties.particleSpriteSequenceDataUrls.length === 0 && selectedEmitterProperties.particleSpriteImageDataUrl && (
+                              <div style={{ margin: '6px 0', background: '#0a0d18', borderRadius: '6px', padding: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <img
+                                  src={selectedEmitterProperties.particleSpriteImageDataUrl}
+                                  alt="sprite preview"
+                                  style={{ width: '56px', height: '56px', objectFit: 'contain', imageRendering: 'pixelated', background: '#000', borderRadius: '4px', flexShrink: 0 }}
+                                />
+                                <span style={{ fontSize: '0.78rem', color: '#8a93a2', wordBreak: 'break-all' }}>
+                                  {selectedEmitterProperties.particleSpriteImageName || 'Custom sprite'}
+                                </span>
+                              </div>
+                            )}
+
+                            {selectedEmitterProperties.particleSpriteSequenceDataUrls.length > 0 && (
+                              <div style={{ margin: '6px 0', background: '#0a0d18', borderRadius: '6px', padding: '6px' }}>
+                                <div style={{ fontSize: '0.75rem', color: '#8a93a2', marginBottom: '4px' }}>
+                                  {selectedEmitterProperties.particleSpriteSequenceFirstName || 'Animated sequence'} — {selectedEmitterProperties.particleSpriteSequenceDataUrls.length} frames
+                                </div>
+                                <div style={{ display: 'flex', gap: '3px', flexWrap: 'wrap' }}>
+                                  {selectedEmitterProperties.particleSpriteSequenceDataUrls.slice(0, 8).map((url, i) => (
+                                    <img key={i} src={url} alt={`frame ${i}`}
+                                      style={{ width: '28px', height: '28px', objectFit: 'contain', background: '#000', borderRadius: '3px', imageRendering: 'pixelated' }} />
+                                  ))}
+                                  {selectedEmitterProperties.particleSpriteSequenceDataUrls.length > 8 && (
+                                    <span style={{ fontSize: '0.7rem', color: '#555', alignSelf: 'center' }}>+{selectedEmitterProperties.particleSpriteSequenceDataUrls.length - 8} more</span>
+                                  )}
+                                </div>
+                              </div>
                             )}
 
                             {(selectedEmitterProperties.particleSpriteSequenceDataUrls.length > 0 || selectedEmitterProperties.particleSpriteImageDataUrl) && (
@@ -4542,7 +4890,7 @@ export function App() {
                         <input
                           id="particle-speed"
                           max={200}
-                          min={5}
+                          min={0}
                           onChange={(event) => handleUpdateEmitterProperty('particleSpeed', Number.parseFloat(event.target.value))}
                           step={1}
                           type="range"
@@ -5062,9 +5410,31 @@ export function App() {
           </div>
         </div>
       </div>
+      <ParticleCreator
+          visible={showParticleCreator}
+          onExport={(dataUrl, name) => {
+            handleUpdateEmitterProperty('particleSpriteImageDataUrl', dataUrl);
+            handleUpdateEmitterProperty('particleSpriteImageName', name);
+            handleUpdateEmitterProperty('particleType', 'sprites');
+            handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', []);
+            setShowParticleCreator(false);
+          }}
+          onExportSequence={(dataUrls, name, fps) => {
+            handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', dataUrls);
+            handleUpdateEmitterProperty('particleSpriteSequenceFirstName', `${name}_frame0.png`);
+            handleUpdateEmitterProperty('particleSpriteSequenceFps', fps);
+            handleUpdateEmitterProperty('particleSpriteImageDataUrl', '');
+            handleUpdateEmitterProperty('particleSpriteImageName', '');
+            handleUpdateEmitterProperty('particleType', 'sprites');
+            setShowParticleCreator(false);
+          }}
+          onClose={() => setShowParticleCreator(false)}
+        />
     </div>
   );
 }
+
+
 
 
 
