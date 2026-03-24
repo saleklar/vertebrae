@@ -5273,7 +5273,8 @@ const timelineOutRef = useRef(timelineOut);
               const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5;
               // Base spread fades out as we rise so tendrils converge upward
               const baseSpread = 1.0 - yNorm;
-              const noiseT   = tendrilPhase + yNorm * 3.0;
+              // yNorm*k - fAnimT*speed → upward-traveling wave (sin(ky - ωt))
+              const noiseT   = tendrilSeed + yNorm * 3.0 - fAnimT * speed;
               const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)       * 1.0
                         + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7)  * 0.4) * turbulence * widthEnv;
               const dz = Math.cos(noiseT * 0.9  + tendrilSeed * 2.3)          * turbulence * widthEnv * 0.6;
