@@ -1,11 +1,11 @@
 import { generateFireSequenceHeadless, defaultTorchParams, defaultCampfireParams } from './FireHeadless';
+import { defaultLightningOpts, LightningGenOptions } from './LightningGenerator';
 import * as THREE from 'three';
 import { loadImagesFromDB, saveImageToDB, deleteImageFromDB, StoredImage } from './imageStorage';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Scene3D, Scene3DRef, SpineAttachmentInfo, SpineFrameOverrides } from './Scene3D';
+import { Scene3D, Scene3DRef, SpineAttachmentInfo, SpineFrameOverrides, TintStop } from './Scene3D';
 import { Animator3D } from './Animator3D';
 import { CurveEditor } from './CurveEditor';
-import { FireGenerator } from './FireGenerator';
 import { ParticleCreator } from './ParticleCreator';
 
 type SceneSize = {
@@ -88,6 +88,7 @@ export type EmitterObject = SceneObject & {
     particleRotationVariation: number;
     particleRotationSpeed: number;
     particleRotationSpeedVariation: number;
+    particleRotationDrift?: number;
     particleAlignToVelocity?: boolean;
   particleHorizontalFlipChance?: number;
   particlePivotX?: number;
@@ -108,6 +109,7 @@ export type EmitterObject = SceneObject & {
     particleOpacityOverLife: boolean;
     particleColorOverLife: boolean;
     particleColorOverLifeTarget: string;
+    particleTintGradient?: TintStop[];
     particleSizeOverLife: string;
     particleSizeOverLifeCurve?: string;
     particleOpacityOverLifeCurve?: string;
@@ -430,7 +432,6 @@ function spineBoneWorldTransform(
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function App() {
-  const [showFireModal, setShowFireModal] = useState(false);
   const [spriteLibrary, setSpriteLibrary] = useState<StoredImage[]>([]);
   useEffect(() => {
     loadImagesFromDB().then((imgs) => setSpriteLibrary(imgs));
@@ -1451,6 +1452,7 @@ export function App() {
       particleRotationVariation: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleRotationVariation ?? 0),
       particleRotationSpeed: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleRotationSpeed ?? 0),
       particleRotationSpeedVariation: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleRotationSpeedVariation ?? 0),
+      particleRotationDrift: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleRotationDrift ?? 0),
       particleAlignToVelocity: Boolean((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleAlignToVelocity ?? false),
       particleHorizontalFlipChance: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleHorizontalFlipChance ?? 0),
         particlePivotX: Number((selectedObject.properties as EmitterObject['properties'] | undefined)?.particlePivotX ?? 0.5),
@@ -1473,6 +1475,7 @@ export function App() {
       particleOpacityOverLife: Boolean((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleOpacityOverLife ?? false),
       particleColorOverLife: Boolean((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleColorOverLife ?? false),
       particleColorOverLifeTarget: String((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleColorOverLifeTarget ?? '#000000'),
+      particleTintGradient: (selectedObject.properties as EmitterObject['properties'] | undefined)?.particleTintGradient ?? undefined,
       particleSizeOverLife: String((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleSizeOverLife ?? 'none'),
         particleSizeOverLifeCurve: String((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleSizeOverLifeCurve ?? ''),
         particleOpacityOverLifeCurve: String((selectedObject.properties as EmitterObject['properties'] | undefined)?.particleOpacityOverLifeCurve ?? ''),
@@ -3227,9 +3230,20 @@ export function App() {
               <span className="create-shelf-action-icon">🎨</span>
               <span>Particle Creator</span>
             </button>
-            <button className="create-shelf-action" onClick={() => setShowFireModal(true)} type="button">
-              <span className="create-shelf-action-icon">🔥</span>
-              <span>Fire Generator</span>
+            <button className="create-shelf-action" onClick={() => {
+              const opts = defaultLightningOpts();
+              const lId = 'lightning_' + Date.now();
+              const startId = 'lpt_start_' + Date.now();
+              const endId   = 'lpt_end_'   + (Date.now() + 1);
+              const lightning: SceneObject = { id: lId, name: 'Lightning', type: 'Lightning', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: null, properties: { ...opts } };
+              const ptStart:  SceneObject = { id: startId, name: 'Start', type: 'LightningPoint', position: { x: -80, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'start' } };
+              const ptEnd:    SceneObject = { id: endId,   name: 'End',   type: 'LightningPoint', position: { x:  80, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'end'   } };
+              setSceneObjects(prev => [...prev, lightning, ptStart, ptEnd]);
+              setSelectedObjectId(lId);
+              setShowScenePropertiesPanel(true);
+            }} type="button">
+              <span className="create-shelf-action-icon">⚡</span>
+              <span>Lightning</span>
             </button>
           </div>
         )}
@@ -4019,7 +4033,7 @@ export function App() {
             physicsForces={physicsForces}
             selectedObjectId={selectedObjectId}
             selectedForceId={selectedForceId}
-            onObjectSelect={setSelectedObjectId}
+            onObjectSelect={(id) => { setSelectedObjectId(id); if (id) setShowScenePropertiesPanel(true); }}
             onForceSelect={setSelectedForceId}
             onObjectTransform={handleObjectTransform}
             handleScale={handleScale}
@@ -5276,6 +5290,20 @@ export function App() {
                           value={selectedEmitterProperties.particleRotationSpeedVariation}
                         />
 
+                        <label htmlFor="particle-rotation-drift">
+                          Rotation Drift: {(selectedEmitterProperties.particleRotationDrift ?? 0).toFixed(0)}°
+                        </label>
+                        <input
+                          id="particle-rotation-drift"
+                          max={180}
+                          min={0}
+                          onChange={(event) => handleUpdateEmitterProperty('particleRotationDrift', Number.parseFloat(event.target.value))}
+                          step={1}
+                          type="range"
+                          value={selectedEmitterProperties.particleRotationDrift ?? 0}
+                          title="Each particle slowly wobbles ±this many degrees around its base rotation — smooth sinusoidal, not chaotic"
+                        />
+
                         <label htmlFor="particle-horizontal-flip-chance">
                           Horizontal Flip Chance: {(selectedEmitterProperties.particleHorizontalFlipChance ?? 0) * 100}%
                         </label>
@@ -5360,6 +5388,81 @@ export function App() {
                           </>
                         )}
 
+                        {/* ── Tint Gradient: colour + alpha over particle lifetime ── */}
+                        <div style={{ marginTop: '10px', marginBottom: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                            <span style={{ fontSize: '0.8rem', fontWeight: 600, color: '#c8d0e0' }}>Tint Gradient</span>
+                            <div style={{ display: 'flex', gap: '5px' }}>
+                              <button type="button"
+                                style={{ fontSize: '0.7rem', background: '#252f45', border: '1px solid #3b455c', color: '#c8d0e0', borderRadius: '4px', padding: '2px 7px', cursor: 'pointer' }}
+                                onClick={() => {
+                                  const cur = selectedEmitterProperties.particleTintGradient ?? [];
+                                  const tNew = cur.length === 0 ? 0 : cur.length === 1 ? 1 : Math.round(((cur[cur.length - 1].t + 1) / 2) * 100) / 100;
+                                  const newStop: TintStop = { t: Math.min(1, tNew), color: '#ffffff', alpha: 1 };
+                                  handleUpdateEmitterProperty('particleTintGradient', [...cur, newStop].sort((a, b) => a.t - b.t));
+                                }}>+ Add Stop</button>
+                              {(selectedEmitterProperties.particleTintGradient ?? []).length > 0 && (
+                                <button type="button"
+                                  style={{ fontSize: '0.7rem', background: '#3b1c1c', border: '1px solid #6b2a2a', color: '#e08080', borderRadius: '4px', padding: '2px 7px', cursor: 'pointer' }}
+                                  onClick={() => handleUpdateEmitterProperty('particleTintGradient', [])}>Clear</button>
+                              )}
+                            </div>
+                          </div>
+                          {/* Gradient preview bar */}
+                          {(selectedEmitterProperties.particleTintGradient ?? []).length > 0 && (() => {
+                            const stops = [...(selectedEmitterProperties.particleTintGradient ?? [])].sort((a, b) => a.t - b.t);
+                            const parts = stops.map(s => {
+                              const r = parseInt(s.color.slice(1, 3), 16);
+                              const g = parseInt(s.color.slice(3, 5), 16);
+                              const b = parseInt(s.color.slice(5, 7), 16);
+                              return `rgba(${r},${g},${b},${s.alpha}) ${Math.round(s.t * 100)}%`;
+                            });
+                            return (
+                              <div style={{ height: '14px', borderRadius: '4px', border: '1px solid #3b455c', marginBottom: '8px',
+                                background: `linear-gradient(to right, ${parts.join(', ')})` }} />
+                            );
+                          })()}
+                          {/* Stop rows */}
+                          {[...(selectedEmitterProperties.particleTintGradient ?? [])].sort((a, b) => a.t - b.t).map((stop, idx) => (
+                            <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '4px' }}>
+                              <input type="range" min={0} max={100} step={1}
+                                value={Math.round(stop.t * 100)}
+                                title={`Position: ${Math.round(stop.t * 100)}%`}
+                                onChange={e => {
+                                  const arr = [...(selectedEmitterProperties.particleTintGradient ?? [])].sort((a, b) => a.t - b.t);
+                                  arr[idx] = { ...arr[idx], t: Number(e.target.value) / 100 };
+                                  handleUpdateEmitterProperty('particleTintGradient', arr);
+                                }}
+                                style={{ width: '52px', accentColor: stop.color }} />
+                              <span style={{ fontSize: '0.65rem', color: '#8a93a2', minWidth: '24px' }}>{Math.round(stop.t * 100)}%</span>
+                              <input type="color" value={stop.color}
+                                onChange={e => {
+                                  const arr = [...(selectedEmitterProperties.particleTintGradient ?? [])].sort((a, b) => a.t - b.t);
+                                  arr[idx] = { ...arr[idx], color: e.target.value };
+                                  handleUpdateEmitterProperty('particleTintGradient', arr);
+                                }}
+                                style={{ width: '28px', height: '22px', padding: '1px', border: '1px solid #3b455c', borderRadius: '3px', cursor: 'pointer', background: 'none' }} />
+                              <input type="range" min={0} max={100} step={1}
+                                value={Math.round(stop.alpha * 100)}
+                                title={`Alpha: ${Math.round(stop.alpha * 100)}%`}
+                                onChange={e => {
+                                  const arr = [...(selectedEmitterProperties.particleTintGradient ?? [])].sort((a, b) => a.t - b.t);
+                                  arr[idx] = { ...arr[idx], alpha: Number(e.target.value) / 100 };
+                                  handleUpdateEmitterProperty('particleTintGradient', arr);
+                                }}
+                                style={{ width: '52px', accentColor: '#8a93a2' }} />
+                              <span style={{ fontSize: '0.65rem', color: '#8a93a2', minWidth: '22px' }}>{Math.round(stop.alpha * 100)}%</span>
+                              <button type="button"
+                                onClick={() => {
+                                  const arr = [...(selectedEmitterProperties.particleTintGradient ?? [])].sort((a, b) => a.t - b.t);
+                                  arr.splice(idx, 1);
+                                  handleUpdateEmitterProperty('particleTintGradient', arr);
+                                }}
+                                style={{ fontSize: '0.7rem', background: 'transparent', border: '1px solid #3b455c', color: '#8a93a2', borderRadius: '3px', padding: '1px 5px', cursor: 'pointer' }}>✕</button>
+                            </div>
+                          ))}
+                        </div>
+
                         <label htmlFor="particle-size-over-life">
                           Size Over Life
                         </label>
@@ -5433,6 +5536,83 @@ export function App() {
                     )}
                   </>
                 )}
+
+                {selectedObject.type === 'Lightning' && (() => {
+                  const lp = (selectedObject.properties ?? {}) as any;
+                  const upd = (k: string, v: any) => handleUpdateEmitterProperty(k, v);
+                  return (
+                    <>
+                      <div className="collapsible-section" style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                        <span style={{ fontWeight: 600, color: '#c8d0e0' }}>⚡ Lightning Properties</span>
+                      </div>
+                      <div className="subpanel-content">
+                        <label>Mode</label>
+                        <select value={lp.mode ?? 'loop-strike'} onChange={e => upd('mode', e.target.value)}>
+                          <option value="loop">Loop (jitter)</option>
+                          <option value="strike">Strike (grow)</option>
+                          <option value="loop-strike">Loop-Strike (auto cycle)</option>
+                        </select>
+
+                        <label>Core Color</label>
+                        <input type="color" value={lp.coreColor ?? '#ffffff'} onChange={e => upd('coreColor', e.target.value)} style={{ width: '100%', height: '30px' }} />
+                        <label>Glow Color</label>
+                        <input type="color" value={lp.glowColor ?? '#0008ff'} onChange={e => upd('glowColor', e.target.value)} style={{ width: '100%', height: '30px' }} />
+
+                        <label>Core Width: {lp.coreWidth ?? 1}</label>
+                        <input type="range" min={0.5} max={8} step={0.5} value={lp.coreWidth ?? 1} onChange={e => upd('coreWidth', Number(e.target.value))} />
+                        <label>Glow Width: {lp.glowWidth ?? 4}</label>
+                        <input type="range" min={1} max={30} step={1} value={lp.glowWidth ?? 4} onChange={e => upd('glowWidth', Number(e.target.value))} />
+
+                        <label>Segments: {lp.numSegments ?? 4}</label>
+                        <input type="range" min={1} max={12} step={1} value={lp.numSegments ?? 4} onChange={e => upd('numSegments', Number(e.target.value))} />
+                        <label>Segment Depth: {lp.segmentDepth ?? 2}</label>
+                        <input type="range" min={1} max={4} step={1} value={lp.segmentDepth ?? 2} onChange={e => upd('segmentDepth', Number(e.target.value))} />
+                        <label>Bend: {(lp.bend ?? 0).toFixed(2)}</label>
+                        <input type="range" min={-2} max={2} step={0.05} value={lp.bend ?? 0} onChange={e => upd('bend', Number(e.target.value))} />
+                        <label>Roughness: {(lp.roughness ?? 0.45).toFixed(2)}</label>
+                        <input type="range" min={0} max={1} step={0.05} value={lp.roughness ?? 0.45} onChange={e => upd('roughness', Number(e.target.value))} />
+                        <label>Turbulence: {(lp.turbulence ?? 0.35).toFixed(2)}</label>
+                        <input type="range" min={0} max={1} step={0.05} value={lp.turbulence ?? 0.35} onChange={e => upd('turbulence', Number(e.target.value))} />
+                        <label>Density: {(lp.density ?? 1.6).toFixed(1)}</label>
+                        <input type="range" min={0.5} max={4} step={0.1} value={lp.density ?? 1.6} onChange={e => upd('density', Number(e.target.value))} />
+
+                        <div style={{ marginTop: '6px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Branching</div>
+                        <label>Branch Probability: {Math.round((lp.branchProbability ?? 0.5) * 100)}%</label>
+                        <input type="range" min={0} max={1} step={0.05} value={lp.branchProbability ?? 0.5} onChange={e => upd('branchProbability', Number(e.target.value))} />
+                        <label>Branch Levels: {lp.branchLevels ?? 2}</label>
+                        <input type="range" min={1} max={3} step={1} value={lp.branchLevels ?? 2} onChange={e => upd('branchLevels', Number(e.target.value))} />
+                        <label>Branch Decay: {(lp.branchDecay ?? 0.5).toFixed(2)}</label>
+                        <input type="range" min={0.1} max={0.9} step={0.05} value={lp.branchDecay ?? 0.5} onChange={e => upd('branchDecay', Number(e.target.value))} />
+                        <label>Branch Angle: {lp.branchAngle ?? 90}°</label>
+                        <input type="range" min={0} max={180} step={5} value={lp.branchAngle ?? 90} onChange={e => upd('branchAngle', Number(e.target.value))} />
+
+                        <div style={{ marginTop: '6px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Glow Noise</div>
+                        <label>Glow Noise: {((lp.glowNoiseIntensity ?? 0) * 100).toFixed(0)}%</label>
+                        <input type="range" min={0} max={1} step={0.05} value={lp.glowNoiseIntensity ?? 0} onChange={e => upd('glowNoiseIntensity', Number(e.target.value))} />
+                        {(lp.glowNoiseIntensity ?? 0) > 0 && (
+                          <>
+                            <label>Noise Scale: {(lp.glowNoiseScale ?? 3).toFixed(1)}</label>
+                            <input type="range" min={0.5} max={12} step={0.5} value={lp.glowNoiseScale ?? 3} onChange={e => upd('glowNoiseScale', Number(e.target.value))} />
+                            <label>Noise Speed: {(lp.glowNoiseSpeed ?? 1).toFixed(1)} cyc/s</label>
+                            <input type="range" min={0} max={5} step={0.1} value={lp.glowNoiseSpeed ?? 1} onChange={e => upd('glowNoiseSpeed', Number(e.target.value))} />
+                          </>
+                        )}
+
+                        <div style={{ marginTop: '6px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Export</div>
+                        <label>Frame Count: {lp.frameCount ?? 10}</label>
+                        <input type="range" min={2} max={60} step={1} value={lp.frameCount ?? 10} onChange={e => upd('frameCount', Number(e.target.value))} />
+                        <label>FPS: {lp.fps ?? 12}</label>
+                        <input type="range" min={6} max={60} step={1} value={lp.fps ?? 12} onChange={e => upd('fps', Number(e.target.value))} />
+                        <label>Export Mode</label>
+                        <select value={lp.exportMode ?? 'sequence'} onChange={e => upd('exportMode', e.target.value)}>
+                          <option value="sequence">PNG Sequence (slot cycles)</option>
+                          <option value="bone-anim">Bone Animation (static PNGs)</option>
+                        </select>
+                      </div>
+                    </>
+                  );
+                })()}
+
                 <hr className="form-divider" />
 
                 <label htmlFor="handle-scale">Handle Size: {handleScale.toFixed(1)}x</label>
@@ -5642,42 +5822,8 @@ export function App() {
             setShowParticleCreator(false);
           }}
           onClose={() => setShowParticleCreator(false)}
+          particleCameraState={particleCameraState}
         />
-      {showFireModal && (
-        <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div style={{ position: 'relative', width: '90vw', maxWidth: 1100, height: '88vh', background: '#1a1a1a', borderRadius: 10, overflow: 'hidden', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', background: '#222', borderBottom: '1px solid #333', flexShrink: 0 }}>
-              <span style={{ color: '#eee', fontWeight: 600, fontSize: 14 }}>🔥 Fire Generator</span>
-              <button onClick={() => setShowFireModal(false)} style={{ background: 'none', border: 'none', color: '#aaa', cursor: 'pointer', fontSize: 18, lineHeight: 1 }} type="button">✕</button>
-            </div>
-            <div style={{ flex: 1, overflow: 'auto' }}>
-              <FireGenerator
-                particleCameraState={particleCameraState}
-                embeddedUI
-                autoRenderOnChange
-                onAttachToEmitter={(urls) => {
-                  handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', urls);
-                  handleUpdateEmitterProperty('particleSpriteSequenceFirstName', 'fire_frame0.png');
-                  handleUpdateEmitterProperty('particleSpriteSequenceFps', 24);
-                  handleUpdateEmitterProperty('particleSpriteImageDataUrl', '');
-                  handleUpdateEmitterProperty('particleSpriteImageName', '');
-                  handleUpdateEmitterProperty('particleType', 'sprites');
-                  setShowFireModal(false);
-                }}
-                onExportToParticleSystem={(urls, fps) => {
-                  handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', urls);
-                  handleUpdateEmitterProperty('particleSpriteSequenceFirstName', 'fire_frame0.png');
-                  handleUpdateEmitterProperty('particleSpriteSequenceFps', fps);
-                  handleUpdateEmitterProperty('particleSpriteImageDataUrl', '');
-                  handleUpdateEmitterProperty('particleSpriteImageName', '');
-                  handleUpdateEmitterProperty('particleType', 'sprites');
-                  setShowFireModal(false);
-                }}
-              />
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

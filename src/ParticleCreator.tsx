@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CustomParticlePainter } from './CustomParticlePainter';
+import { FireGenerator } from './FireGenerator';
+import * as THREE from 'three';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1014,9 +1016,10 @@ type Props = {
   onExportSequence: (dataUrls: string[], name: string, fps: number) => void;
   onClose:          () => void;
   visible?:         boolean;
+  particleCameraState?: { position: THREE.Vector3; quaternion: THREE.Quaternion } | null;
 };
 
-export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, onClose, visible = true }) => {
+export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, onClose, visible = true, particleCameraState }) => {
   const [layers,       setLayers      ] = useState<ParticleLayer[]>([defaultLayer('soft-dot')]);
   const [selectedId,   setSelectedId  ] = useState<string>(() => layers[0]?.id ?? '');
   const [canvasSize,   setCanvasSize  ] = useState<128 | 256 | 512>(256);
@@ -1026,7 +1029,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
   const [anim,         setAnim        ] = useState<AnimConfig>(defaultAnim);
   const [previewFrame, setPreviewFrame] = useState(0);
   const [playing,      setPlaying     ] = useState(false);
-  const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint'>('shape');
+  const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint' | 'fire'>('shape');
   const painterGetUrlRef = useRef<(() => string) | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1280,10 +1283,10 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
 
           {/* Mode tabs */}
           <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid #3b455c' }}>
-            {(['shape', 'paint'] as const).map(m => (
+            {(['shape', 'paint', 'fire'] as const).map(m => (
               <button key={m} type="button" onClick={() => setCreatorMode(m)}
                 style={{ flex: 1, background: creatorMode === m ? '#252f45' : 'transparent', border: 'none', borderBottom: creatorMode === m ? '2px solid #4f6ef7' : '2px solid transparent', color: creatorMode === m ? '#c8d0e0' : '#5a6a82', padding: '6px 0', cursor: 'pointer', fontSize: '0.75rem', textTransform: 'uppercase' }}>
-                {m === 'shape' ? '✨ Shape Designer' : '🎨 Paint'}
+                {m === 'shape' ? '✨ Shape Designer' : m === 'paint' ? '🎨 Paint' : '🔥 Fire Generator'}
               </button>
             ))}
           </div>
@@ -1610,6 +1613,22 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
               onClose={() => {}}
               onReady={(fn) => { painterGetUrlRef.current = fn; }}
             />
+          )}
+
+          {creatorMode === 'fire' && (
+            <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+              <FireGenerator
+                particleCameraState={particleCameraState}
+                embeddedUI
+                autoRenderOnChange
+                onAttachToEmitter={(urls) => {
+                  onExportSequence(urls, 'fire', 24);
+                }}
+                onExportToParticleSystem={(urls, fps) => {
+                  onExportSequence(urls, 'fire', fps);
+                }}
+              />
+            </div>
           )}
         </div>
       </div>

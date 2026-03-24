@@ -10,6 +10,38 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { SceneObject, EmitterObject, SnapSettings, PhysicsForce } from './App';
 import { buildLightningPreview } from './LightningGenerator';
 
+// ─── Tint Gradient: per-particle colour-over-lifetime ─────────────────────────
+/** A single colour stop in a particle tint-over-lifetime gradient. */
+export type TintStop = {
+  t: number;     // normalised lifetime position 0–1
+  color: string; // CSS hex colour e.g. '#ff8800'
+  alpha: number; // opacity 0–1 at this stop
+};
+
+/** Sample a TintStop[] gradient at normalised time t → { r, g, b, a } in 0–1 range. */
+export function sampleTintGradient(
+  stops: TintStop[],
+  t: number,
+): { r: number; g: number; b: number; a: number } {
+  if (!stops || stops.length === 0) return { r: 1, g: 1, b: 1, a: 1 };
+  const sorted = [...stops].sort((a, b) => a.t - b.t);
+  if (t <= sorted[0].t) return _tintRgba(sorted[0]);
+  if (t >= sorted[sorted.length - 1].t) return _tintRgba(sorted[sorted.length - 1]);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const lo = sorted[i], hi = sorted[i + 1];
+    if (t >= lo.t && t <= hi.t) {
+      const f = (t - lo.t) / (hi.t - lo.t);
+      const ca = _tintRgba(lo), cb = _tintRgba(hi);
+      return { r: ca.r+(cb.r-ca.r)*f, g: ca.g+(cb.g-ca.g)*f, b: ca.b+(cb.b-ca.b)*f, a: ca.a+(cb.a-ca.a)*f };
+    }
+  }
+  return { r: 1, g: 1, b: 1, a: 1 };
+}
+function _tintRgba(s: TintStop): { r: number; g: number; b: number; a: number } {
+  const c = new THREE.Color(s.color);
+  return { r: c.r, g: c.g, b: c.b, a: s.alpha };
+}
+
 // ─── Lightning viewport: sprite-based glow rendering ────────────────────────────────────
 // Each point along the bolt path gets a radial-gradient sprite with additive blending,
 // producing a seamless glowing tube that looks like real plasma / electricity.
@@ -240,6 +272,7 @@ type CachedParticleState = {
   visible: boolean;
   rotation: number;
   size: number;
+  color?: string; // hex e.g. 'ff8800' — baked current material colour for Spine export
 };
 
 type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sparkle' | 'glitter' | 'sprites' | '3d-model' | 'volumetric-fire' | 'metallic-sphere';
@@ -645,11 +678,13 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
       rotationSpeed?: number;
       rotationSpeedMultiplier?: number;
       rotationSpeedVariation?: number;
+      rotationDriftPhase?: number;   // per-particle random phase for smooth wobble
       spriteImageDataUrl?: string;
       spriteSequenceDataUrls?: string[];
       opacityOverLife?: boolean;
       colorOverLife?: boolean;
       colorOverLifeTarget?: string;
+      tintGradient?: TintStop[];
       sizeOverLife?: string;
       positionHistory?: THREE.Vector3[];
     }>;
@@ -2699,6 +2734,7 @@ const timelineOutRef = useRef(timelineOut);
               visible: particle.mesh.visible,
               rotation: getParticleRotation(particle.mesh),
               size: particle.baseSize ?? getParticleSize(particle.mesh),
+              color: material.color.getHexString(),
             });
           });
         });
@@ -3557,11 +3593,13 @@ const timelineOutRef = useRef(timelineOut);
                   rotationSpeed: particleRotationSpeed,
                   rotationSpeedMultiplier: particleRotationSpeedMultiplier,
                   rotationSpeedVariation: emitterRotationSpeedVariation,
+                  rotationDriftPhase: Math.random() * Math.PI * 2,
                   spriteImageDataUrl: emitterSpriteImageDataUrl,
                   spriteSequenceDataUrls: emitterSpriteSequenceDataUrls,
                   opacityOverLife: emitterProps.particleOpacityOverLife ?? false,
                   colorOverLife: emitterProps.particleColorOverLife ?? false,
                   colorOverLifeTarget: emitterProps.particleColorOverLifeTarget ?? '#000000',
+                  tintGradient: (emitterProps.particleTintGradient as TintStop[] | undefined) ?? undefined,
                   sizeOverLife: emitterProps.particleSizeOverLife ?? 'none',
                     flipX,
                   positionHistory: [new THREE.Vector3(particleMesh.position.x, particleMesh.position.y, particleMesh.position.z)],
@@ -3935,6 +3973,7 @@ const timelineOutRef = useRef(timelineOut);
                 particle.opacityOverLife = emitterProps.particleOpacityOverLife ?? false;
                 particle.colorOverLife = emitterProps.particleColorOverLife ?? false;
                 particle.colorOverLifeTarget = emitterProps.particleColorOverLifeTarget ?? '#000000';
+                particle.tintGradient = (emitterProps.particleTintGradient as TintStop[] | undefined) ?? undefined;
                 particle.sizeOverLife = emitterProps.particleSizeOverLife ?? 'none';
                 const sizeMultiplier = particle.sizeMultiplier ?? 1;
                 particle.baseSize = emitterSize * sizeMultiplier;
@@ -3944,8 +3983,17 @@ const timelineOutRef = useRef(timelineOut);
                 if (particle.rotationSpeedMultiplier === undefined) {
                   particle.rotationSpeedMultiplier = 1;
                 }
+                if (particle.rotationDriftPhase === undefined) {
+                  particle.rotationDriftPhase = Math.random() * Math.PI * 2;
+                }
                 particle.rotationSpeed = emitterRotationSpeed * (particle.rotationSpeedMultiplier ?? 1);
-                particle.rotation = emitterRotation + (particle.rotationOffset ?? 0) + particle.rotationSpeed * particle.age;
+
+                // Smooth rotation drift: slow sinusoidal wobble, unique phase per particle
+                const driftAmp = ((emitterProps.particleRotationDrift as number | undefined) ?? 0) * (Math.PI / 180);
+                const driftAngle = driftAmp > 0
+                  ? driftAmp * Math.sin(particle.age * 0.8 + (particle.rotationDriftPhase ?? 0))
+                  : 0;
+                particle.rotation = emitterRotation + (particle.rotationOffset ?? 0) + particle.rotationSpeed * particle.age + driftAngle;
 
                 const effectiveParticleType = getPreviewedParticleType(emitterParticleType);
                 const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sparkle' || effectiveParticleType === 'glitter' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars' || effectiveParticleType === 'volumetric-fire' || effectiveParticleType === 'metallic-sphere';
@@ -3997,7 +4045,10 @@ const timelineOutRef = useRef(timelineOut);
                   material.needsUpdate = true;
                 }
 
-                if (emitterProps.particleOpacityOverLifeCurve && !particle.opacityOverLife) {
+                if (particle.tintGradient && particle.tintGradient.length > 0) {
+                    const tintSample = sampleTintGradient(particle.tintGradient, progress);
+                    material.opacity = tintSample.a;
+                  } else if (emitterProps.particleOpacityOverLifeCurve && !particle.opacityOverLife) {
                     const curveValue = evaluateCurve(emitterProps.particleOpacityOverLifeCurve, progress, 1);
                     material.opacity = (particle.baseOpacity ?? 0.8) * curveValue;
                   } else if (particle.opacityOverLife) {
@@ -4049,7 +4100,15 @@ const timelineOutRef = useRef(timelineOut);
 
                 setParticleRotation(particle.mesh, particle.rotation);
 
-                if (particle.colorOverLife) {
+                if (particle.tintGradient && particle.tintGradient.length > 0) {
+                  const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
+                  if (isWhiteDotPreview) {
+                    material.color.copy(new THREE.Color('#ffffff'));
+                  } else {
+                    const tintSample = sampleTintGradient(particle.tintGradient, progress);
+                    material.color.setRGB(tintSample.r, tintSample.g, tintSample.b);
+                  }
+                } else if (particle.colorOverLife) {
                   const isWhiteDotPreview = (sceneSettingsRef.current.particlePreviewMode ?? 'real') === 'white-dots';
                   if (isWhiteDotPreview) {
                     material.color.copy(new THREE.Color('#ffffff'));
@@ -7025,22 +7084,31 @@ Emitters: ${numEmitters}`;
                   translateCurveDefinition = { curve: [...bx, ...by] };
               }
 
-              // ── RGBA bezier on alpha channel (smooth fade) ──
+              // ── RGBA bezier: per-channel Catmull-Rom for colour tint + smooth alpha fade ──
               let rgbaCurveDefinition: any = steppedDef;
               if (!isLastKey) {
                   const nextObj = bakedKeys[k + 1];
                   const nextTime = nextObj.frame / 24;
-                  // Respect visibility flag so fade-in/out is baked into the bezier curve
                   const getA = (bk: BakedKey) => bk.state.visible ? Math.max(0, Math.min(1, bk.state.opacity)) : 0;
                   const tanA0 = crTangent(bakedKeys, k,     getA);
                   const tanA1 = crTangent(bakedKeys, k + 1, getA);
-                  // rgba curve = [r0..3, g4..7, b8..11, a12..15]; r/g/b are constant 1→1 so use linear ctrl pts
-                  const linearChannel = [time, 1, nextTime, 1];
                   const ba = makeBezier1(time, getA(bakedKeys[k]), tanA0, nextTime, getA(nextObj), tanA1, 0);
-                  rgbaCurveDefinition = { curve: [...linearChannel, ...linearChannel, ...linearChannel, ...ba] };
+                  // Per-channel colour bezier (handles tint gradient; degenerates to 1→1 for white)
+                  const _ch = (col: string | undefined, sh: number) => ((parseInt((col ?? 'ffffff'), 16) >> sh) & 0xff) / 255;
+                  const getR = (bk: BakedKey) => _ch(bk.state.color, 16);
+                  const getG = (bk: BakedKey) => _ch(bk.state.color, 8);
+                  const getB = (bk: BakedKey) => _ch(bk.state.color, 0);
+                  const tanR0 = crTangent(bakedKeys, k, getR), tanR1 = crTangent(bakedKeys, k+1, getR);
+                  const tanG0 = crTangent(bakedKeys, k, getG), tanG1 = crTangent(bakedKeys, k+1, getG);
+                  const tanB0 = crTangent(bakedKeys, k, getB), tanB1 = crTangent(bakedKeys, k+1, getB);
+                  const br = makeBezier1(time, getR(bakedKeys[k]), tanR0, nextTime, getR(nextObj), tanR1, 0);
+                  const bg = makeBezier1(time, getG(bakedKeys[k]), tanG0, nextTime, getG(nextObj), tanG1, 0);
+                  const bb = makeBezier1(time, getB(bakedKeys[k]), tanB0, nextTime, getB(nextObj), tanB1, 0);
+                  rgbaCurveDefinition = { curve: [...br, ...bg, ...bb, ...ba] };
               }
 
-              slotAnim.rgba.push({ time, color: `ffffff${finalAlpha}`, ...rgbaCurveDefinition });
+              const stateColorHex = (state.color ?? 'ffffff');
+              slotAnim.rgba.push({ time, color: `${stateColorHex}${finalAlpha}`, ...rgbaCurveDefinition });
 
               boneAnim.translate.push({
                  time,

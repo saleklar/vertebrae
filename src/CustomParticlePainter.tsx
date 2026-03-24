@@ -5,7 +5,7 @@ import { saveBrushesToDB, loadBrushesFromDB } from './brushStorage';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-type BrushTool = 'pencil' | 'brush' | 'airbrush' | 'eraser' | 'smear';
+type BrushTool = 'pencil' | 'brush' | 'airbrush' | 'eraser' | 'smear' | 'magic' | 'fire';
 
 type PainterPreset = {
   id: string;
@@ -96,6 +96,183 @@ function stampDab(
   if (angle) dst.rotate(angle * Math.PI / 180);
   dst.drawImage(stamp, -size / 2, -size / 2, size, size);
   dst.restore();
+}
+
+/** Multi-pass additive glow dab */
+function glowDab(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  size: number,
+  color: string,
+  opacity: number,
+  passes: number,
+): void {
+  const hex = color.replace('#', '');
+  const s = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex;
+  const nv = parseInt(s, 16);
+  const cr = (nv >> 16) & 255, cg = (nv >> 8) & 255, cb = nv & 255;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (let p = 0; p < passes; p++) {
+    const r = (size / 2) * Math.pow(2.2, p);
+    const alpha = (opacity / 100) / Math.pow(1.7, p);
+    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+    grad.addColorStop(0,   `rgba(${cr},${cg},${cb},${Math.min(1, alpha * 1.6)})`);
+    grad.addColorStop(0.15,`rgba(${cr},${cg},${cb},${Math.min(1, alpha)})`);
+    grad.addColorStop(1,   `rgba(${cr},${cg},${cb},0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+/** Fire dab — elongated warm gradients, additive blending */
+function fireDab(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  size: number,
+  color: string,
+  opacity: number,
+): void {
+  const r = size / 2;
+  const a = opacity / 100;
+  const hex = color.replace('#', '');
+  const s = hex.length === 3 ? hex.split('').map(c => c + c).join('') : hex;
+  const nv = parseInt(s, 16);
+  const cr = (nv >> 16) & 255, cg = (nv >> 8) & 255, cb = nv & 255;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  // Outer red haze (tall ellipse)
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(0.6, 2.2);
+  const outerG = ctx.createRadialGradient(0, -r * 0.2, 0, 0, -r * 0.2, r);
+  outerG.addColorStop(0,   `rgba(${Math.min(255,cr+60)},${Math.max(0,cg-60)},0,${a * 0.5})`);
+  outerG.addColorStop(0.6, `rgba(${Math.min(255,cr+30)},${Math.max(0,cg-100)},0,${a * 0.2})`);
+  outerG.addColorStop(1,   `rgba(120,0,0,0)`);
+  ctx.fillStyle = outerG;
+  ctx.beginPath();
+  ctx.arc(0, -r * 0.2, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // Mid flame (orange)
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(0.7, 1.7);
+  const midG = ctx.createRadialGradient(0, 0, 0, 0, 0, r * 0.65);
+  midG.addColorStop(0,   `rgba(255,${Math.min(255,cg+80)},0,${a * 0.9})`);
+  midG.addColorStop(0.5, `rgba(255,${Math.max(0,cg-20)},0,${a * 0.5})`);
+  midG.addColorStop(1,   `rgba(200,0,0,0)`);
+  ctx.fillStyle = midG;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.65, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // Core: bright white/yellow
+  const coreG = ctx.createRadialGradient(cx, cy + r * 0.15, 0, cx, cy + r * 0.15, r * 0.35);
+  coreG.addColorStop(0,   `rgba(255,255,220,${a})`);
+  coreG.addColorStop(0.4, `rgba(255,240,80,${a * 0.7})`);
+  coreG.addColorStop(1,   `rgba(255,100,0,0)`);
+  ctx.fillStyle = coreG;
+  ctx.beginPath();
+  ctx.arc(cx, cy + r * 0.15, r * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+  // Custom-color tint pass to honour the chosen colour
+  ctx.globalCompositeOperation = 'screen';
+  ctx.globalAlpha = a * 0.3;
+  const tintG = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
+  tintG.addColorStop(0, `rgba(${cr},${cg},${cb},1)`);
+  tintG.addColorStop(1, `rgba(${cr},${cg},${cb},0)`);
+  ctx.fillStyle = tintG;
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+/** Magic brush — hue-cycling sparkles with glow */
+function magicDab(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  size: number,
+  opacity: number,
+  hueOffset: number,
+): void {
+  const r = size / 2;
+  const a = opacity / 100;
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  const sparkCount = 5 + Math.floor(Math.random() * 5);
+  for (let i = 0; i < sparkCount; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const dist  = Math.random() * r;
+    const sx    = cx + Math.cos(angle) * dist;
+    const sy    = cy + Math.sin(angle) * dist;
+    const sR    = (0.18 + Math.random() * 0.55) * r;
+    const hue   = (hueOffset + i * 40 + Math.random() * 30) % 360;
+    // Glow blob
+    const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, sR * 2.5);
+    grad.addColorStop(0,   `hsla(${hue},100%,95%,${a})`);
+    grad.addColorStop(0.2, `hsla(${hue},100%,75%,${a * 0.7})`);
+    grad.addColorStop(1,   `hsla(${hue},100%,55%,0)`);
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(sx, sy, sR * 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    // Crosshair sparkle
+    ctx.save();
+    ctx.globalAlpha = a * 0.9;
+    ctx.strokeStyle = `hsl(${hue},100%,90%)`;
+    ctx.lineWidth = Math.max(0.5, sR * 0.18);
+    ctx.lineCap = 'round';
+    ctx.translate(sx, sy);
+    ctx.rotate(Math.random() * Math.PI);
+    for (const len of [sR * 1.1, sR * 0.55]) {
+      ctx.save();
+      ctx.rotate(Math.PI / 4);
+      ctx.beginPath(); ctx.moveTo(-len, 0); ctx.lineTo(len, 0); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(0, -len); ctx.lineTo(0, len); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/** Smear — drags existing pixels along the stroke direction */
+function smearDab(
+  ctx: CanvasRenderingContext2D,
+  cx: number, cy: number,
+  fromX: number, fromY: number,
+  size: number,
+  strength: number,
+): void {
+  const r = Math.max(4, size / 2);
+  const sw = Math.round(r * 2);
+  const sh = Math.round(r * 2);
+  const srcX = Math.round(fromX - r);
+  const srcY = Math.round(fromY - r);
+  if (srcX < 0 || srcY < 0 || srcX + sw > CANVAS_SIZE || srcY + sh > CANVAS_SIZE) return;
+  const srcData = ctx.getImageData(srcX, srcY, sw, sh);
+  // Apply circular soft-falloff to alpha so only the round brush area smears
+  const half = sw / 2;
+  const str = strength / 100;
+  for (let i = 0; i < sw * sh; i++) {
+    const px = i % sw, py = Math.floor(i / sw);
+    const dist = Math.hypot(px - half, py - half);
+    const falloff = Math.max(0, 1 - dist / (half * 0.95));
+    srcData.data[i * 4 + 3] = Math.round(srcData.data[i * 4 + 3] * falloff * str);
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = sw; tmp.height = sh;
+  tmp.getContext('2d')!.putImageData(srcData, 0, 0);
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.drawImage(tmp, Math.round(cx - r), Math.round(cy - r));
+  ctx.restore();
 }
 
 /** Draw a single brush dab at (cx, cy) */
@@ -193,6 +370,9 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
   const [opacity,       setOpacity   ] = useState(85);
   const [hardness,      setHardness  ] = useState(55);
   const [smooth,        setSmooth    ] = useState(true);
+  const [glowEnabled,   setGlowEnabled] = useState(false);
+  const [glowPasses,    setGlowPasses] = useState(3);
+  const magicHueRef = useRef(0);
   const [activeStamp,   setActiveStamp] = useState<ShapeType | null>(null);
   const [sizeJitter,    setSizeJitter] = useState(0);
   const [angleJitter,   setAngleJitter] = useState(0);
@@ -315,6 +495,15 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
       let dOpacity = opacity;
       if (opacityJitter > 0) dOpacity = Math.max(0, Math.min(100, opacity * (1 + (Math.random() * 2 - 1) * (opacityJitter / 100))));
 
+      // Scatter: randomly offset dab position
+      if (scatter > 0) {
+        const scatterRadius = dSize * (scatter / 100);
+        const a = Math.random() * Math.PI * 2;
+        const r = Math.random() * scatterRadius;
+        x = x + Math.cos(a) * r;
+        y = y + Math.sin(a) * r;
+      }
+
       if (activeStamp) {
         stampDab(ctx, tool, activeStamp, x, y, dSize, color, dOpacity, dAngle);
       } else if (activeBrush && customBrushCanvasRef.current) {
@@ -331,10 +520,22 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
           dSize,
         );
         ctx.restore();
+      } else if (tool === 'fire') {
+        fireDab(ctx, x, y, dSize, color, dOpacity);
+      } else if (tool === 'magic') {
+        magicHueRef.current = (magicHueRef.current + 18) % 360;
+        magicDab(ctx, x, y, dSize, dOpacity, magicHueRef.current);
+      } else if (tool === 'smear') {
+        const last = lastPos.current;
+        if (last) smearDab(ctx, x, y, last.x, last.y, dSize, hardness);
       } else {
         brushDab(ctx, tool, x, y, dSize, color, dOpacity, hardness);
       }
-    }, [tool, activeStamp, activeBrush, brushSize, color, opacity, hardness, sizeJitter, angleJitter, opacityJitter]);
+      // Glow post-pass — applied on top of any brush/tool
+      if (glowEnabled) {
+        glowDab(ctx, x, y, dSize, color, dOpacity, glowPasses);
+      }
+    }, [tool, activeStamp, activeBrush, brushSize, color, opacity, hardness, sizeJitter, angleJitter, opacityJitter, scatter, glowEnabled, glowPasses]);
 
     const flushSmoothBuffer = useCallback(() => {
       const buf = smoothBuf.current;
@@ -609,22 +810,68 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
           </div>
         )}
 
+        {/* ── TOOL SHELF ───────────────────────────────────────────────────── */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', padding: '4px 8px', borderBottom: '1px solid #3b455c', flexShrink: 0, background: '#151c2e', flexWrap: 'wrap' }}>
+          {([
+            ['pencil',   '✏️',  'Pencil'  ],
+            ['brush',    '🖌️', 'Brush'   ],
+            ['airbrush', '💨', 'Airbrush'],
+            ['eraser',   '⬜', 'Eraser'  ],
+            null,
+            ['smear',    '👆', 'Smear'   ],
+            ['magic',    '🪄', 'Magic'   ],
+            ['fire',     '🔥', 'Fire'    ],
+          ] as const).map((item, i) =>
+            item === null
+              ? <div key={`sep-${i}`} style={{ width: '1px', height: '22px', background: '#3b455c', margin: '0 4px' }} />
+              : <button key={item[0]} type="button" title={item[2]}
+                  onClick={() => { setTool(item[0] as BrushTool); setActiveStamp(null); setActiveBrush(null); }}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: '4px',
+                    padding: '3px 8px', borderRadius: '5px', fontSize: '0.75rem',
+                    cursor: 'pointer', border: '1px solid',
+                    borderColor: tool === item[0] ? '#5b8aff' : '#3b455c',
+                    background: tool === item[0] ? '#1e3a6e' : '#1e2840',
+                    color: tool === item[0] ? '#a8c8ff' : '#8a93a2',
+                    fontWeight: tool === item[0] ? 600 : 400,
+                    transition: 'all 0.12s',
+                  }}>
+                  <span style={{ fontSize: '0.85rem' }}>{item[1]}</span>
+                  {item[2]}
+                </button>
+          )}
+          {/* Glow effect toggle — works with any brush */}
+          <div style={{ width: '1px', height: '22px', background: '#3b455c', margin: '0 4px' }} />
+          <button type="button" title="Glow effect on top of any brush"
+            onClick={() => setGlowEnabled(g => !g)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: '4px',
+              padding: '3px 8px', borderRadius: '5px', fontSize: '0.75rem',
+              cursor: 'pointer', border: '1px solid',
+              borderColor: glowEnabled ? '#ffe066' : '#3b455c',
+              background: glowEnabled ? '#2e2a0a' : '#1e2840',
+              color: glowEnabled ? '#ffe066' : '#8a93a2',
+              fontWeight: glowEnabled ? 600 : 400,
+              transition: 'all 0.12s',
+            }}>
+            <span style={{ fontSize: '0.85rem' }}>✨</span> Glow
+          </button>
+          {glowEnabled && (
+            <>
+              <span style={{ fontSize: '0.72rem', color: '#8a93a2', marginLeft: '4px', marginRight: '2px' }}>Passes</span>
+              <input type="range" min={1} max={8} step={1} value={glowPasses}
+                onChange={e => setGlowPasses(Number(e.target.value))}
+                style={{ width: '70px', accentColor: '#ffe066' }} />
+              <span style={{ fontSize: '0.72rem', color: '#ffe066', minWidth: '16px' }}>{glowPasses}x</span>
+            </>
+          )}
+        </div>
+
         {/* Body */}
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
           {/* ── LEFT SIDEBAR ─────────────────────────────────────────────────── */}
           <div style={{ width: '170px', borderRight: '1px solid #3b455c', display: 'flex', flexDirection: 'column', overflow: 'hidden', flexShrink: 0 }}>
-
-            {/* Tool buttons */}
-            <div style={{ padding: '8px', borderBottom: '1px solid #3b455c', flexShrink: 0 }}>
-              <div style={{ fontSize: '0.7rem', color: '#8a93a2', textTransform: 'uppercase', marginBottom: '5px' }}>Tool</div>
-              <div style={{ display: 'flex', gap: '4px' }}>
-                {toolBtn('pencil',   '✏️',  'Pencil'  )}
-                {toolBtn('brush',    '🖌️', 'Brush'   )}
-                {toolBtn('airbrush', '💨', 'Airbrush')}
-                {toolBtn('eraser',   '⬜', 'Eraser'  )}
-              </div>
-            </div>
 
             {/* Color */}
             <div style={{ padding: '8px', borderBottom: '1px solid #3b455c', flexShrink: 0 }}>
@@ -643,6 +890,7 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
                 {slider('Size Jitter',    sizeJitter,    0, 100, 1, setSizeJitter,    v => `${v}%`)}
                 {slider('Angle Jitter',   angleJitter,   0, 100, 1, setAngleJitter,   v => `${v}%`)}
                 {slider('Opacity Jitter', opacityJitter, 0, 100, 1, setOpacityJitter, v => `${v}%`)}
+                {slider('Scatter',        scatter,       0, 200, 1, setScatter,       v => `${v}%`)}
                 {slider('Spacing',        density,       1, 100, 1, setDensity,       v => `${v}%`)}
               <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', color: '#8a93a2', cursor: 'pointer' }}>
                 <input type="checkbox" checked={smooth} onChange={e => setSmooth(e.target.checked)} />
@@ -679,7 +927,7 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
                     fontSize: '0.7rem',
                     textTransform: 'uppercase',
                   }}>
-                  {t === 'shapes' ? '⬡ Shapes' : '🖌 ABR'}
+                  {t === 'shapes' ? '⬡ Shapes' : '🖌 Photoshop Brushes'}
                 </button>
               ))}
             </div>
