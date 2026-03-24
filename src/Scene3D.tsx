@@ -4742,7 +4742,7 @@ const timelineOutRef = useRef(timelineOut);
         // ── Surface binding ──────────────────────────────────────────────────
         const bindSurfaceId = typeof lProps.bindSurfaceId === 'string' ? lProps.bindSurfaceId : '';
         const bindSpineAttachmentId = typeof lProps.bindSpineAttachmentId === 'string' ? lProps.bindSpineAttachmentId : '';
-        const spineBindMode = lProps.spineBindMode === 'edge' ? 'edge' : 'surface';
+        const spineEdgeRatio = Math.max(0, Math.min(1, Number(lProps.spineEdgeRatio ?? 0)));
         const surfaceTightness = Math.max(0, Math.min(1, Number(lProps.surfaceTightness ?? 0.72)));
 
         // ── Surface snap — uses module-level cached triangle lists ───────────
@@ -4798,7 +4798,7 @@ const timelineOutRef = useRef(timelineOut);
         const snapToSpineAttachmentMask = (
           pts: { x: number; y: number; z?: number }[],
           attachmentId: string,
-          mode: 'surface' | 'edge',
+          edgeRatio: number,
           tightness: number,
           keepStart = true,
           keepEnd = true,
@@ -4814,9 +4814,28 @@ const timelineOutRef = useRef(timelineOut);
           const height = Number(geom.parameters?.height ?? 0);
           if (width <= 1e-6 || height <= 1e-6) return pts;
 
-          const candidates = mode === 'edge'
-            ? (maskData.edgeSamples.length ? maskData.edgeSamples : maskData.surfaceSamples)
-            : (maskData.surfaceSamples.length ? maskData.surfaceSamples : maskData.edgeSamples);
+          // Build blended candidate pool: lerp between surface and edge samples
+          const { surfaceSamples, edgeSamples } = maskData;
+          const ratio = Math.max(0, Math.min(1, edgeRatio));
+          let candidates: SpineMaskSample[];
+          if (ratio <= 0.02) {
+            candidates = surfaceSamples.length ? surfaceSamples : edgeSamples;
+          } else if (ratio >= 0.98) {
+            candidates = edgeSamples.length ? edgeSamples : surfaceSamples;
+          } else {
+            // Interleave: pick proportional samples from each pool
+            const total = Math.max(1, surfaceSamples.length + edgeSamples.length);
+            const edgeCount = Math.round(ratio * total);
+            const surfCount = total - edgeCount;
+            const eSrc = edgeSamples.length ? edgeSamples : surfaceSamples;
+            const sSrc = surfaceSamples.length ? surfaceSamples : edgeSamples;
+            const eStep = Math.max(1, Math.floor(eSrc.length / Math.max(1, edgeCount)));
+            const sStep = Math.max(1, Math.floor(sSrc.length / Math.max(1, surfCount)));
+            const mixed: SpineMaskSample[] = [];
+            for (let i = 0; i < eSrc.length && mixed.length < edgeCount; i += eStep) mixed.push(eSrc[i]);
+            for (let i = 0; i < sSrc.length && mixed.length < edgeCount + surfCount; i += sStep) mixed.push(sSrc[i]);
+            candidates = mixed.length ? mixed : (surfaceSamples.length ? surfaceSamples : edgeSamples);
+          }
           if (candidates.length === 0) return pts;
 
           const findNearestSample = (u: number, v: number): SpineMaskSample => {
@@ -5085,7 +5104,7 @@ const timelineOutRef = useRef(timelineOut);
         arcVariants.forEach((variant, variantIndex) => {
           const usedSurfaceStrikeIndices = new Set<number>();
           const variantMain = bindSpineAttachmentId
-            ? snapToSpineAttachmentMask(variant.mainMod, bindSpineAttachmentId, spineBindMode, surfaceTightness, true, true)
+            ? snapToSpineAttachmentMask(variant.mainMod, bindSpineAttachmentId, spineEdgeRatio, surfaceTightness, true, true)
             : variant.mainMod;
 
           // Trim main arc
@@ -5104,14 +5123,14 @@ const timelineOutRef = useRef(timelineOut);
               const anchored = anchorBranchToMain(trimmed, junctionT, variantMain);
               const struck = pullBranchTipToStrikeTarget(anchored, generation, i, variant.seedBias, branchTarget);
               const masked = bindSpineAttachmentId
-                ? snapToSpineAttachmentMask(struck, bindSpineAttachmentId, spineBindMode, surfaceTightness, true, false)
+                ? snapToSpineAttachmentMask(struck, bindSpineAttachmentId, spineEdgeRatio, surfaceTightness, true, false)
                 : struck;
               lBranches.push({ pts: masked, subset: brSubset, generation });
             } else {
               const anchored = anchorBranchToMain(bPts, junctionT, variantMain);
               const struck = pullBranchTipToStrikeTarget(anchored, generation, i, variant.seedBias, branchTarget);
               const masked = bindSpineAttachmentId
-                ? snapToSpineAttachmentMask(struck, bindSpineAttachmentId, spineBindMode, surfaceTightness, true, false)
+                ? snapToSpineAttachmentMask(struck, bindSpineAttachmentId, spineEdgeRatio, surfaceTightness, true, false)
                 : struck;
               lBranches.push({ pts: masked, subset: 1, generation });
             }

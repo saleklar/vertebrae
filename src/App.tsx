@@ -5650,6 +5650,59 @@ export function App() {
                           </>
                         )}
 
+                        <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Crawl 3D Surface</div>
+                        <select
+                          value={lp.bindSurfaceId ?? ''}
+                          onChange={e => upd('bindSurfaceId', e.target.value || undefined)}
+                        >
+                          <option value="">(None)</option>
+                          {anchorCandidates.filter(o => !['LightningPoint','Path','Emitter','Force','Bone','Light','Camera'].includes(o.type)).map(o => (
+                            <option key={o.id} value={o.id}>{o.name || o.type} [{o.type}]</option>
+                          ))}
+                        </select>
+                        {lp.bindSurfaceId && (
+                          <>
+                            <label>Crawl Tightness: {((lp.surfaceTightness ?? 0.72) * 100).toFixed(0)}%</label>
+                            <input type="range" min={0} max={1} step={0.02}
+                              value={lp.surfaceTightness ?? 0.72}
+                              onChange={e => upd('surfaceTightness', Number(e.target.value))} />
+                            <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>0% = bolt ignores surface. 100% = bolt pressed flat against mesh.</div>
+                          </>
+                        )}
+
+                        <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Spine Image Crawl</div>
+                        {spineAllAttachments.length === 0 ? (
+                          <div style={{ fontSize: '0.72rem', color: '#6a7382', marginBottom: '4px' }}>No Spine imported. Import a Spine file first.</div>
+                        ) : (
+                          <>
+                            <label>Spine Image</label>
+                            <select
+                              value={lp.bindSpineAttachmentId ?? ''}
+                              onChange={e => upd('bindSpineAttachmentId', e.target.value || undefined)}
+                            >
+                              <option value="">(None)</option>
+                              {spineAllAttachments.map(att => (
+                                <option key={att.id} value={att.id}>{att.slotName}</option>
+                              ))}
+                            </select>
+                            {lp.bindSpineAttachmentId && (
+                              <>
+                                <label>Surface → Outline: {Math.round((lp.spineEdgeRatio ?? 0) * 100)}%</label>
+                                <input type="range" min={0} max={1} step={0.02}
+                                  value={lp.spineEdgeRatio ?? 0}
+                                  onChange={e => upd('spineEdgeRatio', Number(e.target.value))} />
+                                <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>
+                                  0% = lightning scatters across full image area. 100% = lightning snaps to visible outline.
+                                </div>
+                                <label>Snap Tightness: {((lp.surfaceTightness ?? 0.72) * 100).toFixed(0)}%</label>
+                                <input type="range" min={0} max={1} step={0.02}
+                                  value={lp.surfaceTightness ?? 0.72}
+                                  onChange={e => upd('surfaceTightness', Number(e.target.value))} />
+                              </>
+                            )}
+                          </>
+                        )}
+
                         <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Physics Modifiers</div>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
                           <input type="checkbox" checked={!!(lp.usePhysicsModifiers)} onChange={e => upd('usePhysicsModifiers', e.target.checked)} />
