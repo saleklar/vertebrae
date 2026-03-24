@@ -5224,29 +5224,35 @@ const timelineOutRef = useRef(timelineOut);
 
           // Sprite chain helper (mirrors addGlowChain but for Flame group)
           const addFlameChain = (
-            pts:     { x: number; y: number; z?: number }[],
-            tex:     THREE.Texture,
-            sprSz:   number,
-            opacity: number,
-            zOff:    number,
+            pts:      { x: number; y: number; z?: number }[],
+            tex:      THREE.Texture,
+            sprSz:    number,
+            opacity:  number,
+            zOff:     number,
+            noiseSeed: number,  // per-tendril seed so each tendril flickers independently
           ) => {
             const spacing = Math.max(0.2, (sprSz * 0.35) / densityF);
             const samples = samplePolylineEvenly(pts, spacing);
             const N = samples.length;
-            const mat = new THREE.SpriteMaterial({
-              map:        tex,
-              transparent: true,
-              opacity:    opacity / Math.sqrt(densityF),
-              blending:   THREE.AdditiveBlending,
-              depthTest:  occludeF,
-              depthWrite: false,
-            });
+            const baseOpacity = opacity / Math.sqrt(densityF);
             samples.forEach((pt, i) => {
               const t = N > 1 ? i / (N - 1) : 0;
               const taperStart = 0.5;
               const taper = t <= taperStart
                 ? 1.0
                 : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
+              // Per-sprite opacity flicker: two overlapping sine waves at different frequencies
+              const flicker = 0.55
+                + 0.30 * Math.sin(fAnimT * speed * 2.3 + noiseSeed + t * 5.1)
+                + 0.15 * Math.cos(fAnimT * speed * 3.7 + noiseSeed * 1.4 + t * 8.3);
+              const mat = new THREE.SpriteMaterial({
+                map:         tex,
+                transparent: true,
+                opacity:     Math.max(0, baseOpacity * taper * flicker),
+                blending:    THREE.AdditiveBlending,
+                depthTest:   occludeF,
+                depthWrite:  false,
+              });
               const sp = new THREE.Sprite(mat);
               sp.position.set(pt.x, pt.y, (pt.z ?? 0) + zOff);
               sp.scale.set(sprSz * taper, sprSz * taper, 1);
@@ -5337,9 +5343,9 @@ const timelineOutRef = useRef(timelineOut);
             const haloD = glowW * 4.0;
             const glowD = glowW * 2.0;
             const coreD = coreW * 2.2;
-            addFlameChain(pts, gTexF, haloD, 0.09, -0.1);
-            addFlameChain(pts, gTexF, glowD, 0.28,  0.0);
-            addFlameChain(pts, cTexF, coreD, 0.60,  0.1);
+            addFlameChain(pts, gTexF, haloD, 0.09, -0.1, tendrilSeed);
+            addFlameChain(pts, gTexF, glowD, 0.28,  0.0, tendrilSeed + 1.1);
+            addFlameChain(pts, cTexF, coreD, 0.60,  0.1, tendrilSeed + 2.2);
           }
         });
       }
