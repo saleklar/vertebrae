@@ -5212,8 +5212,13 @@ const timelineOutRef = useRef(timelineOut);
           const usePhysicsF   = fp.usePhysicsModifiers ?? false;
           const modStrengthF  = fp.modifierStrength  ?? 1.0;
 
-          const cTexF = buildLightningGlowTex(coreHexF, coreHexF);
-          const gTexF = buildLightningGlowTex(glowHexF, glowHexF);
+          const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
+          const coreNum = hexStrToNum(coreHexF);
+          const glowNum = hexStrToNum(glowHexF);
+          // glow texture: full gradient (white centre → coreHex → glowHex → transparent)
+          const gTexF = buildLightningGlowTex(glowNum, coreNum);
+          // core texture: same gradient but coreHex used as the outer colour for max brightness
+          const cTexF = buildLightningGlowTex(coreNum, 0xffffff);
 
           const fBase = { x: fObj.position.x, y: fObj.position.y, z: fObj.position.z };
 
