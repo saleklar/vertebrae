@@ -3283,6 +3283,39 @@ export function App() {
               <span className="create-shelf-action-icon">⚡</span>
               <span>Lightning</span>
             </button>
+            <button className="create-shelf-action" onClick={() => {
+              const fId = 'flame_' + Date.now();
+              const flame: SceneObject = {
+                id: fId,
+                name: 'Flame',
+                type: 'Flame',
+                position: { x: 0, y: 0, z: 0 },
+                rotation: { x: 0, y: 0, z: 0 },
+                scale: { x: 1, y: 1, z: 1 },
+                parentId: null,
+                properties: {
+                  coreColor: '#ffff88',
+                  glowColor: '#ff3300',
+                  height: 80,
+                  width: 30,
+                  numTendrils: 5,
+                  turbulence: 0.55,
+                  speed: 1.4,
+                  coreWidth: 6,
+                  glowWidth: 16,
+                  density: 1.6,
+                  usePhysicsModifiers: false,
+                  modifierStrength: 1.0,
+                  occludeByGeometry: true,
+                },
+              };
+              setSceneObjects(prev => [...prev, flame]);
+              setSelectedObjectId(fId);
+              setShowScenePropertiesPanel(true);
+            }} type="button">
+              <span className="create-shelf-action-icon">🔥</span>
+              <span>Flame</span>
+            </button>
           </div>
         )}
       </div>
@@ -5792,6 +5825,71 @@ export function App() {
                           <option value="bone-anim">Bone Animation (static PNGs)</option>
                         </select>
                       </div>
+                    </>
+                  );
+                })()}
+
+                {selectedObject.type === 'Flame' && (() => {
+                  const fp = (selectedObject.properties ?? {}) as any;
+                  const upd = (key: string, val: unknown) => handleUpdateEmitterProperty(key, val as any);
+                  return (
+                    <>
+                      <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '6px', color: '#ff9944' }}>
+                        🔥 Flame
+                      </div>
+
+                      <div style={{ marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Rendering</div>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
+                        <input type="checkbox"
+                          checked={fp.occludeByGeometry !== false}
+                          onChange={e => upd('occludeByGeometry', e.target.checked)} />
+                        Respect 3D depth (occluded by objects in front)
+                      </label>
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>Off = flame always renders on top of everything.</div>
+
+                      <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Colors</div>
+                      <label>Core Color</label>
+                      <input type="color" value={fp.coreColor ?? '#ffff88'} onChange={e => upd('coreColor', e.target.value)} style={{ width: '100%', height: '30px' }} />
+                      <label>Glow Color</label>
+                      <input type="color" value={fp.glowColor ?? '#ff3300'} onChange={e => upd('glowColor', e.target.value)} style={{ width: '100%', height: '30px' }} />
+
+                      <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Shape</div>
+                      <label>Height: {fp.height ?? 80}</label>
+                      <input type="range" min={10} max={300} step={5} value={fp.height ?? 80} onChange={e => upd('height', Number(e.target.value))} />
+                      <label>Width: {fp.width ?? 30}</label>
+                      <input type="range" min={4} max={120} step={2} value={fp.width ?? 30} onChange={e => upd('width', Number(e.target.value))} />
+                      <label>Tendrils: {fp.numTendrils ?? 5}</label>
+                      <input type="range" min={1} max={16} step={1} value={fp.numTendrils ?? 5} onChange={e => upd('numTendrils', Number(e.target.value))} />
+
+                      <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Motion</div>
+                      <label>Turbulence: {(fp.turbulence ?? 0.55).toFixed(2)}</label>
+                      <input type="range" min={0} max={2} step={0.05} value={fp.turbulence ?? 0.55} onChange={e => upd('turbulence', Number(e.target.value))} />
+                      <label>Speed: {(fp.speed ?? 1.4).toFixed(2)}</label>
+                      <input type="range" min={0.1} max={5} step={0.1} value={fp.speed ?? 1.4} onChange={e => upd('speed', Number(e.target.value))} />
+
+                      <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Glow</div>
+                      <label>Core Width: {fp.coreWidth ?? 6}</label>
+                      <input type="range" min={1} max={20} step={0.5} value={fp.coreWidth ?? 6} onChange={e => upd('coreWidth', Number(e.target.value))} />
+                      <label>Glow Width: {fp.glowWidth ?? 16}</label>
+                      <input type="range" min={2} max={60} step={1} value={fp.glowWidth ?? 16} onChange={e => upd('glowWidth', Number(e.target.value))} />
+                      <label>Density: {(fp.density ?? 1.6).toFixed(1)}</label>
+                      <input type="range" min={0.5} max={5} step={0.1} value={fp.density ?? 1.6} onChange={e => upd('density', Number(e.target.value))} />
+
+                      <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Physics Modifiers</div>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
+                        <input type="checkbox"
+                          checked={fp.usePhysicsModifiers ?? false}
+                          onChange={e => upd('usePhysicsModifiers', e.target.checked)} />
+                        Enable physics modifiers (attractors, flow curves)
+                      </label>
+                      {(fp.usePhysicsModifiers) && (
+                        <>
+                          <label>Modifier Strength: {(fp.modifierStrength ?? 1).toFixed(2)}</label>
+                          <input type="range" min={0} max={3} step={0.05}
+                            value={fp.modifierStrength ?? 1}
+                            onChange={e => upd('modifierStrength', Number(e.target.value))} />
+                        </>
+                      )}
                     </>
                   );
                 })()}

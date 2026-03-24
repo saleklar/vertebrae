@@ -1616,7 +1616,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
           )}
 
           {creatorMode === 'fire' && (
-            <div style={{ flex: 1, overflow: 'auto', minHeight: 0 }}>
+            <div style={{ flex: 1, overflow: 'auto', minHeight: '300px' }}>
               <FireGenerator
                 particleCameraState={particleCameraState}
                 embeddedUI

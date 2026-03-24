@@ -5178,6 +5178,164 @@ const timelineOutRef = useRef(timelineOut);
       });
       // ── End lightning live preview ───────────────────────────────────────────────────────────
 
+      // ── Flame live preview ───────────────────────────────────────────────────────────────────
+      {
+        const fAnimT = Date.now() / 1000.0;
+        const FLAME_PTS = 10; // control points per tendril
+
+        sceneObjectsRef.current.forEach(fObj => {
+          if (fObj.type !== 'Flame') return;
+          const fGroup = sceneObjectMeshesRef.current.get(fObj.id) as THREE.Group | undefined;
+          if (!fGroup) return;
+
+          // Flush sprites from the previous tick
+          while (fGroup.children.length > 0) {
+            const child = fGroup.children[0] as any;
+            child.geometry?.dispose();
+            (child.material as THREE.Material)?.dispose();
+            fGroup.remove(child);
+          }
+          fGroup.position.set(0, 0, 0);
+
+          const fp = (fObj.properties ?? {}) as any;
+          const flameHeight   = fp.height            ?? 80;
+          const flameWidth    = fp.width             ?? 30;
+          const numTendrils   = fp.numTendrils       ?? 5;
+          const turbulence    = fp.turbulence        ?? 0.55;
+          const speed         = fp.speed             ?? 1.4;
+          const coreW         = fp.coreWidth         ?? 6;
+          const glowW         = fp.glowWidth         ?? 16;
+          const densityF      = fp.density           ?? 1.6;
+          const coreHexF      = fp.coreColor         ?? '#ffff88';
+          const glowHexF      = fp.glowColor         ?? '#ff3300';
+          const occludeF      = fp.occludeByGeometry !== false;
+          const usePhysicsF   = fp.usePhysicsModifiers ?? false;
+          const modStrengthF  = fp.modifierStrength  ?? 1.0;
+
+          const cTexF = buildLightningGlowTex(coreHexF, coreHexF);
+          const gTexF = buildLightningGlowTex(glowHexF, glowHexF);
+
+          const fBase = { x: fObj.position.x, y: fObj.position.y, z: fObj.position.z };
+
+          // Sprite chain helper (mirrors addGlowChain but for Flame group)
+          const addFlameChain = (
+            pts:     { x: number; y: number; z?: number }[],
+            tex:     THREE.Texture,
+            sprSz:   number,
+            opacity: number,
+            zOff:    number,
+          ) => {
+            const spacing = Math.max(0.2, (sprSz * 0.35) / densityF);
+            const samples = samplePolylineEvenly(pts, spacing);
+            const N = samples.length;
+            const mat = new THREE.SpriteMaterial({
+              map:        tex,
+              transparent: true,
+              opacity:    opacity / Math.sqrt(densityF),
+              blending:   THREE.AdditiveBlending,
+              depthTest:  occludeF,
+              depthWrite: false,
+            });
+            samples.forEach((pt, i) => {
+              const t = N > 1 ? i / (N - 1) : 0;
+              const taperStart = 0.5;
+              const taper = t <= taperStart
+                ? 1.0
+                : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
+              const sp = new THREE.Sprite(mat);
+              sp.position.set(pt.x, pt.y, (pt.z ?? 0) + zOff);
+              sp.scale.set(sprSz * taper, sprSz * taper, 1);
+              fGroup.add(sp);
+            });
+          };
+
+          for (let ti = 0; ti < numTendrils; ti++) {
+            const tendrilSeed = ti * 2.399963; // golden-angle spread
+            const tendrilPhase = tendrilSeed + fAnimT * speed;
+
+            // Base offset to spread tendrils inside the flame footprint
+            const spreadAngle = (numTendrils > 1 ? (ti / (numTendrils - 1)) : 0.5) * Math.PI * 2;
+            const baseR = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0);
+            const baseOffX = Math.cos(spreadAngle + tendrilSeed) * baseR;
+            const baseOffZ = Math.sin(spreadAngle + tendrilSeed) * baseR * 0.4;
+
+            // Build polyline from base to tip
+            const pts: { x: number; y: number; z: number }[] = [];
+            for (let pi = 0; pi < FLAME_PTS; pi++) {
+              const yNorm    = pi / (FLAME_PTS - 1);
+              const y        = fBase.y + yNorm * flameHeight;
+              const widthEnv = Math.sqrt(Math.max(0, 1.0 - yNorm)) * flameWidth * 0.5;
+              const noiseT   = tendrilPhase + yNorm * 3.0;
+              const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)       * 1.0
+                        + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7)  * 0.4) * turbulence * widthEnv;
+              const dz = Math.cos(noiseT * 0.9  + tendrilSeed * 2.3)          * turbulence * widthEnv * 0.6;
+              pts.push({ x: fBase.x + baseOffX + dx, y, z: fBase.z + baseOffZ + dz });
+            }
+
+            // Optional physics modifiers (attractor / repulsor / flow-curve)
+            if (usePhysicsF && physicsForceRef.current.length > 0) {
+              physicsForceRef.current.forEach(force => {
+                if (!force.enabled) return;
+                if (force.type === 'attractor' || force.type === 'repulsor') {
+                  let targetPos = new THREE.Vector3(force.position.x, force.position.y, force.position.z);
+                  if (force.targetShapeId) {
+                    const ts = sceneObjectsRef.current.find(o => o.id === force.targetShapeId);
+                    if (ts) targetPos.set(ts.position.x, ts.position.y, ts.position.z);
+                  }
+                  const sign = force.type === 'attractor' ? 1 : -1;
+                  pts.forEach((p, pi) => {
+                    if (pi === 0) return;
+                    const pos  = new THREE.Vector3(p.x, p.y, p.z);
+                    const dir  = new THREE.Vector3().subVectors(targetPos, pos);
+                    const dist = dir.length();
+                    const radius = Math.max(0.1, force.radius ?? 250);
+                    const falloff = Math.max(0, 1 - dist / radius);
+                    if (falloff <= 0 || dist < 1e-4) return;
+                    dir.normalize();
+                    const mag = Math.abs(force.strength) * 0.018 * falloff * modStrengthF * (pi / (FLAME_PTS - 1));
+                    p.x += dir.x * sign * mag;
+                    p.y += dir.y * sign * mag;
+                    p.z += dir.z * sign * mag;
+                  });
+                } else if (force.type === 'flow-curve' && force.curveId) {
+                  const pathMesh = sceneObjectMeshesRef.current.get(force.curveId) as any;
+                  if (!pathMesh?.pathCurve) return;
+                  const curve = pathMesh.pathCurve as THREE.Curve<THREE.Vector3>;
+                  pts.forEach((p, pi) => {
+                    if (pi === 0) return;
+                    const pos = new THREE.Vector3(p.x, p.y, p.z);
+                    let closestT = 0, minDSq = Infinity;
+                    for (let si = 0; si <= 16; si++) {
+                      const t = si / 16;
+                      const d = curve.getPointAt(t).distanceToSquared(pos);
+                      if (d < minDSq) { minDSq = d; closestT = t; }
+                    }
+                    const nearest = curve.getPointAt(closestT);
+                    const toCurve = new THREE.Vector3().subVectors(nearest, pos);
+                    const dist = toCurve.length();
+                    if (dist < 1e-4) return;
+                    const strength = Math.abs(force.strength) * 0.008 * modStrengthF * (pi / (FLAME_PTS - 1));
+                    const pull = Math.min(1, strength / (dist + 0.01));
+                    p.x += toCurve.x * pull;
+                    p.y += toCurve.y * pull;
+                    p.z += toCurve.z * pull;
+                  });
+                }
+              });
+            }
+
+            // Three sprite layers: outer halo, glow, bright core
+            const haloD = glowW * 4.0;
+            const glowD = glowW * 2.0;
+            const coreD = coreW * 2.2;
+            addFlameChain(pts, gTexF, haloD, 0.09, -0.1);
+            addFlameChain(pts, gTexF, glowD, 0.28,  0.0);
+            addFlameChain(pts, cTexF, coreD, 0.60,  0.1);
+          }
+        });
+      }
+      // ── End flame live preview ────────────────────────────────────────────────────────────────
+
       // Update particle stats every few frames
       if (Math.random() < 0.1) {
         let totalParticles = 0;
@@ -5537,6 +5695,10 @@ Emitters: ${numEmitters}`;
             new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9, depthTest: false }),
           ));
           mesh = xhGroup;
+        } else if (obj.type === 'Flame') {
+          const flameGroup = new THREE.Group();
+          (flameGroup as any).isFlameRender = true;
+          mesh = flameGroup;
         } else if (obj.type === 'ImportedModel') {
           const modelGroup = new THREE.Group();
           (modelGroup as any).isImportedModel = true;
