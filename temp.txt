@@ -1,0 +1,11 @@
+  const [hardness,      setHardness  ] = useState(55);
+  const [smooth,        setSmooth    ] = useState(true);
+  const [activeStamp,   setActiveStamp] = useState<ShapeType | null>(null);    const [sizeJitter,    setSizeJitter] = useState(0);
+    const [angleJitter,   setAngleJitter] = useState(0);
+    const [opacityJitter, setOpacityJitter] = useState(0);
+    const [density,       setDensity   ] = useState(15);  const [presets,       setPresets   ] = useState<PainterPreset[]>(loadPresets);
+  const [presetName,    setPresetName] = useState('');
+  const [showInject,    setShowInject] = useState(false);
+  const [stampTab,       setStampTab  ] = useState<'shapes' | 'brushes'>('shapes');
+  const [abrBrushes,     setAbrBrushes] = useState<AbrBrush[]>([]);
+  const [activeBrush,    setActiveBrush] = useState<AbrBrush | null>(null);

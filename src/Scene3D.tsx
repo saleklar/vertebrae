@@ -4,7 +4,73 @@ const flippedTextureCache = new WeakMap<THREE.Texture, THREE.Texture>();
 
 import Stats from 'three/examples/jsm/libs/stats.module.js';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
+import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { SceneObject, EmitterObject, SnapSettings, PhysicsForce } from './App';
+import { buildLightningPreview } from './LightningGenerator';
+
+// ─── Lightning viewport: sprite-based glow rendering ────────────────────────────────────
+// Each point along the bolt path gets a radial-gradient sprite with additive blending,
+// producing a seamless glowing tube that looks like real plasma / electricity.
+
+/** Cache: key = "glowHex_coreHex" → CanvasTexture */
+const _lightningTexCache = new Map<string, THREE.CanvasTexture>();
+
+/**
+ * Builds (and caches) a 128×128 radial-gradient canvas texture:
+ *   centre → bright white → coreColor → glowColor → fully transparent edge
+ */
+function buildLightningGlowTex(glowHex: number, coreHex: number): THREE.CanvasTexture {
+  const key = `${glowHex}_${coreHex}`;
+  if (_lightningTexCache.has(key)) return _lightningTexCache.get(key)!;
+  const S = 128, H = S / 2;
+  const cv = document.createElement('canvas');
+  cv.width = S; cv.height = S;
+  const ctx = cv.getContext('2d')!;
+  const rgb = (hex: number) => `${(hex>>16)&0xff},${(hex>>8)&0xff},${hex&0xff}`;
+  const gr  = ctx.createRadialGradient(H, H, 0, H, H, H);
+  gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+  gr.addColorStop(0.10, `rgba(${rgb(0xffffff)},0.95)`);
+  gr.addColorStop(0.22, `rgba(${rgb(coreHex)},0.90)`);
+  gr.addColorStop(0.42, `rgba(${rgb(glowHex)},0.80)`);
+  gr.addColorStop(0.65, `rgba(${rgb(glowHex)},0.35)`);
+  gr.addColorStop(0.85, `rgba(${rgb(glowHex)},0.08)`);
+  gr.addColorStop(1.00, `rgba(${rgb(glowHex)},0.00)`);
+  ctx.fillStyle = gr;
+  ctx.fillRect(0, 0, S, S);
+  const tex = new THREE.CanvasTexture(cv);
+  _lightningTexCache.set(key, tex);
+  return tex;
+}
+
+/**
+ * Walks a polyline and returns points sampled at `spacing` world-unit intervals.
+ * Ensures the first and last original points are always included.
+ */
+function samplePolylineEvenly(
+  pts: { x: number; y: number; z?: number }[],
+  spacing: number,
+): { x: number; y: number; z: number }[] {
+  if (pts.length < 2) return [{ x: pts[0].x, y: pts[0].y, z: pts[0].z ?? 0 }];
+  const out: { x: number; y: number; z: number }[] = [{ x: pts[0].x, y: pts[0].y, z: pts[0].z ?? 0 }];
+  let accumulated = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const az = pts[i-1].z ?? 0, bz = pts[i].z ?? 0;
+    const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y, dz = bz - az;
+    const segLen = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    if (segLen < 1e-6) continue;
+    let d = spacing - accumulated;
+    while (d <= segLen) {
+      const t = d / segLen;
+      out.push({ x: pts[i-1].x + dx*t, y: pts[i-1].y + dy*t, z: az + dz*t });
+      d += spacing;
+    }
+    accumulated = segLen - (d - spacing);
+  }
+  out.push({ x: pts[pts.length-1].x, y: pts[pts.length-1].y, z: pts[pts.length-1].z ?? 0 });
+  return out;
+}
 
 // --- Simple 3D Noise for Turbulence ---
 const F3 = 1.0 / 3.0;
@@ -91,6 +157,8 @@ type SceneSettings = {
   showGrid?: boolean;
   showObjects?: boolean;
   showParticles?: boolean;
+  showSpineImages?: boolean;
+  showBones?: boolean;
 };
 
 const DEFAULT_THETA = Math.PI / 4;
@@ -138,8 +206,10 @@ type Scene3DProps = {
   timelineOut: number;
   physicsForces: PhysicsForce[];
   selectedObjectId: string | null;
+  selectedObjectIds?: string[];
   selectedForceId?: string | null;
   onObjectSelect: (objectId: string | null) => void;
+  onMultiObjectSelect?: (objectIds: string[]) => void;
   onForceSelect?: (forceId: string | null) => void;
   onObjectTransform?: (objectId: string, position: { x: number; y: number; z: number }, rotation: { x: number; y: number; z: number }, scale: { x: number; y: number; z: number }) => void;
   onForceTransform?: (forceId: string, position: { x: number; y: number; z: number }, direction: { x: number; y: number; z: number }) => void;
@@ -154,6 +224,9 @@ type Scene3DProps = {
   spineFrameOverrides?: SpineFrameOverrides;
   spineLayerSpread?: number;
   quadViewport?: boolean;
+  onQuadPanelClick?: (panel: 'top' | 'front' | 'side' | 'perspective') => void;
+  manipulatorMode?: 'translate' | 'rotate' | 'scale';
+  onManipulatorModeChange?: (mode: 'translate' | 'rotate' | 'scale') => void;
 };
 
 type CachedParticleState = {
@@ -164,16 +237,28 @@ type CachedParticleState = {
   lifetime: number;
   age: number;
   opacity: number;
+  visible: boolean;
   rotation: number;
   size: number;
 };
 
-type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sparkle' | 'glitter' | 'sprites' | '3d-model' | 'volumetric-fire';
+type ParticleVisualType = 'dots' | 'stars' | 'circles' | 'glow-circles' | 'sparkle' | 'glitter' | 'sprites' | '3d-model' | 'volumetric-fire' | 'metallic-sphere';
 
 export interface Scene3DRef {
   exportSpineData: (options?: any) => any;
   getParticleTextureBlob: () => Promise<Blob | null>;
   getExportAssets: () => Promise<Array<{ name: string, blob: Blob }>>;
+  exportLightningSequenceFromViewport: (options: {
+    lightningId: string;
+    frameCount: number;
+    fps: number;
+    width: number;
+    height: number;
+    mode: 'strike' | 'loop' | 'loop-strike';
+  }) => Promise<string[]>;
+  /** Reset all physics-driven objects back to their positions at the last play-start */
+  resetRigidBodies: () => void;
+  focusSelectedObject: () => void;
 }
 
 
@@ -199,15 +284,19 @@ const getResampledSequenceProps = (props: any, budget?: number, loop?: boolean) 
 };
 
 
-function evaluateCurve(curveJson: string | undefined, t: number, defaultValue: number = 1): number {
+function evaluateCurve(curveJson: string | any[] | undefined, t: number, defaultValue: number = 1): number {
   if (!curveJson) return defaultValue;
   try {
-    const points = JSON.parse(curveJson);
+    const points = typeof curveJson === 'string' ? JSON.parse(curveJson) : curveJson;
     if (!Array.isArray(points) || points.length === 0) return defaultValue;
     if (points.length === 1) return points[0].y;
     
-    // assume pre-sorted but let's be safe
-    const sortedPoints = [...points].sort((a: any, b: any) => a.x - b.x);
+const mappedPoints = points.map((p: any) => ({
+        x: p.x !== undefined ? p.x : (p.t !== undefined ? p.t : 0),
+        y: p.y !== undefined ? p.y : (p.v !== undefined ? p.v : 0),
+        rx: p.rx, ry: p.ry, lx: p.lx, ly: p.ly
+      }));
+      const sortedPoints = [...mappedPoints].sort((a: any, b: any) => a.x - b.x);
 
     if (t <= sortedPoints[0].x) return sortedPoints[0].y;
     if (t >= sortedPoints[sortedPoints.length - 1].x) return sortedPoints[sortedPoints.length - 1].y;
@@ -245,7 +334,162 @@ function evaluateCurve(curveJson: string | undefined, t: number, defaultValue: n
   return defaultValue;
 }
 
-export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawComplete, sceneSize, sceneSettings, onCameraChange, snapSettings, viewMode, onViewModeChange, sceneObjects, currentFrame, isPlaying, isCaching, timelineIn, timelineOut, physicsForces, selectedObjectId, selectedForceId, onObjectSelect, onForceSelect, onObjectTransform, onForceTransform, handleScale = 1.0, onCacheFrameCountChange, cacheResetToken = 0, onUpdateSceneSettings, drawBezierCurveMode = false, onFinishDrawBezierCurve, spineAttachments = [], spineFrameOverrides, spineLayerSpread = 0, quadViewport = false }, ref) => {
+// ── Module-level surface-snap cache infrastructure (never re-allocated per frame) ───────────────
+type SurfaceTri = { a: THREE.Vector3; b: THREE.Vector3; c: THREE.Vector3; n: THREE.Vector3 };
+type SpineMaskSample = { u: number; v: number };
+type SpineAttachmentMaskData = {
+  data: Uint8ClampedArray;
+  w: number;
+  h: number;
+  surfaceSamples: SpineMaskSample[];
+  edgeSamples: SpineMaskSample[];
+};
+const SPINE_MASK_ALPHA_THRESHOLD = 10;
+const SPINE_MASK_MAX_SURFACE_SAMPLES = 12000;
+const SPINE_MASK_MAX_EDGE_SAMPLES = 6000;
+
+function decimateMaskSamples(samples: SpineMaskSample[], maxSamples: number): SpineMaskSample[] {
+  if (samples.length <= maxSamples) return samples;
+  const step = Math.max(1, Math.ceil(samples.length / maxSamples));
+  const out: SpineMaskSample[] = [];
+  for (let i = 0; i < samples.length; i += step) out.push(samples[i]);
+  const last = samples[samples.length - 1];
+  if (out.length === 0 || out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+
+function buildSpineAttachmentMaskData(data: Uint8ClampedArray, w: number, h: number): SpineAttachmentMaskData {
+  const surfaceSamples: SpineMaskSample[] = [];
+  const edgeSamples: SpineMaskSample[] = [];
+  const alphaAt = (x: number, y: number) => data[(y * w + x) * 4 + 3];
+
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const alpha = alphaAt(x, y);
+      if (alpha <= SPINE_MASK_ALPHA_THRESHOLD) continue;
+
+      const sample = { u: (x + 0.5) / w, v: (y + 0.5) / h };
+      surfaceSamples.push(sample);
+
+      let isEdge = false;
+      for (let oy = -1; oy <= 1 && !isEdge; oy++) {
+        for (let ox = -1; ox <= 1; ox++) {
+          if (ox === 0 && oy === 0) continue;
+          const nx = x + ox;
+          const ny = y + oy;
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h || alphaAt(nx, ny) <= SPINE_MASK_ALPHA_THRESHOLD) {
+            isEdge = true;
+            break;
+          }
+        }
+      }
+      if (isEdge) edgeSamples.push(sample);
+    }
+  }
+
+  return {
+    data,
+    w,
+    h,
+    surfaceSamples: decimateMaskSamples(surfaceSamples, SPINE_MASK_MAX_SURFACE_SAMPLES),
+    edgeSamples: decimateMaskSamples(edgeSamples, SPINE_MASK_MAX_EDGE_SAMPLES),
+  };
+}
+
+const _cpotAB  = new THREE.Vector3(), _cpotAC  = new THREE.Vector3(),
+      _cpotAP  = new THREE.Vector3(), _cpotBP  = new THREE.Vector3(),
+      _cpotCP2 = new THREE.Vector3(), _cpotRes = new THREE.Vector3();
+function closestPointOnTriangleCached(
+  p: THREE.Vector3, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3, out: THREE.Vector3,
+): void {
+  _cpotAB.subVectors(b, a); _cpotAC.subVectors(c, a); _cpotAP.subVectors(p, a);
+  const d1 = _cpotAB.dot(_cpotAP), d2 = _cpotAC.dot(_cpotAP);
+  if (d1 <= 0 && d2 <= 0) { out.copy(a); return; }
+  _cpotBP.subVectors(p, b);
+  const d3 = _cpotAB.dot(_cpotBP), d4 = _cpotAC.dot(_cpotBP);
+  if (d3 >= 0 && d4 <= d3) { out.copy(b); return; }
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) { out.copy(a).addScaledVector(_cpotAB, d1 / (d1 - d3)); return; }
+  _cpotCP2.subVectors(p, c);
+  const d5 = _cpotAB.dot(_cpotCP2), d6 = _cpotAC.dot(_cpotCP2);
+  if (d6 >= 0 && d5 <= d6) { out.copy(c); return; }
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) { out.copy(a).addScaledVector(_cpotAC, d2 / (d2 - d6)); return; }
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) {
+    out.copy(b).addScaledVector(_cpotCP2.subVectors(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))); return;
+  }
+  const denom = 1 / (va + vb + vc);
+  out.copy(a).addScaledVector(_cpotAB, vb * denom).addScaledVector(_cpotAC, vc * denom);
+}
+function meshMatrixKey(meshRoot: THREE.Object3D): string {
+  const e = meshRoot.matrixWorld.elements;
+  return `${e[12].toFixed(2)}_${e[13].toFixed(2)}_${e[14].toFixed(2)}_${e[0].toFixed(3)}_${e[5].toFixed(3)}_${e[10].toFixed(3)}`;
+}
+function buildSurfaceTris(meshRoot: THREE.Object3D): SurfaceTri[] {
+  const tris: SurfaceTri[] = [];
+  meshRoot.updateWorldMatrix(true, true);
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+  meshRoot.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    const geo = mesh.geometry as THREE.BufferGeometry;
+    const pos = geo.attributes.position as THREE.BufferAttribute | undefined;
+    if (!pos) return;
+    const mat = mesh.matrixWorld;
+    const normalMat = new THREE.Matrix3().getNormalMatrix(mat);
+    const geoIdx = geo.index;
+    const totalTris = geoIdx ? Math.floor(geoIdx.count / 3) : Math.floor(pos.count / 3);
+    const step = Math.max(1, Math.floor(totalTris / 600));
+    const rv = (i: number) => new THREE.Vector3().fromBufferAttribute(pos!, i).applyMatrix4(mat);
+    const addTri = (ia: number, ib: number, ic: number) => {
+      const a = rv(ia), b = rv(ib), c = rv(ic);
+      _e1.subVectors(b, a); _e2.subVectors(c, a);
+      const n = new THREE.Vector3().crossVectors(_e1, _e2).applyMatrix3(normalMat).normalize();
+      tris.push({ a, b, c, n });
+    };
+    if (geoIdx) {
+      for (let i = 0; i < geoIdx.count - 2; i += step * 3)
+        addTri(geoIdx.getX(i), geoIdx.getX(i + 1), geoIdx.getX(i + 2));
+    } else {
+      for (let i = 0; i < pos.count - 2; i += step * 3) addTri(i, i + 1, i + 2);
+    }
+  });
+  return tris;
+}
+function buildSurfaceVerts(meshRoot: THREE.Object3D): THREE.Vector3[] {
+  const verts: THREE.Vector3[] = [];
+  meshRoot.updateWorldMatrix(true, true);
+  meshRoot.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    const pos = (mesh.geometry as THREE.BufferGeometry).attributes.position as THREE.BufferAttribute | undefined;
+    if (!pos) return;
+    const mat = mesh.matrixWorld;
+    const step = Math.max(1, Math.floor(pos.count / 1600));
+    for (let i = 0; i < pos.count; i += step)
+      verts.push(new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(mat));
+  });
+  return verts;
+}
+
+/** Loopable fractal glow noise: time ∈ [0,1) → perfectly repeating. Returns 0–1. */
+function lightningLoopNoise(pos: number, time: number, scale: number): number {
+  const TWO_PI = Math.PI * 2;
+  let v = 0, amp = 0.5, freq = scale;
+  for (let i = 0; i < 4; i++) {
+    const tp = time * TWO_PI * (i + 1);
+    const sp = pos * freq;
+    v += amp * (0.5 + 0.5 * Math.sin(sp + tp));
+    v += amp * 0.25 * (0.5 + 0.5 * Math.sin(sp * 1.618 - tp * 1.3));
+    freq *= 2.1;
+    amp  *= 0.52;
+  }
+  return Math.max(0, Math.min(1, v / 0.9375));
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawComplete, sceneSize, sceneSettings, onCameraChange, snapSettings, viewMode, onViewModeChange, sceneObjects, currentFrame, isPlaying, isCaching, timelineIn, timelineOut, physicsForces, selectedObjectId, selectedObjectIds, selectedForceId, onObjectSelect, onMultiObjectSelect, onForceSelect, onObjectTransform, onForceTransform, handleScale = 1.0, onCacheFrameCountChange, cacheResetToken = 0, onUpdateSceneSettings, drawBezierCurveMode = false, onFinishDrawBezierCurve, spineAttachments = [], spineFrameOverrides, spineLayerSpread = 0, quadViewport = false, onQuadPanelClick, manipulatorMode: manipulatorModeProp, onManipulatorModeChange }, ref) => {
     // State for Bezier curve drawing
     const [bezierCurvePoints, setBezierCurvePoints] = useState<{x: number, y: number, z: number}[]>([]);
     const bezierCurveMeshRef = useRef<THREE.Line | null>(null);
@@ -365,12 +609,20 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   const transformControlsRef = useRef<TransformControls | null>(null);
   
   // Scene objects tracking
+  const focusSelectedObjectRef = useRef<() => void>();
   const sceneObjectMeshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
+  const selectionOutlineHelpersRef = useRef<Map<string, THREE.BoxHelper>>(new Map());
   const spineAttachmentMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const spineLayerSpreadRef = useRef(0);
-  const spineAttachPixelDataRef = useRef<Map<string, { data: Uint8ClampedArray; w: number; h: number } | null>>(new Map());
+  // Geometry caches: rebuilt only when the mesh world-matrix changes, never per-render-frame
+  const surfaceTriCacheRef   = useRef<Map<string, { tris: SurfaceTri[]; key: string }>>(new Map());
+  const endAnchorVertsCacheRef = useRef<Map<string, { verts: THREE.Vector3[]; key: string }>>(new Map());
+  const spineAttachPixelDataRef = useRef<Map<string, SpineAttachmentMaskData | null>>(new Map());
   const quadViewportRef = useRef(false);
   const quadCamerasRef = useRef<{ front: THREE.OrthographicCamera; top: THREE.OrthographicCamera; side: THREE.OrthographicCamera } | null>(null);
+  type QuadPanel = 'top' | 'front' | 'side' | 'perspective';
+  const [focusedQuadPanel, setFocusedQuadPanel] = useState<QuadPanel | null>(null);
+  const focusedQuadPanelRef = useRef<QuadPanel | null>(null);
   const sceneExtentRef = useRef(500);
   const physicsForceGizmosRef = useRef<Map<string, THREE.Object3D>>(new Map());
   const particleSystemsRef = useRef<Map<string, {
@@ -413,6 +665,15 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   const timelineInRef = useRef(timelineIn);
 const timelineOutRef = useRef(timelineOut);
   const physicsForceRef = useRef<PhysicsForce[]>(physicsForces);
+  // Rigid-body simulation state: velocity per scene-object id
+  const rigidBodyStateRef = useRef<Map<string, { velocity: THREE.Vector3 }>>(new Map());
+  // Snapshot of initial world positions captured the moment playback starts — used by resetRigidBodies
+  const rigidBodyOriginRef = useRef<Map<string, { x: number; y: number; z: number }>>(new Map());
+  // Stable ref to onObjectTransform so the animation loop can call it without stale closure
+  const onObjectTransformRef = useRef(onObjectTransform);
+  useEffect(() => { onObjectTransformRef.current = onObjectTransform; }, [onObjectTransform]);
+  // Throttle: sync rigid-body positions to React state every N frames
+  const rigidBodySyncFrameRef = useRef(0);
   const currentFrameRef = useRef(currentFrame);
   const lastTimelineFrameRef = useRef(currentFrame);
   const particleFrameCacheRef = useRef<Map<number, CachedParticleState[]>>(new Map());
@@ -422,10 +683,25 @@ const timelineOutRef = useRef(timelineOut);
   const cacheCountRef = useRef(0);
   const selectedObjectIdRef = useRef<string | null>(selectedObjectId);
   const selectedForceIdRef = useRef<string | null>(selectedForceId ?? null);
+  const onManipulatorModeChangeRef = useRef(onManipulatorModeChange);
+  useEffect(() => { onManipulatorModeChangeRef.current = onManipulatorModeChange; }, [onManipulatorModeChange]);
   const isDraggingTransformRef = useRef(false);
     const isDrawingRef = useRef(false);
   // Tracks last-seen sprite key per emitter to detect changes and flush stale particles
   const emitterSpriteKeyRef = useRef<Map<string, string>>(new Map());
+  // Per-lightning cyclic strike animation state (loop-strike mode)
+  const loopStrikeStateRef = useRef<Map<string, {
+    phase:    'growing' | 'holding' | 'fading';
+    progress: number;
+    seed:     number;
+  }>>(new Map());
+  const lightningViewportExportRef = useRef<{
+    lightningId: string;
+    frameIndex: number;
+    frameCount: number;
+    fps: number;
+    mode: 'strike' | 'loop' | 'loop-strike';
+  } | null>(null);
     const drawnPointsRef = useRef<THREE.Vector3[]>([]);
     const drawnLineRef = useRef<THREE.Line | null>(null);
     const drawModeRef = useRef(drawMode);
@@ -560,6 +836,46 @@ const timelineOutRef = useRef(timelineOut);
   
   useEffect(() => {
     isPlayingRef.current = isPlaying;
+    const PHYS_EXCLUDED_TYPES = new Set([
+      'Emitter', 'PathPoint', 'Force', 'Bone', 'Path', 'Lightning', 'Camera', 'Light',
+    ]);
+    if (isPlaying) {
+      // Snapshot initial positions of all physics-driven objects at play-start
+      rigidBodyOriginRef.current.clear();
+      physicsForceRef.current.forEach(f => {
+        if (!f.enabled) return;
+        f.affectedEmitterIds.forEach(id => {
+          const o = sceneObjectsRef.current.find(x => x.id === id);
+          if (o && !PHYS_EXCLUDED_TYPES.has(o.type)) {
+            // Use the THREE mesh position (the authoritative live value)
+            const mesh = sceneObjectMeshesRef.current.get(id);
+            const px = mesh ? mesh.position.x : o.position.x;
+            const py = mesh ? mesh.position.y : o.position.y;
+            const pz = mesh ? mesh.position.z : o.position.z;
+            if (!rigidBodyOriginRef.current.has(id)) {
+              rigidBodyOriginRef.current.set(id, { x: px, y: py, z: pz });
+            }
+          }
+        });
+      });
+    } else {
+      // When playback stops, push final rigid-body positions back to React state
+      // so the property panel and timeline reflect where objects landed.
+      if (onObjectTransformRef.current) {
+        rigidBodyStateRef.current.forEach((_, objId) => {
+          const mesh = sceneObjectMeshesRef.current.get(objId);
+          const obj = sceneObjectsRef.current.find(o => o.id === objId);
+          if (mesh && obj) {
+            onObjectTransformRef.current!(
+              objId,
+              { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z },
+              { x: obj.rotation.x, y: obj.rotation.y, z: obj.rotation.z },
+              { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z },
+            );
+          }
+        });
+      }
+    }
   }, [isPlaying]);
 
   useEffect(() => {
@@ -590,9 +906,72 @@ const timelineOutRef = useRef(timelineOut);
     selectedObjectIdRef.current = selectedObjectId;
   }, [selectedObjectId]);
 
+  const getViewportSelectedIds = () => {
+    const ids = new Set<string>();
+    if (selectedObjectIds && selectedObjectIds.length > 0) {
+      selectedObjectIds.forEach((id) => ids.add(id));
+    } else if (selectedObjectId) {
+      ids.add(selectedObjectId);
+    }
+    return [...ids];
+  };
+
+  const clearSelectionOutlines = () => {
+    const scene = sceneRef.current;
+    selectionOutlineHelpersRef.current.forEach((helper) => {
+      if (scene) scene.remove(helper);
+      helper.geometry.dispose();
+      const material = helper.material;
+      if (Array.isArray(material)) material.forEach((m) => m.dispose());
+      else material.dispose();
+    });
+    selectionOutlineHelpersRef.current.clear();
+  };
+
+  const refreshSelectionOutlines = () => {
+    selectionOutlineHelpersRef.current.forEach((helper) => helper.update());
+  };
+
+  const rebuildSelectionOutlines = () => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+
+    clearSelectionOutlines();
+
+    const ids = getViewportSelectedIds();
+    ids.forEach((id, index) => {
+      const mesh = sceneObjectMeshesRef.current.get(id);
+      if (!mesh) return;
+
+      const helper = new THREE.BoxHelper(mesh, index === 0 ? 0xffcc33 : 0x66b3ff);
+      helper.name = index === 0 ? 'selection-outline' : `selection-outline-${id}`;
+      helper.renderOrder = 999;
+      const material = helper.material as THREE.LineBasicMaterial;
+      material.depthTest = false;
+      material.transparent = true;
+      material.opacity = index === 0 ? 0.95 : 0.75;
+      material.toneMapped = false;
+      helper.visible = mesh.visible;
+      helper.update();
+      scene.add(helper);
+      selectionOutlineHelpersRef.current.set(id, helper);
+    });
+  };
+
   useEffect(() => {
     selectedForceIdRef.current = selectedForceId ?? null;
   }, [selectedForceId]);
+
+  // Sync external manipulatorMode prop → internal state
+  useEffect(() => {
+    if (manipulatorModeProp && manipulatorModeProp !== manipulatorModeRef.current) {
+      manipulatorModeRef.current = manipulatorModeProp;
+      setManipulatorMode(manipulatorModeProp);
+      if (transformControlsRef.current) {
+        transformControlsRef.current.setMode(manipulatorModeProp);
+      }
+    }
+  }, [manipulatorModeProp]);
 
   useEffect(() => {
     manipulatorModeRef.current = manipulatorMode;
@@ -709,12 +1088,7 @@ const timelineOutRef = useRef(timelineOut);
       
       // Update selection outline to follow the object
       if (attachedObject && sceneRef.current) {
-        const outline = sceneRef.current.getObjectByName('selection-outline') as THREE.Mesh;
-        if (outline) {
-          outline.position.copy(attachedObject.position);
-          outline.rotation.copy(attachedObject.rotation);
-          outline.scale.copy(attachedObject.scale).multiplyScalar(1.05);
-        }
+        refreshSelectionOutlines();
         
         // Update transform handles to follow the object
         const handles = sceneRef.current.getObjectByName('transform-handles') as THREE.Group;
@@ -889,6 +1263,22 @@ const timelineOutRef = useRef(timelineOut);
 
     // Mouse event handlers
     const onMouseDown = (event: MouseEvent) => {
+        // In quad viewport mode, detect which panel was clicked and track it
+        if (quadViewportRef.current && containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const mx = event.clientX - rect.left;
+          const my = event.clientY - rect.top;
+          const isLeft = mx < rect.width / 2;
+          const isTop = my < rect.height / 2;
+          let panel: QuadPanel;
+          if (isLeft && isTop) panel = 'top';
+          else if (!isLeft && isTop) panel = 'front';
+          else if (isLeft && !isTop) panel = 'side';
+          else panel = 'perspective';
+          focusedQuadPanelRef.current = panel;
+          setFocusedQuadPanel(panel);
+          onQuadPanelClick?.(panel);
+        }
         if (drawModeRef.current) {
           isDrawingRef.current = true;
           drawnPointsRef.current = [];
@@ -913,22 +1303,8 @@ const timelineOutRef = useRef(timelineOut);
         }
       containerRef.current?.focus();
 
-      if (isMarqueeSelectModeRef.current && event.button === 0 && !event.altKey && !event.shiftKey) {
-        const rect = renderer.domElement.getBoundingClientRect();
-        marqueeStartRef.current = { x: event.clientX, y: event.clientY };
-        
-        if (marqueeRef.current) {
-          marqueeRef.current.style.display = 'block';
-          marqueeRef.current.style.left = `${event.clientX - rect.left}px`;
-          marqueeRef.current.style.top = `${event.clientY - rect.top}px`;
-          marqueeRef.current.style.width = '0px';
-          marqueeRef.current.style.height = '0px';
-        }
-        return;
-      }
-
       // Check if clicking on transform handles (only if Alt is not pressed for camera rotation)
-      if (!event.altKey && handlesRef.current && selectedObjectIdRef.current) {
+      if (!event.altKey && handlesRef.current && (selectedObjectIdRef.current || selectedForceIdRef.current)) {
         const rect = renderer.domElement.getBoundingClientRect();
         mouseNdcHandles.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouseNdcHandles.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -950,8 +1326,10 @@ const timelineOutRef = useRef(timelineOut);
           else if (hitObject.name === 'y-arrow') dragStateRef.current.axis = 'y';
           else if (hitObject.name === 'z-arrow') dragStateRef.current.axis = 'z';
           
-          // Store object initial position
-          const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
+          // Store selected target initial transform (object or force gizmo)
+          const selectedMesh = selectedForceIdRef.current
+            ? physicsForceGizmosRef.current.get(selectedForceIdRef.current)
+            : (selectedObjectIdRef.current ? sceneObjectMeshesRef.current.get(selectedObjectIdRef.current) : null);
           if (selectedMesh) {
             dragStateRef.current.startPos.copy(selectedMesh.position);
             dragStateRef.current.startRot.copy(selectedMesh.rotation);
@@ -1007,11 +1385,13 @@ const timelineOutRef = useRef(timelineOut);
           if (clickedObjectId && selectedMesh && hitPoint) {
             if (clickedObjectId !== selectedObjectIdRef.current) {
               onObjectSelect(clickedObjectId);
+              onForceSelect?.(null);
+              selectedForceIdRef.current = null;
               selectedObjectIdRef.current = clickedObjectId;
               selectedObjectRef.current = selectedMesh;
             }
             const objectHits = [{ point: hitPoint }]; // Mock structure for underlying logic
-            if (true) {              const mode = manipulatorModeRef.current;
+            if (true) {              const mode = manipulatorModeRef.current; // eslint-disable-line
               
               // Rotate mode: free-rotate with mouse. Scale: closest axis. Translate: free drag.
               if (mode === 'rotate') {
@@ -1109,6 +1489,80 @@ const timelineOutRef = useRef(timelineOut);
         }
       }
 
+      // Check if clicking on a physics force gizmo to select and drag it (runs regardless of current selection)
+      if (!event.altKey && event.button === 0) {
+        const rect2 = renderer.domElement.getBoundingClientRect();
+        const mx2 = ((event.clientX - rect2.left) / rect2.width) * 2 - 1;
+        const my2 = -((event.clientY - rect2.top) / rect2.height) * 2 + 1;
+        raycasterHandles.setFromCamera(new THREE.Vector2(mx2, my2), camera);
+
+        const forceGizmoObjects: THREE.Object3D[] = [];
+        physicsForceGizmosRef.current.forEach(gizmo => forceGizmoObjects.push(gizmo));
+        const gizmoHits = raycasterHandles.intersectObjects(forceGizmoObjects, true);
+
+        if (gizmoHits.length > 0) {
+          let clickedForceId: string | null = null;
+          let clickedGizmo: THREE.Object3D | null = null;
+
+          for (const [id, gizmo] of physicsForceGizmosRef.current.entries()) {
+            let obj: THREE.Object3D | null = gizmoHits[0].object;
+            while (obj) {
+              if (obj === gizmo) {
+                clickedForceId = id;
+                break;
+              }
+              obj = obj.parent;
+            }
+            if (clickedForceId) {
+              clickedGizmo = gizmo;
+              break;
+            }
+          }
+
+          if (clickedForceId && clickedGizmo) {
+            onObjectSelect(null);
+            onForceSelect?.(clickedForceId);
+            selectedForceIdRef.current = clickedForceId;
+            selectedObjectIdRef.current = null;
+            selectedObjectRef.current = null;
+
+            dragStateRef.current.active = true;
+            dragStateRef.current.axis = 'free';
+            dragStateRef.current.startX = event.clientX;
+            dragStateRef.current.startY = event.clientY;
+            dragStateRef.current.startPos.copy(clickedGizmo.position);
+            dragStateRef.current.startRot.copy(clickedGizmo.rotation);
+            dragStateRef.current.startScale.copy(clickedGizmo.scale);
+            isDraggingTransformRef.current = true;
+
+            const cameraDir = new THREE.Vector3();
+            camera.getWorldDirection(cameraDir);
+            dragStateRef.current.dragPlaneNormal = cameraDir.normalize();
+            dragStateRef.current.dragPlanePoint = clickedGizmo.position.clone();
+
+            const cs = cameraStateRef.current;
+            dragOrbitTargetRef.current = new THREE.Vector3(cs.viewOffsetX, cs.viewOffsetY, cs.viewOffsetZ);
+
+            event.preventDefault();
+            return;
+          }
+        }
+      }
+
+      // If left-click hit nothing (no object, no handle), start a marquee drag-select
+      // Ctrl+LMB only.
+      if (event.ctrlKey && !event.altKey && !event.shiftKey && event.button === 0) {
+        marqueeStartRef.current = { x: event.clientX, y: event.clientY };
+        if (marqueeRef.current) {
+          const parentRect = ((marqueeRef.current.offsetParent ?? marqueeRef.current.parentElement) as HTMLElement).getBoundingClientRect();
+          marqueeRef.current.style.display = 'block';
+          marqueeRef.current.style.left = `${event.clientX - parentRect.left}px`;
+          marqueeRef.current.style.top = `${event.clientY - parentRect.top}px`;
+          marqueeRef.current.style.width = '0px';
+          marqueeRef.current.style.height = '0px';
+        }
+      }
+
       const isRotateStart = event.altKey && event.button === 0;
       const isPanStart = event.altKey && event.button === 2;
       const isSelectStart = !event.altKey && !event.shiftKey && event.button === 0;
@@ -1182,13 +1636,13 @@ const timelineOutRef = useRef(timelineOut);
           return;
         }
 
-      if (isMarqueeSelectModeRef.current && marqueeStartRef.current && mouseStateRef.current.isDown && mouseStateRef.current.button === 0) {
+      if (marqueeStartRef.current && mouseStateRef.current.isDown && mouseStateRef.current.button === 0) {
         if (marqueeRef.current) {
-          const rect = renderer.domElement.getBoundingClientRect();
-          const startX = marqueeStartRef.current.x - rect.left;
-          const startY = marqueeStartRef.current.y - rect.top;
-          const currentX = event.clientX - rect.left;
-          const currentY = event.clientY - rect.top;
+          const parentRect = ((marqueeRef.current.offsetParent ?? marqueeRef.current.parentElement) as HTMLElement).getBoundingClientRect();
+          const startX = marqueeStartRef.current.x - parentRect.left;
+          const startY = marqueeStartRef.current.y - parentRect.top;
+          const currentX = event.clientX - parentRect.left;
+          const currentY = event.clientY - parentRect.top;
           
           const left = Math.min(startX, currentX);
           const top = Math.min(startY, currentY);
@@ -1204,8 +1658,10 @@ const timelineOutRef = useRef(timelineOut);
       }
 
       // Handle free dragging
-      if (dragStateRef.current.active && dragStateRef.current.axis === 'free' && selectedObjectIdRef.current) {
-        const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
+      if (dragStateRef.current.active && dragStateRef.current.axis === 'free') {
+        const selectedMesh = selectedForceIdRef.current
+          ? physicsForceGizmosRef.current.get(selectedForceIdRef.current)
+          : (selectedObjectIdRef.current ? sceneObjectMeshesRef.current.get(selectedObjectIdRef.current) : null);
         if (selectedMesh && dragStateRef.current.dragPlaneNormal && dragStateRef.current.dragPlanePoint) {
           const rect = renderer.domElement.getBoundingClientRect();
           const mouseX = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -1230,13 +1686,7 @@ const timelineOutRef = useRef(timelineOut);
             
             // Update outline and handles
             if (sceneRef.current) {
-              const outline = sceneRef.current.getObjectByName('selection-outline');
-              if (outline) {
-                outline.position.copy(selectedMesh.position);
-                outline.rotation.copy(selectedMesh.rotation);
-                outline.scale.copy(selectedMesh.scale);
-                outline.scale.multiplyScalar(1.05);
-              }
+              refreshSelectionOutlines();
               const handles = sceneRef.current.getObjectByName('transform-handles');
               if (handles) {
                 handles.position.copy(selectedMesh.position);
@@ -1273,10 +1723,7 @@ const timelineOutRef = useRef(timelineOut);
 
           // Update outline and handles
           if (sceneRef.current) {
-            const outline = sceneRef.current.getObjectByName('selection-outline');
-            if (outline) {
-              outline.rotation.copy(selectedMesh.rotation);
-            }
+            refreshSelectionOutlines();
             const handles = sceneRef.current.getObjectByName('transform-handles');
             if (handles) {
               handles.rotation.copy(selectedMesh.rotation);
@@ -1290,8 +1737,10 @@ const timelineOutRef = useRef(timelineOut);
       }
 
       // Handle arrow dragging
-      if (dragStateRef.current.active && dragStateRef.current.axis && selectedObjectIdRef.current) {
-        const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
+      if (dragStateRef.current.active && dragStateRef.current.axis) {
+        const selectedMesh = selectedForceIdRef.current
+          ? physicsForceGizmosRef.current.get(selectedForceIdRef.current)
+          : (selectedObjectIdRef.current ? sceneObjectMeshesRef.current.get(selectedObjectIdRef.current) : null);
         if (selectedMesh) {
           const deltaX = event.clientX - dragStateRef.current.startX;
           const deltaY = event.clientY - dragStateRef.current.startY;
@@ -1374,13 +1823,7 @@ const timelineOutRef = useRef(timelineOut);
           
           // Update outline and handles
           if (sceneRef.current) {
-            const outline = sceneRef.current.getObjectByName('selection-outline');
-            if (outline) {
-              outline.position.copy(selectedMesh.position);
-              outline.rotation.copy(selectedMesh.rotation);
-              outline.scale.copy(selectedMesh.scale);
-              outline.scale.multiplyScalar(1.05);
-            }
+            refreshSelectionOutlines();
             const handles = sceneRef.current.getObjectByName('transform-handles');
             if (handles) {
               handles.position.copy(selectedMesh.position);
@@ -1457,7 +1900,7 @@ const timelineOutRef = useRef(timelineOut);
           return;
         }
 
-        if (marqueeStartRef.current && isMarqueeSelectModeRef.current) {
+        if (marqueeStartRef.current) {
           if (marqueeRef.current) marqueeRef.current.style.display = 'none';
           const endX = event.clientX;
           const endY = event.clientY;
@@ -1471,7 +1914,7 @@ const timelineOutRef = useRef(timelineOut);
              const minY = Math.min(startY, endY) - rect.top;
              const maxY = Math.max(startY, endY) - rect.top;
              
-             let selectedId: string | null = null;
+             const marqueeSelectedIds: string[] = [];
              // project objects
              for (const [id, mesh] of sceneObjectMeshesRef.current.entries()) {
                const pos = new THREE.Vector3();
@@ -1482,14 +1925,20 @@ const timelineOutRef = useRef(timelineOut);
                const screenY = (-(pos.y) * 0.5 + 0.5) * rect.height;
                
                if (screenX >= minX && screenX <= maxX && screenY >= minY && screenY <= maxY) {
-                 selectedId = id;
-                 break; // Single select behavior for marquee box
+                 marqueeSelectedIds.push(id);
                }
              }
-             if (selectedId) {
-                onObjectSelect(selectedId);
-                selectedObjectRef.current = sceneObjectMeshesRef.current.get(selectedId) || null;
+             if (marqueeSelectedIds.length > 0) {
+                if (onMultiObjectSelect) {
+                  onMultiObjectSelect(marqueeSelectedIds);
+                } else {
+                  onObjectSelect(marqueeSelectedIds[0]);
+                }
+                onForceSelect?.(null);
+                selectedForceIdRef.current = null;
+                selectedObjectRef.current = sceneObjectMeshesRef.current.get(marqueeSelectedIds[0]) || null;
              } else {
+                if (onMultiObjectSelect) onMultiObjectSelect([]);
                 onObjectSelect(null);
                 selectedObjectRef.current = null;
              }
@@ -1505,7 +1954,18 @@ const timelineOutRef = useRef(timelineOut);
       // End arrow drag
       if (dragStateRef.current.active) {
         // Update state when drag ends
-        if (selectedObjectIdRef.current && onObjectTransform) {
+        if (selectedForceIdRef.current && onForceTransform) {
+          const forceGizmo = physicsForceGizmosRef.current.get(selectedForceIdRef.current);
+          if (forceGizmo) {
+            const existingForce = physicsForceRef.current.find((f) => f.id === selectedForceIdRef.current);
+            const direction = existingForce?.direction ?? { x: 0, y: 1, z: 0 };
+            onForceTransform(
+              selectedForceIdRef.current,
+              { x: forceGizmo.position.x, y: forceGizmo.position.y, z: forceGizmo.position.z },
+              direction,
+            );
+          }
+        } else if (selectedObjectIdRef.current && onObjectTransform) {
           const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectIdRef.current);
           if (selectedMesh) {
             onObjectTransform(
@@ -1612,6 +2072,8 @@ const timelineOutRef = useRef(timelineOut);
         }
       }
     };
+    
+    focusSelectedObjectRef.current = applyFocusSelectedObject;
 
     const onKeyUp = (event: KeyboardEvent) => {
       const isAKey = event.code === 'KeyA' || event.key.toLowerCase() === 'a';
@@ -1633,22 +2095,25 @@ const timelineOutRef = useRef(timelineOut);
       }
 
       // Transform controls mode switching
-      if (transformControlsRef.current && selectedObjectIdRef.current) {
+      if (transformControlsRef.current) {
         if (isWKey) {
           event.preventDefault();
           transformControlsRef.current.setMode('translate');
           manipulatorModeRef.current = 'translate';
           setManipulatorMode('translate');
+          onManipulatorModeChangeRef.current?.('translate');
         } else if (isEKey) {
           event.preventDefault();
           transformControlsRef.current.setMode('rotate');
           manipulatorModeRef.current = 'rotate';
           setManipulatorMode('rotate');
+          onManipulatorModeChangeRef.current?.('rotate');
         } else if (isRKey) {
           event.preventDefault();
           transformControlsRef.current.setMode('scale');
           manipulatorModeRef.current = 'scale';
           setManipulatorMode('scale');
+          onManipulatorModeChangeRef.current?.('scale');
         }
       }
     };
@@ -1757,14 +2222,14 @@ const timelineOutRef = useRef(timelineOut);
         activeCamera.lookAt(lookAtPos);
       }
 
-      const getParticleTexture = (particleType: ParticleVisualType, customGlow: boolean) => {
+      const getParticleTexture = (particleType: ParticleVisualType, customGlow: boolean, metalness: number = 0.9, roughness: number = 0.15, metalSheen: number = 0, sheenColor: string = '#ffffff') => {
         const textureType = particleType === 'dots' && !customGlow ? 'circles' : particleType;
-        const key = `${textureType}:${customGlow ? '1' : '0'}`;
+        const key = `${textureType}:${customGlow ? '1' : '0'}:${textureType === 'metallic-sphere' ? `m${metalness.toFixed(2)}r${roughness.toFixed(2)}` : ''}:s${(metalSheen > 0 ? `${metalSheen.toFixed(0)}${sheenColor}` : '0')}`;
         const cached = particleTextureCache.get(key);
         if (cached) return cached;
 
         // High-res for glow types, standard for simple shapes
-        const isGlowType = textureType === 'glow-circles' || textureType === 'stars' || textureType === 'sparkle' || textureType === 'glitter';
+        const isGlowType = textureType === 'glow-circles' || textureType === 'stars' || textureType === 'sparkle' || textureType === 'glitter' || textureType === 'metallic-sphere';
         const size = isGlowType ? 256 : 128;
         const canvas = document.createElement('canvas');
         canvas.width = size;
@@ -1889,6 +2354,60 @@ const timelineOutRef = useRef(timelineOut);
           ]);
           ctx.fillRect(0, 0, size, size);
 
+        } else if (textureType === 'metallic-sphere') {
+          // ── Faux metallic sphere: diffuse shading + specular highlight + rim ──
+          const lightX = C - R * 0.38;
+          const lightY = C - R * 0.38;
+
+          // 1. Base sphere clip + diffuse shading
+          ctx.save();
+          ctx.beginPath();
+          ctx.arc(C, C, R * 0.9, 0, Math.PI * 2);
+          ctx.clip();
+
+          // diffuse: dark bottom-right → bright top-left
+          const diffuseGrad = ctx.createRadialGradient(lightX, lightY, 0, C + R * 0.25, C + R * 0.25, R * 1.3);
+          diffuseGrad.addColorStop(0,    'rgba(255,255,255,0.98)');
+          diffuseGrad.addColorStop(0.22, 'rgba(210,210,210,0.88)');
+          diffuseGrad.addColorStop(0.55, 'rgba(120,120,120,0.82)');
+          diffuseGrad.addColorStop(0.82, 'rgba(40,40,40,0.92)');
+          diffuseGrad.addColorStop(1.0,  'rgba(8,8,8,0.97)');
+          ctx.fillStyle = diffuseGrad;
+          ctx.fillRect(0, 0, size, size);
+
+          // rim light: soft bright ring at the back/bottom edge (environment bounce)
+          const rimGrad = ctx.createRadialGradient(C, C, R * 0.72, C, C, R * 0.95);
+          rimGrad.addColorStop(0,   'rgba(255,255,255,0)');
+          rimGrad.addColorStop(0.65,'rgba(255,255,255,0.10)');
+          rimGrad.addColorStop(1.0, 'rgba(255,255,255,0.52)');
+          ctx.fillStyle = rimGrad;
+          ctx.fillRect(0, 0, size, size);
+
+          ctx.restore();
+
+          // 2. Specular highlight — tighter/sharper at low roughness, wider/softer at high roughness
+          const specRadius = R * (0.06 + roughness * 0.38);
+          const specX = lightX + (C - lightX) * 0.08;
+          const specY = lightY + (C - lightY) * 0.08;
+          const specGrad = ctx.createRadialGradient(specX, specY, 0, specX, specY, specRadius);
+          const specPeakAlpha = 0.95 - roughness * 0.30; // sharper highlight for low roughness
+          specGrad.addColorStop(0,   `rgba(255,255,255,${specPeakAlpha.toFixed(2)})`);
+          specGrad.addColorStop(0.25,'rgba(255,255,255,0.85)');
+          specGrad.addColorStop(0.6, 'rgba(255,255,255,0.35)');
+          specGrad.addColorStop(1.0, 'rgba(255,255,255,0)');
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.fillStyle = specGrad;
+          ctx.fillRect(0, 0, size, size);
+
+          // 3. Outer alpha fade so sprite blends cleanly with no hard edge
+          ctx.globalCompositeOperation = 'destination-in';
+          ctx.fillStyle = radGrad(0, R * 0.92, [
+            [0,    'rgba(0,0,0,1)'],
+            [0.78, 'rgba(0,0,0,1)'],
+            [1.0,  'rgba(0,0,0,0)'],
+          ]);
+          ctx.fillRect(0, 0, size, size);
+
         } else if (textureType === 'sprites' || textureType === '3d-model' || textureType === 'volumetric-fire') {
           ctx.fillStyle = radGrad(0, R * 1.1, [
             [0,    'rgba(255,255,255,1.0)'],
@@ -1919,6 +2438,56 @@ const timelineOutRef = useRef(timelineOut);
             [1,   'rgba(255,255,255,0)'],
           ]);
           ctx.fill();
+        }
+
+        // ── Metallic sheen overlay (works on any type) ──
+        if (metalSheen > 0 && textureType !== 'metallic-sphere') {
+          const sheenStrength = metalSheen / 100;
+          const lightRad = 315 * Math.PI / 180;
+          const lx = C + Math.cos(lightRad) * R * 0.30;
+          const ly = C - Math.sin(lightRad) * R * 0.30;
+          const hn = sheenColor.replace('#', '');
+          const hs = hn.length === 3 ? hn.split('').map(c => c+c).join('') : hn;
+          const hn2 = parseInt(hs, 16);
+          const sr = (hn2 >> 16) & 255, sg = (hn2 >> 8) & 255, sb = hn2 & 255;
+          const baseSnap = document.createElement('canvas');
+          baseSnap.width = baseSnap.height = size;
+          baseSnap.getContext('2d')!.drawImage(canvas, 0, 0);
+          const metal = document.createElement('canvas');
+          metal.width = metal.height = size;
+          const mc = metal.getContext('2d')!;
+          // Reflection band: transparent-at-edges, bright stripe – no dark stops, no colour cast
+          const bx0 = C - Math.cos(lightRad) * R, by0 = C + Math.sin(lightRad) * R;
+          const bx1 = C + Math.cos(lightRad) * R, by1 = C - Math.sin(lightRad) * R;
+          const bandGrad = mc.createLinearGradient(bx0, by0, bx1, by1);
+          bandGrad.addColorStop(0,    `rgba(${sr},${sg},${sb},0)`);
+          bandGrad.addColorStop(0.38, `rgba(${sr},${sg},${sb},0.12)`);
+          bandGrad.addColorStop(0.55, `rgba(${sr},${sg},${sb},0.65)`);
+          bandGrad.addColorStop(0.68, `rgba(${sr},${sg},${sb},0.18)`);
+          bandGrad.addColorStop(1.0,  `rgba(${sr},${sg},${sb},0)`);
+          mc.fillStyle = bandGrad;
+          mc.fillRect(0, 0, size, size);
+          // Tight specular spot
+          const specR = R * 0.32;
+          const specGrad = mc.createRadialGradient(lx, ly, 0, lx, ly, specR);
+          specGrad.addColorStop(0,    `rgba(255,255,255,0.90)`);
+          specGrad.addColorStop(0.25, `rgba(${sr},${sg},${sb},0.55)`);
+          specGrad.addColorStop(0.65, `rgba(${sr},${sg},${sb},0.10)`);
+          specGrad.addColorStop(1.0,  `rgba(${sr},${sg},${sb},0)`);
+          mc.globalCompositeOperation = 'lighter';
+          mc.fillStyle = specGrad;
+          mc.fillRect(0, 0, size, size);
+          mc.globalCompositeOperation = 'source-over';
+          // Clip to shape
+          mc.globalCompositeOperation = 'destination-in';
+          mc.drawImage(baseSnap, 0, 0);
+          mc.globalCompositeOperation = 'source-over';
+          // Composite – additive, no colour cast
+          ctx.save();
+          ctx.globalCompositeOperation = 'lighter';
+          ctx.globalAlpha = sheenStrength * 0.75;
+          ctx.drawImage(metal, 0, 0);
+          ctx.restore();
         }
 
         const texture = new THREE.CanvasTexture(canvas);
@@ -2039,11 +2608,15 @@ const timelineOutRef = useRef(timelineOut);
           pivotX: number = 0.5,
           pivotY: number = 0.5,
           flipX: boolean = false,
-          blendMode: string = 'normal'
+          blendMode: string = 'normal',
+          metalness: number = 0.9,
+          roughness: number = 0.15,
+          metalSheen: number = 0,
+          sheenColor: string = '#ffffff'
       ) => {
         const resolvedParticleType = (particleType ?? 'dots') as ParticleVisualType;
-        const shouldUseSprite = resolvedParticleType === 'circles' || resolvedParticleType === 'glow-circles' || resolvedParticleType === 'sparkle' || resolvedParticleType === 'glitter' || resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'stars' || resolvedParticleType === 'volumetric-fire';
-        const texture = getParticleTexture(resolvedParticleType, customGlow);
+        const shouldUseSprite = resolvedParticleType === 'circles' || resolvedParticleType === 'glow-circles' || resolvedParticleType === 'sparkle' || resolvedParticleType === 'glitter' || resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'stars' || resolvedParticleType === 'volumetric-fire' || resolvedParticleType === 'metallic-sphere';
+        const texture = getParticleTexture(resolvedParticleType, customGlow, metalness, roughness, metalSheen, sheenColor);
 
         if (shouldUseSprite) {
           let baseMap = (resolvedParticleType === 'sprites' || resolvedParticleType === '3d-model' || resolvedParticleType === 'volumetric-fire') && spriteTexture ? spriteTexture : texture;
@@ -2123,6 +2696,7 @@ const timelineOutRef = useRef(timelineOut);
               lifetime: particle.lifetime,
               age: particle.age,
               opacity: material.opacity,
+              visible: particle.mesh.visible,
               rotation: getParticleRotation(particle.mesh),
               size: particle.baseSize ?? getParticleSize(particle.mesh),
             });
@@ -2185,6 +2759,10 @@ const timelineOutRef = useRef(timelineOut);
           const previewedGlow = getPreviewedGlow(emitterGlow);
 
           const particleBlendMode = emitterProps.particleBlendMode || 'normal';
+          const emitterMetalnessR = emitter && emitter.type === 'Emitter' ? Number(emitterProps.particleMetalness ?? 0.9) : 0.9;
+          const emitterRoughnessR = emitter && emitter.type === 'Emitter' ? Number(emitterProps.particleRoughness ?? 0.15) : 0.15;
+          const emitterMetalSheenR = emitter && emitter.type === 'Emitter' ? Number(emitterProps.particleMetalSheen ?? 0) : 0;
+          const emitterSheenColorR = emitter && emitter.type === 'Emitter' ? String(emitterProps.particleMetalSheenColor ?? '#ffffff') : '#ffffff';
           const particleMesh = createParticleMesh(
             new THREE.Vector3(cached.position.x, cached.position.y, cached.position.z),
             previewedColor,
@@ -2197,12 +2775,21 @@ const timelineOutRef = useRef(timelineOut);
             0.5,
             0.5,
             false,
-            particleBlendMode
+            particleBlendMode,
+            emitterMetalnessR,
+            emitterRoughnessR,
+            emitterMetalSheenR,
+            emitterSheenColorR
           );
 
           const particleFlipXChance = Number(emitterProps.particleHorizontalFlipChance ?? 0);
                 const flipX = Math.random() < particleFlipXChance;
                 scene.add(particleMesh);
+
+                // Visibility will be corrected by the lifecycle loop at the end of this rAF.
+                // Start hidden — the loop will evaluate lifetime bounds correctly.
+                particleMesh.visible = false;
+
                 particleSystem.particles.push({
             trackId: cached.trackId ?? 0, // Restore the bone/track ID for Spine export
             mesh: particleMesh,
@@ -2362,8 +2949,7 @@ const timelineOutRef = useRef(timelineOut);
 
           // Keep selection outline + handles in sync
           if (selectedObjectIdRef.current === obj.id && sceneRef.current) {
-            const outline = sceneRef.current.getObjectByName('selection-outline');
-            if (outline) outline.position.copy(pos);
+            refreshSelectionOutlines();
             const handles = sceneRef.current.getObjectByName('transform-handles');
             if (handles) handles.position.copy(pos);
           }
@@ -2373,8 +2959,145 @@ const timelineOutRef = useRef(timelineOut);
       const timelineFrame = Math.max(0, Math.floor(currentFrameRef.current));
       const previousTimelineFrame = lastTimelineFrameRef.current;
       const frameChanged = timelineFrame !== previousTimelineFrame;
-      const restoredFromCache = frameChanged && restoreParticleFrame(timelineFrame);
+      // Once a frame snapshot exists in the cache, NEVER run physics for it again —
+      // not even on repeated rAF renders of the same frame (60 Hz display vs 30 fps timeline).
+      // Running physics a second time per cached frame corrupts subsequent frames during baking
+      // AND causes the "forth and back" visual jitter during playback.
+      const frameIsInCache = particleFrameCacheRef.current.has(timelineFrame);
+      const restoredFromCache =
+        (frameChanged && restoreParticleFrame(timelineFrame)) ||
+        frameIsInCache;
 
+      // ── Rigid-body object physics ──────────────────────────────────────────
+      // Apply physics forces to non-emitter 3D objects listed in each force's
+      // affectedEmitterIds. Mesh positions are driven directly; React state is
+      // only synced when playback stops to avoid per-frame re-render overhead.
+      {
+        const PHYS_EXCLUDED = new Set([
+          'Emitter', 'PathPoint', 'Force', 'Bone', 'Path', 'Lightning', 'Camera', 'Light',
+        ]);
+        const dt = Math.min(frameDeltaTime, 0.05);
+
+        if (isPlayingRef.current) {
+          // Collect all physics-driven object IDs
+          const drivenObjectIds = new Set<string>();
+          physicsForceRef.current.forEach(f => {
+            if (!f.enabled) return;
+            f.affectedEmitterIds.forEach(id => {
+              const o = sceneObjectsRef.current.find(x => x.id === id);
+              if (o && !PHYS_EXCLUDED.has(o.type)) drivenObjectIds.add(id);
+            });
+          });
+
+          // Drop state for objects no longer driven
+          rigidBodyStateRef.current.forEach((_, id) => {
+            if (!drivenObjectIds.has(id)) rigidBodyStateRef.current.delete(id);
+          });
+
+          drivenObjectIds.forEach(objId => {
+            const obj = sceneObjectsRef.current.find(o => o.id === objId);
+            const mesh = sceneObjectMeshesRef.current.get(objId);
+            if (!obj || !mesh) return;
+
+            if (!rigidBodyStateRef.current.has(objId)) {
+              rigidBodyStateRef.current.set(objId, { velocity: new THREE.Vector3() });
+            }
+            const rbState = rigidBodyStateRef.current.get(objId)!;
+
+            const affectingForces = physicsForceRef.current.filter(
+              f => f.enabled && f.affectedEmitterIds.includes(objId),
+            );
+            const objPos = mesh.position;
+
+            affectingForces.forEach(force => {
+              let forceOrigin = new THREE.Vector3(force.position.x, force.position.y, force.position.z);
+              if ((force.type === 'attractor' || force.type === 'repulsor') && force.targetShapeId) {
+                const tgt = sceneObjectsRef.current.find(o => o.id === force.targetShapeId);
+                if (tgt) forceOrigin.set(tgt.position.x, tgt.position.y, tgt.position.z);
+              }
+              const toForce = new THREE.Vector3().subVectors(forceOrigin, objPos);
+              const dist = toForce.length();
+
+              switch (force.type) {
+                case 'gravity':
+                  rbState.velocity.y -= force.strength * 9.8 * dt;
+                  break;
+                case 'wind':
+                  if (force.direction) {
+                    const windDir = new THREE.Vector3(force.direction.x, force.direction.y, force.direction.z).normalize();
+                    rbState.velocity.addScaledVector(windDir, force.strength * dt);
+                  }
+                  break;
+                case 'attractor':
+                  if (dist > 0.1) rbState.velocity.addScaledVector(toForce.clone().normalize(), force.strength * dt);
+                  break;
+                case 'repulsor':
+                  if (dist > 0.1) rbState.velocity.addScaledVector(toForce.clone().normalize(), -force.strength * dt);
+                  break;
+                case 'drag':
+                case 'damping':
+                  rbState.velocity.multiplyScalar(Math.max(0, 1 - force.strength * 5 * dt));
+                  break;
+                case 'turbulence':
+                  rbState.velocity.add(new THREE.Vector3(
+                    (Math.random() - 0.5) * 2 * force.strength * dt,
+                    (Math.random() - 0.5) * 2 * force.strength * dt,
+                    (Math.random() - 0.5) * 2 * force.strength * dt,
+                  ));
+                  break;
+                case 'tornado':
+                  if (force.direction) {
+                    const axis = new THREE.Vector3(force.direction.x, force.direction.y, force.direction.z).normalize();
+                    const radVec = new THREE.Vector3().crossVectors(axis, toForce.clone().normalize());
+                    if (radVec.length() > 0.01) {
+                      rbState.velocity.addScaledVector(radVec.normalize(), force.strength * dt);
+                      rbState.velocity.y += force.strength * 0.3 * dt;
+                    }
+                  }
+                  break;
+                case 'vortex':
+                  if (force.direction && dist > 0.1) {
+                    const vAxis = new THREE.Vector3(force.direction.x, force.direction.y, force.direction.z).normalize();
+                    const radVec2 = new THREE.Vector3().crossVectors(vAxis, toForce.clone().normalize());
+                    if (radVec2.length() > 0.01) {
+                      const tangent = new THREE.Vector3().crossVectors(vAxis, radVec2.normalize());
+                      rbState.velocity.addScaledVector(tangent, force.strength * dt);
+                    }
+                  }
+                  break;
+                case 'thermal-updraft':
+                  rbState.velocity.y += force.strength * dt;
+                  break;
+                default:
+                  break;
+              }
+            });
+
+            // Integrate position
+            mesh.position.addScaledVector(rbState.velocity, dt);
+
+            // Keep the sceneObjectsRef entry consistent so inspectors read current data
+            const mutableObj = obj as any;
+            mutableObj.position = { x: mesh.position.x, y: mesh.position.y, z: mesh.position.z };
+
+            // Keep transform handles / selection outline in sync
+            if (selectedObjectIdRef.current === objId && sceneRef.current) {
+              refreshSelectionOutlines();
+              const handles = sceneRef.current.getObjectByName('transform-handles');
+              if (handles) handles.position.copy(mesh.position);
+            }
+          });
+        } else {
+          // When not playing, clear all rigid-body velocity state so the next
+          // play-session starts from a still position.
+          rigidBodyStateRef.current.clear();
+        }
+      }
+      // ── End Rigid-body object physics ───────────────────────────────────────
+
+      // Physics runs every rAF using real elapsed time (frameDeltaTime), so it is always
+      // rate-correct regardless of rAF frequency. The only gate is restoredFromCache so we
+      // never double-advance a frame that was already baked into the cache.
       if (!restoredFromCache) {
         let globalActiveParticles = 0;
         particleSystemsRef.current.forEach((system) => {
@@ -2569,38 +3292,36 @@ const timelineOutRef = useRef(timelineOut);
                     }
                   }
                 } else if (emitterType === 'mesh_bounds') {
-                  sourceMesh.updateMatrixWorld(true);
-                  let lx = 0, ly = 0, lz = 0;
-                  const globalBox = new THREE.Box3().setFromObject(sourceMesh);
-                  if (!globalBox.isEmpty()) {
-                    const size = new THREE.Vector3();
-                    globalBox.getSize(size);
-                    const worldX = globalBox.min.x + Math.random() * size.x;
-                    const worldY = globalBox.min.y + Math.random() * size.y;
-                    const worldZ = globalBox.min.z + Math.random() * size.z;
-                    let worldPos = new THREE.Vector3(worldX, worldY, worldZ);
-                    if (isEdgeMode || isSurfaceMode) {
-                      const c = new THREE.Vector3();
-                      globalBox.getCenter(c);
-                      const dx = worldX - c.x;
-                      const dy = worldY - c.y;
-                      const dz = worldZ - c.z;
-                      const nx = Math.abs(dx) / (size.x / 2);
-                      const ny = Math.abs(dy) / (size.y / 2);
-                      const nz = Math.abs(dz) / (size.z / 2);
-                      const m = Math.max(nx, ny, nz);
-                      if (m === nx) worldPos.x = c.x + Math.sign(dx) * size.x / 2;
-                      else if (m === ny) worldPos.y = c.y + Math.sign(dy) * size.y / 2;
-                      else worldPos.z = c.z + Math.sign(dz) * size.z / 2;
+                  // Use the shape's geometry bounds in local space so emission stays
+                  // centred on the emitter even after the emitter has been moved.
+                  const geomMb = (sourceMesh as THREE.Mesh)?.geometry;
+                  if (geomMb) {
+                    if (!geomMb.boundingBox) geomMb.computeBoundingBox();
+                    const bbMb = geomMb.boundingBox;
+                    if (bbMb) {
+                      const rndX = bbMb.min.x + Math.random() * (bbMb.max.x - bbMb.min.x);
+                      const rndY = bbMb.min.y + Math.random() * (bbMb.max.y - bbMb.min.y);
+                      const rndZ = bbMb.min.z + Math.random() * (bbMb.max.z - bbMb.min.z);
+                      if (isEdgeMode || isSurfaceMode) {
+                        // Snap to the nearest face of the bounding box
+                        const cx = (bbMb.min.x + bbMb.max.x) / 2;
+                        const cy = (bbMb.min.y + bbMb.max.y) / 2;
+                        const cz = (bbMb.min.z + bbMb.max.z) / 2;
+                        const hx = (bbMb.max.x - bbMb.min.x) / 2;
+                        const hy = (bbMb.max.y - bbMb.min.y) / 2;
+                        const hz = (bbMb.max.z - bbMb.min.z) / 2;
+                        const dx = Math.abs(rndX - cx) / (hx || 1);
+                        const dy = Math.abs(rndY - cy) / (hy || 1);
+                        const dz = Math.abs(rndZ - cz) / (hz || 1);
+                        const m = Math.max(dx, dy, dz);
+                        if (m === dx) localOffset.set(cx + Math.sign(rndX - cx) * hx, rndY, rndZ);
+                        else if (m === dy) localOffset.set(rndX, cy + Math.sign(rndY - cy) * hy, rndZ);
+                        else localOffset.set(rndX, rndY, cz + Math.sign(rndZ - cz) * hz);
+                      } else {
+                        localOffset.set(rndX, rndY, rndZ);
+                      }
                     }
-                    const smWorldPos = new THREE.Vector3();
-                    sourceMesh.getWorldPosition(smWorldPos);
-                    const diff = worldPos.clone().sub(smWorldPos);
-                    diff.applyEuler(new THREE.Euler(-sourceMesh.rotation.x, -sourceMesh.rotation.y, -sourceMesh.rotation.z));
-                    diff.set(diff.x / sourceMesh.scale.x, diff.y / sourceMesh.scale.y, diff.z / sourceMesh.scale.z);
-                    lx = diff.x; ly = diff.y; lz = diff.z;
                   }
-                  localOffset.set(lx, ly, lz);
                   localNormal.set(0, 1, 0);
                 } else if (emitterType === 'point') {
                   localNormal.set(0, -0.5, 1).normalize();
@@ -2686,7 +3407,9 @@ const timelineOutRef = useRef(timelineOut);
                   // Fall back to emitter position if attachment not ready / all transparent
                   spawnPosition = foundSpinePos ?? sourceMesh.localToWorld(localOffset.clone());
                 } else {
-                  // No spine attachment selected — always use original emitter position
+                  // Spawn position is in the source mesh's LOCAL space; localToWorld converts
+                  // it to world space so particles appear within the shape's bounds at its
+                  // actual world position (independent of the emitter's position).
                   spawnPosition = sourceMesh.localToWorld(localOffset.clone());
                 }
 
@@ -2742,6 +3465,10 @@ const timelineOutRef = useRef(timelineOut);
                 const previewedGlow = getPreviewedGlow(emitterGlow);
                 
                 const particleBlendMode = emitterProps.particleBlendMode || 'normal';
+                const emitterMetalness = Number(emitterProps.particleMetalness ?? 0.9);
+                const emitterRoughness = Number(emitterProps.particleRoughness ?? 0.15);
+                const emitterMetalSheen = Number(emitterProps.particleMetalSheen ?? 0);
+                const emitterSheenColor = String(emitterProps.particleMetalSheenColor ?? '#ffffff');
                 const particleMesh = createParticleMesh(
                   spawnPosition,
                   previewedColor,
@@ -2754,7 +3481,11 @@ const timelineOutRef = useRef(timelineOut);
                   0.5,
                   0.5,
                   false,
-                  particleBlendMode
+                  particleBlendMode,
+                  emitterMetalness,
+                  emitterRoughness,
+                  emitterMetalSheen,
+                  emitterSheenColor
                 );
                 
                 const emitterSpeed = emitterProps.particleSpeed ?? 50;
@@ -2807,6 +3538,7 @@ const timelineOutRef = useRef(timelineOut);
                 const particleFlipXChance = Number(emitterProps.particleHorizontalFlipChance ?? 0);
                 const flipX = Math.random() < particleFlipXChance;
                 scene.add(particleMesh);
+                particleMesh.visible = false; // hidden until lifecycle loop allows it (5% of lifetime)
                 particleSystem.particles.push({
                   trackId: spawnTrackId,
                   mesh: particleMesh,
@@ -2858,22 +3590,54 @@ const timelineOutRef = useRef(timelineOut);
               emitterSpriteKeyRef.current.set(obj.id, _newSpriteKey);
 
               // Update existing particles; movement/lifetime only advance while playing or caching.
-              const deltaTime = 0.016; // Approximate 60fps
+              const deltaTime = 0.016; // Fixed 60fps step — stable regardless of rAF timing jitter
               for (let i = particleSystem.particles.length - 1; i >= 0; i--) {
                 const particle = particleSystem.particles[i];
 
                 if (isPlayingRef.current || isCachingRef.current || sceneSettingsRef.current.particleLivePreview) {
                   particle.age += deltaTime;
 
-                  // Remove dead particles
+                  // Recycle dead particles: reset age + position instead of destroying the mesh.
+                  // This keeps the same THREE object in the scene and budget count unchanged.
+                  // The lifecycle visibility loop hides it during the 0–20% birth window so it
+                  // is never seen at the emitter origin — no snap, no teleport flash.
                   if (particle.age >= particle.lifetime) {
-                    scene.remove(particle.mesh);
-                    // Clean up path visualization
-                    const pathLine = particle.mesh.userData.pathLine as THREE.Line;
-                    const pathPoints = particle.mesh.userData.pathPoints as THREE.Group;
-                    if (pathLine) scene.remove(pathLine);
-                    if (pathPoints) scene.remove(pathPoints);
-                    particleSystem.particles.splice(i, 1);
+                    particle.mesh.visible = false;
+                    particle.age = 0;
+                    // Teleport mesh back to a random active source position (not necessarily
+                    // the emitter itself when child shapes are driving emission).
+                    {
+                      const recycleSources = sceneObjectsRef.current.filter(o =>
+                        o.parentId === obj.id && o.type !== 'PathPoint' && o.type !== 'Emitter' && o.type !== 'Force'
+                      );
+                      const recycleSource = recycleSources.length > 0
+                        ? recycleSources[Math.floor(Math.random() * recycleSources.length)]
+                        : null;
+                      const recycleMesh = recycleSource
+                        ? (sceneObjectMeshesRef.current.get(recycleSource.id) ?? emitterMesh)
+                        : emitterMesh;
+                      const recycleWorldPos = new THREE.Vector3();
+                      recycleMesh.getWorldPosition(recycleWorldPos);
+                      particle.mesh.position.copy(recycleWorldPos);
+                    }
+                    // Re-randomise velocity so each cycle can follow a different arc
+                    {
+                      const rSpeed = Number(emitterProps.particleSpeed ?? 50) *
+                        (1 - Number(emitterProps.particleSpeedVariation ?? 0.2) * 0.5 +
+                          Math.random() * Number(emitterProps.particleSpeedVariation ?? 0.2));
+                      const rTheta = Math.random() * Math.PI * 2;
+                      const rCos   = emitterProps.particleSpreadAngle !== undefined
+                        ? Math.cos((Number(emitterProps.particleSpreadAngle) / 180) * Math.PI)
+                        : -1;
+                      const rPhi   = Math.acos(1 - Math.random() * (1 - rCos));
+                      particle.velocity.set(
+                        Math.sin(rPhi) * Math.cos(rTheta),
+                        Math.cos(rPhi),
+                        Math.sin(rPhi) * Math.sin(rTheta)
+                      ).normalize().multiplyScalar(rSpeed);
+                    }
+                    // Clear path history for the new cycle
+                    particle.positionHistory = [particle.mesh.position.clone()];
                     continue;
                   }
 
@@ -3184,9 +3948,13 @@ const timelineOutRef = useRef(timelineOut);
                 particle.rotation = emitterRotation + (particle.rotationOffset ?? 0) + particle.rotationSpeed * particle.age;
 
                 const effectiveParticleType = getPreviewedParticleType(emitterParticleType);
-                const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sparkle' || effectiveParticleType === 'glitter' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars' || effectiveParticleType === 'volumetric-fire';
+                const expectedSprite = effectiveParticleType === 'circles' || effectiveParticleType === 'glow-circles' || effectiveParticleType === 'sparkle' || effectiveParticleType === 'glitter' || effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model' || effectiveParticleType === 'stars' || effectiveParticleType === 'volumetric-fire' || effectiveParticleType === 'metallic-sphere';
                 const needsMeshSwap = expectedSprite !== (particle.mesh instanceof THREE.Sprite);
                 const currentEmitterFps = getResampledSequenceProps(emitterProps, sceneSettingsRef.current.particleSequenceBudget, sceneSettingsRef.current.particleSequenceBudgetLoop).fps;
+                const currentEmitterMetalness = Number(emitterProps.particleMetalness ?? 0.9);
+                const currentEmitterRoughness = Number(emitterProps.particleRoughness ?? 0.15);
+                const currentEmitterMetalSheen = Number(emitterProps.particleMetalSheen ?? 0);
+                const currentEmitterSheenColor = String(emitterProps.particleMetalSheenColor ?? '#ffffff');
                 if (needsMeshSwap) {
                   const existingMaterial = getParticleMaterial(particle.mesh);
                   const replacementSpriteTexture = (emitterParticleType === 'sprites' || emitterParticleType === '3d-model')
@@ -3200,7 +3968,15 @@ const timelineOutRef = useRef(timelineOut);
                     effectiveParticleType,
                     getPreviewedGlow(emitterGlow),
                     particle.rotation ?? getParticleRotation(particle.mesh),
-                    (effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model') ? replacementSpriteTexture : undefined
+                    (effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model') ? replacementSpriteTexture : undefined,
+                    0.5,
+                    0.5,
+                    false,
+                    emitterProps.particleBlendMode || 'normal',
+                    currentEmitterMetalness,
+                    currentEmitterRoughness,
+                    currentEmitterMetalSheen,
+                    currentEmitterSheenColor
                   );
                   scene.remove(particle.mesh);
                   scene.add(replacementMesh);
@@ -3224,14 +4000,15 @@ const timelineOutRef = useRef(timelineOut);
                 if (emitterProps.particleOpacityOverLifeCurve && !particle.opacityOverLife) {
                     const curveValue = evaluateCurve(emitterProps.particleOpacityOverLifeCurve, progress, 1);
                     material.opacity = (particle.baseOpacity ?? 0.8) * curveValue;
-                  } else if (emitterProps.particleOpacityOverLifeCurve && !particle.opacityOverLife) {
-                    const curveValue = evaluateCurve(emitterProps.particleOpacityOverLifeCurve, progress, 1);
-                    material.opacity = (particle.baseOpacity ?? 0.8) * curveValue;
                   } else if (particle.opacityOverLife) {
                     material.opacity = (particle.baseOpacity ?? 0.8) * (1 - progress);
                   } else {
                     material.opacity = particle.baseOpacity ?? 0.8;
                   }
+
+                // Visibility is handled entirely by the unconditional lifecycle loop below.
+                // Do NOT set visible here — the oldest-only rule requires seeing all particles
+                // at once to determine which one is active.
 
                 if ((effectiveParticleType === 'sprites' || effectiveParticleType === '3d-model')) {
                   let spriteTexture = resolveSpriteTexture(particle.spriteImageDataUrl ?? '', particle.spriteSequenceDataUrls ?? [], particle.age, currentEmitterFps, String(emitterProps.particleSpriteSequenceMode ?? 'loop'), particle.lifetime);
@@ -3249,6 +4026,23 @@ const timelineOutRef = useRef(timelineOut);
 
                   if (material.map !== (spriteTexture ?? null)) {
                     material.map = spriteTexture ?? null;
+                    material.needsUpdate = true;
+                  }
+                }
+
+                if (effectiveParticleType === 'metallic-sphere') {
+                  const metallicTex = getParticleTexture('metallic-sphere', getPreviewedGlow(emitterGlow), currentEmitterMetalness, currentEmitterRoughness, 0, '#ffffff') ?? null;
+                  if (material.map !== metallicTex) {
+                    material.map = metallicTex;
+                    material.needsUpdate = true;
+                  }
+                }
+
+                // Per-frame sheen texture refresh for non-metallic-sphere types
+                if (effectiveParticleType !== 'metallic-sphere' && currentEmitterMetalSheen > 0) {
+                  const sheenTex = getParticleTexture(effectiveParticleType, getPreviewedGlow(emitterGlow), currentEmitterMetalness, currentEmitterRoughness, currentEmitterMetalSheen, currentEmitterSheenColor) ?? null;
+                  if (material.map !== sheenTex) {
+                    material.map = sheenTex;
                     material.needsUpdate = true;
                   }
                 }
@@ -3353,6 +4147,956 @@ const timelineOutRef = useRef(timelineOut);
       }
 
       lastTimelineFrameRef.current = timelineFrame;
+
+      // ── Lifecycle visibility (always runs — live, baking, and cache-restored playback) ──────
+      particleSystemsRef.current.forEach((ps) => {
+        ps.particles.forEach((p) => {
+          // Particles rely on their material opacity, scale, and color curves for fade in/out.
+          // They should remain visible throughout their active lifetime (0.0 to 1.0)
+          // instead of being abruptly culled.
+          const visible = p.age < p.lifetime;
+          p.mesh.visible = visible && (sceneSettingsRef.current.showParticles ?? true);
+        });
+      });
+      // ── End lifecycle visibility ─────────────────────────────────────────────────────────────
+
+      // ── Lightning live preview ───────────────────────────────────────────────────────────────
+      sceneObjectsRef.current.forEach(lObj => {
+        if (lObj.type !== 'Lightning') return;
+        const lGroup = sceneObjectMeshesRef.current.get(lObj.id) as THREE.Group | undefined;
+        if (!lGroup) return;
+
+        // Flush stale lines from the previous tick
+        while (lGroup.children.length > 0) {
+          const child = lGroup.children[0] as THREE.Line;
+          (child as any).geometry?.dispose();
+          ((child as any).material as THREE.Material)?.dispose();
+          lGroup.remove(child);
+        }
+        lGroup.position.set(0, 0, 0);
+
+        const lPts = sceneObjectsRef.current.filter(
+          o => o.parentId === lObj.id && o.type === 'LightningPoint',
+        );
+        const lProps = (lObj.properties ?? {}) as any;
+        const lStart = lPts.find(p => (p.properties as any)?.role === 'start') ?? lPts[0];
+        const lEnd   = lPts.find(p => (p.properties as any)?.role === 'end')   ?? lPts[1];
+
+        const resolveAnchorCenter = (shapeId: string | undefined, fallback: { x: number; y: number; z?: number }) => {
+          if (!shapeId) return fallback;
+
+          const anchorMesh = sceneObjectMeshesRef.current.get(shapeId);
+          if (anchorMesh) {
+            const wp = new THREE.Vector3();
+            anchorMesh.getWorldPosition(wp);
+            return { x: wp.x, y: wp.y, z: wp.z };
+          }
+
+          const anchorObj = sceneObjectsRef.current.find((o) => o.id === shapeId);
+          if (anchorObj) {
+            return { x: anchorObj.position.x, y: anchorObj.position.y, z: anchorObj.position.z };
+          }
+
+          return fallback;
+        };
+
+        const resolveAnchorSurface = (
+          shapeId: string | undefined,
+          toward: { x: number; y: number; z?: number },
+          fallback: { x: number; y: number; z?: number },
+        ) => {
+          if (!shapeId) return fallback;
+
+          const anchorMesh = sceneObjectMeshesRef.current.get(shapeId);
+          const centerGuess = resolveAnchorCenter(shapeId, fallback);
+          const center = new THREE.Vector3(centerGuess.x, centerGuess.y, centerGuess.z ?? 0);
+          const towardVec = new THREE.Vector3(toward.x, toward.y, toward.z ?? 0);
+          const dir = towardVec.clone().sub(center);
+          if (dir.lengthSq() < 1e-8) return centerGuess;
+          dir.normalize();
+
+          let size = new THREE.Vector3(24, 24, 24);
+          if (anchorMesh) {
+            const box = new THREE.Box3().setFromObject(anchorMesh);
+            const boxSize = box.getSize(new THREE.Vector3());
+            const boxCenter = box.getCenter(new THREE.Vector3());
+            if (Number.isFinite(boxSize.x + boxSize.y + boxSize.z) && boxSize.lengthSq() > 1e-8) {
+              size.copy(boxSize);
+              center.copy(boxCenter);
+            }
+          } else {
+            const anchorObj = sceneObjectsRef.current.find((o) => o.id === shapeId);
+            if (anchorObj) {
+              const sx = Math.abs(anchorObj.scale.x || 1);
+              const sy = Math.abs(anchorObj.scale.y || 1);
+              const sz = Math.abs(anchorObj.scale.z || 1);
+              if (anchorObj.type === 'Cube') size.set(30 * sx, 30 * sy, 30 * sz);
+              else if (anchorObj.type === 'Sphere') size.set(36 * sx, 36 * sy, 36 * sz);
+              else if (anchorObj.type === 'Cylinder') size.set(28 * sx, 34 * sy, 28 * sz);
+              else if (anchorObj.type === 'Cone') size.set(28 * sx, 34 * sy, 28 * sz);
+              else if (anchorObj.type === 'Plane') size.set(40 * sx, 40 * sy, 2 * sz);
+              else if (anchorObj.type === 'Torus') size.set(46 * sx, 46 * sy, 10 * sz);
+              else if (anchorObj.type === 'Circle') size.set(36 * sx, 36 * sy, 2 * sz);
+              else if (anchorObj.type === 'Rectangle') size.set(36 * sx, 20 * sy, 2 * sz);
+              else if (anchorObj.type === 'Triangle') size.set(36 * sx, 32 * sy, 2 * sz);
+            }
+          }
+
+          const rx = Math.max(1, size.x * 0.5);
+          const ry = Math.max(1, size.y * 0.5);
+          const rz = Math.max(1, size.z * 0.5);
+          const denom = Math.sqrt(
+            (dir.x * dir.x) / (rx * rx) +
+            (dir.y * dir.y) / (ry * ry) +
+            (dir.z * dir.z) / (rz * rz)
+          );
+          if (!Number.isFinite(denom) || denom <= 1e-6) {
+            return { x: center.x, y: center.y, z: center.z };
+          }
+          const dist = 1 / denom;
+          const hit = center.clone().addScaledVector(dir, dist);
+          return { x: hit.x, y: hit.y, z: hit.z };
+        };
+
+        const fallbackStart = lStart?.position ?? { x: -80, y: 0, z: 0 };
+        const fallbackEnd = lEnd?.position ?? { x: 80, y: 0, z: 0 };
+        const startCenter = resolveAnchorCenter(lProps.startShapeId, fallbackStart);
+        const endCenter = resolveAnchorCenter(lProps.endShapeId, fallbackEnd);
+        const lStartPos = lProps.startShapeId
+          ? resolveAnchorSurface(lProps.startShapeId, endCenter, fallbackStart)
+          : fallbackStart;
+        const lEndPos = lProps.endShapeId
+          ? resolveAnchorSurface(lProps.endShapeId, startCenter, fallbackEnd)
+          : fallbackEnd;
+
+        const lMode  = (lProps.mode ?? 'loop-strike') as 'strike' | 'loop' | 'loop-strike';
+        const exportState = lightningViewportExportRef.current?.lightningId === lObj.id
+          ? lightningViewportExportRef.current
+          : null;
+
+        // ── Per-mode seed / subset / opacityScale ──────────────────────────
+        let lSeed         = 777;
+        let lSubset       = 1.0;
+        let lOpacityScale = 1.0;
+
+        if (exportState) {
+          const exportFrameCount = Math.max(1, exportState.frameCount);
+          const exportFrameIndex = Math.max(0, Math.min(exportFrameCount - 1, exportState.frameIndex));
+          const exportFps = Math.max(1, exportState.fps || Number(lProps.fps ?? 12));
+          const easeStrike = (t: number) => Math.pow(Math.max(0, Math.min(1, t)), 2.35);
+
+          if (lMode === 'loop') {
+            lSeed = 777 + exportFrameIndex * 7919;
+          } else if (lMode === 'strike') {
+            lSubset = exportFrameCount <= 1 ? 1 : exportFrameIndex / Math.max(1, exportFrameCount - 1);
+          } else {
+            const strikeDur = Math.max(0.1, Number(lProps.frameCount ?? 10) / exportFps);
+            const holdDur = 0.26;
+            const fadeDur = strikeDur * 0.55;
+            const totalDur = strikeDur + holdDur + fadeDur;
+            const timeSec = exportFrameCount <= 1
+              ? strikeDur
+              : (exportFrameIndex / Math.max(1, exportFrameCount - 1)) * totalDur;
+
+            if (timeSec <= strikeDur) {
+              lSubset = easeStrike(timeSec / Math.max(strikeDur, 1e-6));
+            } else if (timeSec <= strikeDur + holdDur) {
+              lSubset = 1;
+              const shimmer = 0.90
+                + 0.07 * Math.abs(Math.sin(timeSec * 32.0))
+                + 0.03 * Math.abs(Math.sin(timeSec * 11.2 + 0.8));
+              lOpacityScale = Math.min(1.0, shimmer);
+            } else {
+              lSubset = 1;
+              const fadeT = Math.max(0, Math.min(1, (timeSec - strikeDur - holdDur) / Math.max(fadeDur, 1e-6)));
+              const baseDecay = Math.max(0, 1 - fadeT);
+              const flickerAmt = Math.min(1, fadeT * 5.0);
+              const f1 = Math.abs(Math.sin(timeSec * 38.0));
+              const f2 = Math.abs(Math.sin(timeSec * 13.7 + 1.1));
+              const flicker = Math.pow(f1 * f2, 0.4);
+              lOpacityScale = baseDecay * (1.0 - flickerAmt * 0.82 + flicker * flickerAmt * 0.82);
+            }
+          }
+        } else if (lMode === 'loop') {
+          lSeed = isPlayingRef.current ? (Date.now() / 80) | 0 : 777;
+
+        } else if (lMode === 'strike') {
+          // Grows via timeline scrub
+          const frameIn     = timelineInRef.current ?? 0;
+          const totalFrames = Math.max(1, Number(lProps.frameCount ?? 10) - 1);
+          lSubset = Math.max(0, Math.min(1, (timelineFrame - frameIn) / totalFrames));
+
+        } else { // loop-strike
+          const strikeDur = Math.max(0.1, Number(lProps.frameCount ?? 10) / Math.max(1, Number(lProps.fps ?? 12)));
+          const holdDur   = 0.26;
+          const fadeDur   = strikeDur * 0.55;
+          const easeStrike = (t: number) => Math.pow(Math.max(0, Math.min(1, t)), 2.35);
+
+          if (!loopStrikeStateRef.current.has(lObj.id)) {
+            loopStrikeStateRef.current.set(lObj.id, { phase: 'growing', progress: 0, seed: (Date.now() * 0.01) | 0 });
+          }
+          const ls = loopStrikeStateRef.current.get(lObj.id)!;
+
+          if (isPlayingRef.current) {
+            const phaseDur = ls.phase === 'growing' ? strikeDur
+                           : ls.phase === 'holding' ? holdDur
+                           : fadeDur;
+            ls.progress += frameDeltaTime / phaseDur;
+
+            if (ls.progress >= 1) {
+              ls.progress = 0;
+              if      (ls.phase === 'growing') { ls.phase = 'holding'; }
+              else if (ls.phase === 'holding') { ls.phase = 'fading'; }
+              else {
+                ls.phase = 'growing';
+                ls.seed  = (Date.now() * 0.01 + Math.random() * 99999) | 0;
+              }
+            }
+          }
+
+          lSeed   = ls.seed;
+          lSubset = ls.phase === 'growing' ? easeStrike(ls.progress)
+                  : ls.phase === 'holding' ? 1.0
+                  : 1.0;
+
+          if (ls.phase === 'holding') {
+            const t = Date.now() * 0.001;
+            const shimmer = 0.90
+              + 0.07 * Math.abs(Math.sin(t * 32.0))
+              + 0.03 * Math.abs(Math.sin(t * 11.2 + 0.8));
+            lOpacityScale = Math.min(1.0, shimmer);
+          } else if (ls.phase === 'fading') {
+            const t         = Date.now() * 0.001;
+            const baseDecay = Math.max(0, 1 - ls.progress);
+            const flickerAmt = Math.min(1, ls.progress * 5.0);
+            const f1 = Math.abs(Math.sin(t * 38.0));
+            const f2 = Math.abs(Math.sin(t * 13.7 + 1.1));
+            const flicker = Math.pow(f1 * f2, 0.4);
+            lOpacityScale = baseDecay * (1.0 - flickerAmt * 0.82 + flicker * flickerAmt * 0.82);
+          } else {
+            lOpacityScale = 1.0;
+          }
+        }
+
+        /** Trim a polyline (2-D or 3-D) to the first `subset` fraction of arc length. */
+        const trimPolyline = (
+          pts: { x: number; y: number; z?: number }[],
+          subset: number,
+        ): { x: number; y: number; z?: number }[] => {
+          if (subset >= 1 || pts.length < 2) return pts;
+          if (subset <= 0) return [pts[0], pts[0]];
+          let total = 0;
+          for (let i = 1; i < pts.length; i++) {
+            const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y;
+            const dz = (pts[i].z ?? 0) - (pts[i-1].z ?? 0);
+            total += Math.sqrt(dx*dx + dy*dy + dz*dz);
+          }
+          const target = total * subset;
+          const out: { x: number; y: number; z?: number }[] = [pts[0]];
+          let acc = 0;
+          for (let i = 1; i < pts.length; i++) {
+            const dx = pts[i].x - pts[i-1].x, dy = pts[i].y - pts[i-1].y;
+            const dz = (pts[i].z ?? 0) - (pts[i-1].z ?? 0);
+            const seg = Math.sqrt(dx*dx + dy*dy + dz*dz);
+            if (acc + seg >= target) {
+              const t = (target - acc) / Math.max(seg, 1e-9);
+              out.push({
+                x: pts[i-1].x + dx * t,
+                y: pts[i-1].y + dy * t,
+                z: (pts[i-1].z ?? 0) + dz * t,
+              });
+              return out;
+            }
+            out.push(pts[i]);
+            acc += seg;
+          }
+          return out;
+        };
+
+        const samplePolylineAtFraction = (
+          pts: { x: number; y: number; z?: number }[],
+          frac: number,
+        ): { x: number; y: number; z?: number } => {
+          if (pts.length === 0) return { x: 0, y: 0, z: 0 };
+          if (pts.length === 1) return pts[0];
+          const targetFrac = Math.max(0, Math.min(1, frac));
+          let total = 0;
+          for (let i = 1; i < pts.length; i++) {
+            const dx = pts[i].x - pts[i - 1].x;
+            const dy = pts[i].y - pts[i - 1].y;
+            const dz = (pts[i].z ?? 0) - (pts[i - 1].z ?? 0);
+            total += Math.sqrt(dx * dx + dy * dy + dz * dz);
+          }
+          if (total <= 1e-8) return pts[0];
+          const target = total * targetFrac;
+          let acc = 0;
+          for (let i = 1; i < pts.length; i++) {
+            const ax = pts[i - 1].x, ay = pts[i - 1].y, az = pts[i - 1].z ?? 0;
+            const bx = pts[i].x, by = pts[i].y, bz = pts[i].z ?? 0;
+            const dx = bx - ax, dy = by - ay, dz = bz - az;
+            const seg = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (acc + seg >= target) {
+              const t = (target - acc) / Math.max(seg, 1e-8);
+              return { x: ax + dx * t, y: ay + dy * t, z: az + dz * t };
+            }
+            acc += seg;
+          }
+          return pts[pts.length - 1];
+        };
+
+        const lStartVec = new THREE.Vector3(lStartPos.x, lStartPos.y, lStartPos.z ?? 0);
+        const lEndVec = new THREE.Vector3(lEndPos.x, lEndPos.y, lEndPos.z ?? 0);
+        const lDir = new THREE.Vector3().subVectors(lEndVec, lStartVec);
+        const lLen = Math.max(1e-3, lDir.length());
+        lDir.normalize();
+
+        const upRef = Math.abs(lDir.y) < 0.95
+          ? new THREE.Vector3(0, 1, 0)
+          : new THREE.Vector3(1, 0, 0);
+        const lRight = new THREE.Vector3().crossVectors(upRef, lDir).normalize();
+        const lUp = new THREE.Vector3().crossVectors(lDir, lRight).normalize();
+
+        const localToWorld = (pt: { x: number; y: number; z?: number }) => {
+          const world = lStartVec.clone()
+            .addScaledVector(lDir, pt.x)
+            .addScaledVector(lUp, pt.y)
+            .addScaledVector(lRight, pt.z ?? 0);
+          return { x: world.x, y: world.y, z: world.z };
+        };
+
+        const localPreview = buildLightningPreview(
+          0, 0,
+          lLen, 0,
+          Number(lProps.segmentDepth      ?? 2),
+          Number(lProps.roughness         ?? 0.45),
+          Number(lProps.branchCount       ?? 2),
+          Number(lProps.branchDecay       ?? 0.5),
+          lSeed,
+          Number(lProps.numSegments       ?? 4),
+          Number(lProps.branchProbability ?? 0.5),
+          Number(lProps.subBranchSegments ?? 2),
+          Number(lProps.turbulence        ?? 0.35),
+          Number(lProps.branchLevels      ?? 2),
+          Number(lProps.bend              ?? 0),
+          Number(lProps.branchAngle       ?? 90),
+        );
+
+        const lMainFull = localPreview.main.map(localToWorld);
+        const lBranchesFull = localPreview.branches.map((branchPts) => branchPts.map(localToWorld));
+        const lBrParentTs = localPreview.branchParentTs;
+        const lBrGens = localPreview.branchGenerations;
+        const lWpts = localPreview.waypoints.map(localToWorld);
+        const lBrWpts = localPreview.branchWaypoints.map((branchWp) => branchWp.map(localToWorld));
+
+        const applyForceModifiersToPolyline = (
+          points: { x: number; y: number; z?: number }[],
+          keepStart: boolean,
+          keepEnd: boolean,
+          strengthMul: number,
+        ): { x: number; y: number; z?: number }[] => {
+          if (points.length < 2 || strengthMul <= 0) return points;
+
+          const startP = points[0];
+          const endP = points[points.length - 1];
+          const baseLen = Math.max(
+            1,
+            new THREE.Vector3(endP.x - startP.x, endP.y - startP.y, (endP.z ?? 0) - (startP.z ?? 0)).length(),
+          );
+          const maxOffset = Math.min(160, baseLen * Math.max(0.25, 0.55 * strengthMul));
+
+          const forces = physicsForceRef.current.filter((f) =>
+            f.enabled && (f.type === 'attractor' || f.type === 'repulsor' || f.type === 'flow-curve')
+          );
+          if (forces.length === 0) return points;
+
+          return points.map((pt, idx) => {
+            if ((keepStart && idx === 0) || (keepEnd && idx === points.length - 1)) {
+              return pt;
+            }
+
+            const pos = new THREE.Vector3(pt.x, pt.y, pt.z ?? 0);
+            const offset = new THREE.Vector3();
+
+            forces.forEach((force) => {
+              if (force.type === 'attractor' || force.type === 'repulsor') {
+                let targetPos = new THREE.Vector3(force.position.x, force.position.y, force.position.z);
+                if (force.targetShapeId) {
+                  const targetShape = sceneObjectsRef.current.find((obj) => obj.id === force.targetShapeId);
+                  if (targetShape) {
+                    targetPos = new THREE.Vector3(targetShape.position.x, targetShape.position.y, targetShape.position.z);
+                  }
+                }
+
+                const toTarget = new THREE.Vector3().subVectors(targetPos, pos);
+                const dist = toTarget.length();
+                const radius = Math.max(0.1, force.radius ?? 250);
+                const falloff = Math.max(0, 1 - dist / radius);
+                if (falloff <= 0 || dist < 1e-4) return;
+
+                const direction = toTarget.normalize();
+                const sign = force.type === 'attractor' ? 1 : -1;
+                const mag = Math.abs(force.strength) * 0.018 * falloff * strengthMul;
+                offset.addScaledVector(direction, sign * mag);
+                return;
+              }
+
+              if (force.type === 'flow-curve' && force.curveId) {
+                const pathMesh = sceneObjectMeshesRef.current.get(force.curveId) as any;
+                if (!pathMesh?.pathCurve) return;
+                const curve = pathMesh.pathCurve as THREE.Curve<THREE.Vector3>;
+
+                let closestT = 0;
+                let minDistSq = Infinity;
+                for (let i = 0; i <= 24; i++) {
+                  const t = i / 24;
+                  const sample = curve.getPointAt(t);
+                  const distSq = sample.distanceToSquared(pos);
+                  if (distSq < minDistSq) {
+                    minDistSq = distSq;
+                    closestT = t;
+                  }
+                }
+
+                const nearest = curve.getPointAt(closestT);
+                const toCurve = new THREE.Vector3().subVectors(nearest, pos);
+                const dist = Math.sqrt(minDistSq);
+                const radius = Math.max(0.1, force.radius ?? 120);
+                const pull = Math.max(0, 1 - dist / radius);
+                if (pull <= 0) return;
+
+                let tangent = curve.getTangentAt(closestT).normalize();
+                if (!Number.isFinite(tangent.x) || !Number.isFinite(tangent.y) || !Number.isFinite(tangent.z) || tangent.lengthSq() < 1e-8) {
+                  return;
+                }
+                if (force.reverseFlow) tangent.negate();
+
+                const flowMag = Math.abs(force.strength) * 0.01 * pull * strengthMul;
+                const pullMag = Math.abs(force.strength) * 0.02 * pull * strengthMul;
+
+                offset.addScaledVector(tangent, flowMag);
+                if (toCurve.lengthSq() > 1e-6) {
+                  offset.addScaledVector(toCurve.normalize(), pullMag);
+                }
+              }
+            });
+
+            if (!Number.isFinite(offset.x) || !Number.isFinite(offset.y) || !Number.isFinite(offset.z)) {
+              return pt;
+            }
+
+            if (offset.length() > maxOffset) {
+              offset.setLength(maxOffset);
+            }
+
+            const nx = pos.x + offset.x;
+            const ny = pos.y + offset.y;
+            const nz = (pt.z ?? 0) + offset.z;
+            if (!Number.isFinite(nx) || !Number.isFinite(ny) || !Number.isFinite(nz)) {
+              return pt;
+            }
+            return { x: nx, y: ny, z: nz };
+          });
+        };
+
+        const usePhysicsModifiers = Boolean(lProps.usePhysicsModifiers ?? false);
+        const modifierStrength = Math.max(0, Number(lProps.modifierStrength ?? 1));
+        const targetAttraction = Math.max(0, Math.min(10, Number(lProps.targetAttraction ?? 0.6)));
+        const targetAttractionNorm = Math.max(0, Math.min(1, targetAttraction / 10));
+
+        const pullPolylineTowardTarget = (
+          pts: { x: number; y: number; z?: number }[],
+          target: { x: number; y: number; z?: number },
+          amount: number,
+          keepStart: boolean,
+          keepEnd: boolean,
+        ) => {
+          if (amount <= 0.001 || pts.length < 2) return pts;
+          const targetVec = new THREE.Vector3(target.x, target.y, target.z ?? 0);
+          return pts.map((pt, idx) => {
+            if ((keepStart && idx === 0) || (keepEnd && idx === pts.length - 1)) return pt;
+            const t = idx / Math.max(1, pts.length - 1);
+            const weight = Math.pow(t, 2.15) * amount;
+            const p = new THREE.Vector3(pt.x, pt.y, pt.z ?? 0);
+            p.lerp(targetVec, Math.min(0.82, weight * 0.085));
+            return { x: p.x, y: p.y, z: p.z };
+          });
+        };
+
+        let lMainMod = usePhysicsModifiers
+          ? applyForceModifiersToPolyline(lMainFull, true, true, modifierStrength)
+          : lMainFull;
+        if (lProps.endShapeId) {
+          lMainMod = pullPolylineTowardTarget(lMainMod, lEndPos, targetAttraction, true, true);
+        }
+        const lBranchesMod = usePhysicsModifiers
+          ? lBranchesFull.map((branchPts) => applyForceModifiersToPolyline(branchPts, true, false, modifierStrength))
+          : lBranchesFull;
+
+        const curveTightness = Math.max(0, Math.min(10, Number(lProps.curveTightness ?? 0.65)));
+        const followBezierPathIds = Array.isArray(lProps.followBezierPathIds)
+          ? (lProps.followBezierPathIds as string[]).filter((id) => typeof id === 'string' && id.trim().length > 0)
+          : [];
+        const followCurves: Array<{ id: string; curve: THREE.Curve<THREE.Vector3> }> = [];
+        followBezierPathIds.forEach((pathId) => {
+          const pathMesh = sceneObjectMeshesRef.current.get(pathId) as any;
+          const curve = pathMesh?.pathCurve as THREE.Curve<THREE.Vector3> | undefined;
+          if (curve && typeof curve.getPointAt === 'function') {
+            followCurves.push({ id: pathId, curve });
+          }
+        });
+
+        const bendMainTowardCurve = (
+          pts: { x: number; y: number; z?: number }[],
+          curve: THREE.Curve<THREE.Vector3>,
+          tightness: number,
+        ) => {
+          if (tightness <= 0.001 || pts.length < 3) return pts;
+          const start = new THREE.Vector3(pts[0].x, pts[0].y, pts[0].z ?? 0);
+          const end   = new THREE.Vector3(pts[pts.length - 1].x, pts[pts.length - 1].y, pts[pts.length - 1].z ?? 0);
+          // Minimum turbulence fraction always visible regardless of tightness
+          const MIN_TURB = 0.12;
+          return pts.map((pt, idx) => {
+            if (idx === 0 || idx === pts.length - 1) return pt;
+            const t = idx / Math.max(1, pts.length - 1);
+            const curvePt = curve.getPointAt(Math.max(0, Math.min(1, t)));
+            const p = new THREE.Vector3(pt.x, pt.y, pt.z ?? 0);
+            // Turbulence offset = deviation from straight-line baseline
+            const straight = start.clone().lerp(end, t);
+            const turbOff = p.clone().sub(straight);
+            const edgeFalloff = Math.sin(Math.PI * t); // 0 at ends, 1 at center
+            const w = Math.max(0, Math.min(0.985, tightness * edgeFalloff));
+            p.lerp(curvePt, w);
+            // Ensure at least MIN_TURB fraction of turbulence is always preserved
+            const turbPreserved = 1 - w;
+            if (turbPreserved < MIN_TURB) {
+              p.addScaledVector(turbOff, MIN_TURB - turbPreserved);
+            }
+            return { x: p.x, y: p.y, z: p.z };
+          });
+        };
+
+        type ArcVariant = {
+          mainMod: { x: number; y: number; z?: number }[];
+          seedBias: number;
+        };
+
+        // ── Surface binding ──────────────────────────────────────────────────
+        const bindSurfaceId = typeof lProps.bindSurfaceId === 'string' ? lProps.bindSurfaceId : '';
+        const bindSpineAttachmentId = typeof lProps.bindSpineAttachmentId === 'string' ? lProps.bindSpineAttachmentId : '';
+        const spineBindMode = lProps.spineBindMode === 'edge' ? 'edge' : 'surface';
+        const surfaceTightness = Math.max(0, Math.min(1, Number(lProps.surfaceTightness ?? 0.72)));
+
+        // ── Surface snap — uses module-level cached triangle lists ───────────
+        const snapToSurface = (
+          pts: { x: number; y: number; z?: number }[],
+          surfObjId: string,
+          meshRoot: THREE.Object3D,
+          tightness: number,
+          keepEnd = true,
+        ) => {
+          if (tightness <= 0.001 || pts.length < 3) return pts;
+
+          // Get or rebuild cached triangle list (only when mesh moves/scales)
+          meshRoot.updateWorldMatrix(true, true);
+          const matKey = meshMatrixKey(meshRoot);
+          let cached = surfaceTriCacheRef.current.get(surfObjId);
+          if (!cached || cached.key !== matKey) {
+            cached = { tris: buildSurfaceTris(meshRoot), key: matKey };
+            surfaceTriCacheRef.current.set(surfObjId, cached);
+          }
+          const tris = cached.tris;
+          if (tris.length === 0) return pts;
+
+          const SURFACE_OFFSET = 0.8;
+          const findClosestOnSurface = (p: THREE.Vector3): THREE.Vector3 => {
+            let bestDistSq = Infinity;
+            let bestPt = p.clone();
+            let bestNormal = new THREE.Vector3(0, 0, 1);
+            for (let ti = 0; ti < tris.length; ti++) {
+              const { a, b, c, n } = tris[ti];
+              closestPointOnTriangleCached(p, a, b, c, _cpotRes);
+              const dsq = p.distanceToSquared(_cpotRes);
+              if (dsq < bestDistSq) { bestDistSq = dsq; bestPt = _cpotRes.clone(); bestNormal = n; }
+            }
+            return bestPt.addScaledVector(bestNormal, SURFACE_OFFSET);
+          };
+
+          return pts.map((pt, idx) => {
+            if (idx === 0) return pt;
+            if (keepEnd && idx === pts.length - 1) return pt;
+            const p = new THREE.Vector3(pt.x, pt.y, pt.z ?? 0);
+            const surfPt = findClosestOnSurface(p);
+            const t = idx / Math.max(1, pts.length - 1);
+            const edgeFalloff = keepEnd
+              ? Math.sin(Math.PI * t)
+              : Math.max(Math.sin(Math.PI * t), t * 0.85);
+            const w = Math.max(0, Math.min(1.0, tightness * edgeFalloff));
+            const snapped = p.clone().lerp(surfPt, w);
+            return { x: snapped.x, y: snapped.y, z: snapped.z };
+          });
+        };
+
+        const snapToSpineAttachmentMask = (
+          pts: { x: number; y: number; z?: number }[],
+          attachmentId: string,
+          mode: 'surface' | 'edge',
+          tightness: number,
+          keepStart = true,
+          keepEnd = true,
+        ) => {
+          if (tightness <= 0.001 || pts.length < 3) return pts;
+
+          const attMesh = spineAttachmentMeshesRef.current.get(attachmentId);
+          const maskData = spineAttachPixelDataRef.current.get(attachmentId);
+          if (!attMesh || !maskData) return pts;
+
+          const geom = attMesh.geometry as THREE.PlaneGeometry;
+          const width = Number(geom.parameters?.width ?? 0);
+          const height = Number(geom.parameters?.height ?? 0);
+          if (width <= 1e-6 || height <= 1e-6) return pts;
+
+          const candidates = mode === 'edge'
+            ? (maskData.edgeSamples.length ? maskData.edgeSamples : maskData.surfaceSamples)
+            : (maskData.surfaceSamples.length ? maskData.surfaceSamples : maskData.edgeSamples);
+          if (candidates.length === 0) return pts;
+
+          const findNearestSample = (u: number, v: number): SpineMaskSample => {
+            let best = candidates[0];
+            let bestDistSq = Infinity;
+            for (let i = 0; i < candidates.length; i++) {
+              const sample = candidates[i];
+              const du = sample.u - u;
+              const dv = sample.v - v;
+              const distSq = du * du + dv * dv;
+              if (distSq < bestDistSq) {
+                bestDistSq = distSq;
+                best = sample;
+              }
+            }
+            return best;
+          };
+
+          attMesh.updateWorldMatrix(true, true);
+
+          return pts.map((pt, idx) => {
+            if ((keepStart && idx === 0) || (keepEnd && idx === pts.length - 1)) return pt;
+
+            const worldPt = new THREE.Vector3(pt.x, pt.y, pt.z ?? 0);
+            const localPt = attMesh.worldToLocal(worldPt.clone());
+            const u = THREE.MathUtils.clamp(localPt.x / width + 0.5, 0, 1);
+            const v = THREE.MathUtils.clamp(0.5 - localPt.y / height, 0, 1);
+            const sample = findNearestSample(u, v);
+            const snappedLocal = new THREE.Vector3(
+              (sample.u - 0.5) * width,
+              (0.5 - sample.v) * height,
+              0,
+            );
+            const snappedWorld = attMesh.localToWorld(snappedLocal.clone());
+
+            const t = idx / Math.max(1, pts.length - 1);
+            let falloff = 1;
+            if (keepStart && keepEnd) {
+              falloff = Math.sin(Math.PI * t);
+            } else if (keepStart) {
+              falloff = Math.max(Math.sin(Math.PI * t), t * 0.95);
+            } else if (keepEnd) {
+              falloff = Math.max(Math.sin(Math.PI * t), (1 - t) * 0.95);
+            }
+            const w = Math.max(0, Math.min(1, tightness * falloff));
+            const blended = worldPt.clone().lerp(snappedWorld, w);
+            return { x: blended.x, y: blended.y, z: blended.z };
+          });
+        };
+
+        // Apply surface snapping to main arc and branches before curve-follow
+        let lMainBound = lMainMod;
+        let lBranchesBound = lBranchesMod;
+        if (bindSurfaceId) {
+          const surfaceObj = sceneObjectMeshesRef.current.get(bindSurfaceId) as THREE.Object3D | undefined;
+          if (surfaceObj) {
+            lMainBound = snapToSurface(lMainMod, bindSurfaceId, surfaceObj, surfaceTightness, true);
+            lBranchesBound = lBranchesMod.map((bPts) => snapToSurface(bPts, bindSurfaceId, surfaceObj, surfaceTightness, false));
+          }
+        }
+        // ────────────────────────────────────────────────────────────────────────
+
+        const arcVariants: ArcVariant[] = followCurves.length > 0
+          ? followCurves.map((entry, idx) => ({
+              mainMod: bendMainTowardCurve(lMainBound, entry.curve, curveTightness),
+              seedBias: idx * 7919,
+            }))
+          : [{ mainMod: lMainBound, seedBias: 0 }];
+
+        // Branches hide until junction reached (both strike and loop-strike)
+        const isBoltGrowing = lMode === 'strike' || lMode === 'loop-strike';
+        const endAnchorObj = lProps.endShapeId
+          ? sceneObjectsRef.current.find((o) => o.id === lProps.endShapeId)
+          : undefined;
+        const endAnchorIsShape = !!endAnchorObj && endAnchorObj.type !== 'LightningPoint' && endAnchorObj.type !== 'PathPoint';
+
+        // End-anchor surface points — cached per object ID + matrix key
+        let endAnchorSurfacePoints: THREE.Vector3[] = [];
+        if (endAnchorIsShape && lProps.endShapeId) {
+          const endAnchorMeshRoot = sceneObjectMeshesRef.current.get(lProps.endShapeId) as THREE.Object3D | undefined;
+          if (endAnchorMeshRoot) {
+            endAnchorMeshRoot.updateWorldMatrix(true, true);
+            const eaMatKey = meshMatrixKey(endAnchorMeshRoot);
+            let eaCached = endAnchorVertsCacheRef.current.get(lProps.endShapeId);
+            if (!eaCached || eaCached.key !== eaMatKey) {
+              eaCached = { verts: buildSurfaceVerts(endAnchorMeshRoot), key: eaMatKey };
+              endAnchorVertsCacheRef.current.set(lProps.endShapeId, eaCached);
+            }
+            endAnchorSurfacePoints = eaCached.verts;
+          }
+        }
+
+        const pickScatteredEndTarget = (
+          generation: number,
+          branchIndex: number,
+          seedBias: number,
+          usedSurfaceIndices: Set<number>,
+        ) => {
+          if (endAnchorSurfacePoints.length === 0) {
+            return new THREE.Vector3(lEndPos.x, lEndPos.y, lEndPos.z ?? 0);
+          }
+
+          const count = endAnchorSurfacePoints.length;
+          const key = Math.abs(
+            Math.sin((branchIndex + 1) * 12.9898 + (generation + 1) * 78.233 + (lSeed + seedBias) * 0.01937),
+          );
+          const baseIdx = Math.floor(key * count) % count;
+
+          let chosenIdx = baseIdx;
+          if (count > 1) {
+            const stride = 97 % count || 1;
+            for (let s = 0; s < count; s++) {
+              const idx = (baseIdx + s * stride) % count;
+              if (!usedSurfaceIndices.has(idx)) {
+                chosenIdx = idx;
+                break;
+              }
+            }
+          }
+          usedSurfaceIndices.add(chosenIdx);
+          return endAnchorSurfacePoints[chosenIdx].clone();
+        };
+
+        const forceBranchStrikeToSurface = endAnchorSurfacePoints.length > 0;
+
+        const pullBranchTipToStrikeTarget = (
+          branchPts: { x: number; y: number; z?: number }[],
+          generation: number,
+          branchIndex: number,
+          seedBias: number,
+          overrideTarget?: THREE.Vector3,
+        ) => {
+          if (!endAnchorIsShape || branchPts.length < 3) return branchPts;
+
+          const branchBias = Math.min(1, 0.10 + targetAttraction * 0.11);
+          if (!forceBranchStrikeToSurface) {
+            const branchPick = Math.abs(Math.sin((branchIndex + 1) * 12.9898 + (generation + 1) * 78.233 + (lSeed + seedBias) * 0.013));
+            if (branchPick > branchBias) return branchPts;
+          }
+
+          const target = overrideTarget?.clone() ?? new THREE.Vector3(lEndPos.x, lEndPos.y, lEndPos.z ?? 0);
+          const tip = branchPts[branchPts.length - 1];
+          const tipVec = new THREE.Vector3(tip.x, tip.y, tip.z ?? 0);
+          const tipDist = tipVec.distanceTo(target);
+
+          const boltLen = Math.max(
+            1,
+            new THREE.Vector3(lEndPos.x - lStartPos.x, lEndPos.y - lStartPos.y, (lEndPos.z ?? 0) - (lStartPos.z ?? 0)).length(),
+          );
+          const attractRadius = Math.max(20, Math.min(320, boltLen * (0.30 + targetAttraction * 0.06)));
+          if (!forceBranchStrikeToSurface && tipDist > attractRadius) return branchPts;
+
+          const distFactor = Math.max(0, 1 - (tipDist / attractRadius));
+          const genFactor = Math.max(0.35, 1 - generation * 0.18);
+          const phaseBoost = isBoltGrowing ? 1.15 : 0.9;
+          const basePull = Math.pow(distFactor, 1.2) * (0.08 + targetAttraction * 0.15) * genFactor * phaseBoost;
+          const pull = forceBranchStrikeToSurface
+            ? Math.min(0.995, Math.max(0.14, basePull * 1.75))
+            : Math.min(0.985, basePull);
+          if (pull <= 0.001) return branchPts;
+
+          return branchPts.map((pt, idx) => {
+            if (idx === 0) return pt;
+            const t = idx / Math.max(1, branchPts.length - 1);
+            const weight = Math.pow(t, 2.4);
+            const p = new THREE.Vector3(pt.x, pt.y, pt.z ?? 0);
+            p.lerp(target, pull * weight);
+            return { x: p.x, y: p.y, z: p.z };
+          });
+        };
+
+        interface BranchDraw { pts: { x: number; y: number; z?: number }[]; subset: number; generation: number; }
+
+        const anchorBranchToMain = (
+          pts: { x: number; y: number; z?: number }[],
+          junctionT: number,
+          mainPolyline: { x: number; y: number; z?: number }[],
+        ) => {
+          if (pts.length === 0) return pts;
+          const mainAnchor = samplePolylineAtFraction(mainPolyline, junctionT);
+          const root = pts[0];
+          const dx = mainAnchor.x - root.x;
+          const dy = mainAnchor.y - root.y;
+          const dz = (mainAnchor.z ?? 0) - (root.z ?? 0);
+          if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) < 1e-6) return pts;
+          return pts.map((pt) => ({ x: pt.x + dx, y: pt.y + dy, z: (pt.z ?? 0) + dz }));
+        };
+
+        const parsedGlow = parseInt((lProps.glowColor ?? '#4466ff').replace('#', ''), 16);
+        const parsedCore = parseInt((lProps.coreColor ?? '#ffffff').replace('#', ''), 16);
+        const coreW = Math.max(0.5, Number(lProps.coreWidth ?? 2));
+        const glowW = Math.max(1,   Number(lProps.glowWidth ?? 6));
+        const density = Math.max(0.5, Math.min(4, Number(lProps.density ?? 1.6)));
+        const occludeByGeometry = !!(lProps.occludeByGeometry);
+
+        // ── Fractal glow noise ────────────────────────────────────────────────
+        const glowNoiseIntensity = Math.max(0, Math.min(1,  Number(lProps.glowNoiseIntensity ?? 0)));
+        const glowNoiseScale     = Math.max(0.5, Math.min(120, Number(lProps.glowNoiseScale ?? 3.0)));
+        const glowNoiseSpeed     = Math.max(0, Math.min(8,   Number(lProps.glowNoiseSpeed ?? 1.0)));
+        // For export-loop: phase = frameIndex/frameCount  → frame 0 == frame N (perfect loop)
+        const noisePhase = glowNoiseIntensity > 0.001
+          ? (exportState && lMode === 'loop'
+              ? exportState.frameIndex / Math.max(1, exportState.frameCount)
+              : (Date.now() * 0.001 * glowNoiseSpeed) % 1)
+          : 0;
+        const noiseFn = glowNoiseIntensity > 0.001
+          ? (t: number) => Math.max(0.1,
+              1.0 - glowNoiseIntensity * 0.65
+                  + lightningLoopNoise(t, noisePhase, glowNoiseScale) * glowNoiseIntensity * 1.3)
+          : undefined;
+        // ────────────────────────────────────────────────────────────────────────
+        const glowTex = buildLightningGlowTex(parsedGlow, parsedCore);
+
+        /**
+         * Places one THREE.Sprite per sample point along `bolt`.
+         * `spriteWorldSize` = full diameter of the sprite in world units.
+         * Sprites use AdditiveBlending so overlapping areas accumulate naturally.
+         */
+        /**
+         * `taperStart` — normalised path position (0–1) where taper begins.
+         * Sprites shrink from full size at `taperStart` down to ~4% at the tip.
+         * Use a sqrt curve so the taper is gradual then sharp at the very end.
+         */
+        const addGlowChain = (
+          bolt:            { x: number; y: number; z?: number }[],
+          spriteWorldSize: number,
+          opacity:         number,
+          zOffset:         number,
+          taperStart:      number = 0.65,
+          noiseFn?:        (t: number) => number,
+        ) => {
+          const spacing = Math.max(0.2, (spriteWorldSize * 0.30) / density);
+          const samples = samplePolylineEvenly(bolt, spacing);
+          const N = samples.length;
+          const mat = new THREE.SpriteMaterial({
+            map:         glowTex,
+            transparent: true,
+            opacity:     (opacity * lOpacityScale) / Math.sqrt(density),
+            blending:    THREE.AdditiveBlending,
+            depthTest:   occludeByGeometry,
+            depthWrite:  false,
+          });
+          samples.forEach((pt, i) => {
+            const t = N > 1 ? i / (N - 1) : 0;
+            // Taper scale: 1.0 before taperStart, then sqrt falloff → 0.04 at tip
+            const taperScale = t <= taperStart
+              ? 1.0
+              : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
+            const noiseMul = noiseFn ? noiseFn(t) : 1.0;
+            const sz = spriteWorldSize * taperScale * noiseMul;
+            const sp = new THREE.Sprite(mat);
+            // Use the point's own Z (from 3D branch spread) plus the layer zOffset
+            sp.position.set(pt.x, pt.y, (pt.z ?? 0) + zOffset);
+            sp.scale.set(sz, sz, 1);
+            lGroup.add(sp);
+          });
+        };
+
+        // Total visual diameter = glow halo diameter + texture falloff margin (×2 each side)
+        const haloD = glowW * 5.0;   // outer atmospheric halo sprite diameter
+        const glowD = glowW * 2.4;   // main glow sprite diameter
+        const coreD = coreW * 2.2;   // bright core sprite diameter
+
+        const arcOpacityMul = 1 / Math.sqrt(Math.max(1, arcVariants.length));
+
+        arcVariants.forEach((variant, variantIndex) => {
+          const usedSurfaceStrikeIndices = new Set<number>();
+          const variantMain = bindSpineAttachmentId
+            ? snapToSpineAttachmentMask(variant.mainMod, bindSpineAttachmentId, spineBindMode, surfaceTightness, true, true)
+            : variant.mainMod;
+
+          // Trim main arc
+          const lMain = trimPolyline(variantMain, lSubset);
+
+          const lBranches: BranchDraw[] = [];
+          lBranchesBound.forEach((bPts, i) => {
+            const junctionT  = lBrParentTs[i] ?? 0;
+            const generation = lBrGens[i] ?? 0;
+            const branchTarget = pickScatteredEndTarget(generation, i, variant.seedBias, usedSurfaceStrikeIndices);
+
+            if (isBoltGrowing) {
+              if (lSubset < junctionT) return;
+              const brSubset = Math.min(1, (lSubset - junctionT) / Math.max(0.001, 1 - junctionT));
+              const trimmed = trimPolyline(bPts, brSubset);
+              const anchored = anchorBranchToMain(trimmed, junctionT, variantMain);
+              const struck = pullBranchTipToStrikeTarget(anchored, generation, i, variant.seedBias, branchTarget);
+              const masked = bindSpineAttachmentId
+                ? snapToSpineAttachmentMask(struck, bindSpineAttachmentId, spineBindMode, surfaceTightness, true, false)
+                : struck;
+              lBranches.push({ pts: masked, subset: brSubset, generation });
+            } else {
+              const anchored = anchorBranchToMain(bPts, junctionT, variantMain);
+              const struck = pullBranchTipToStrikeTarget(anchored, generation, i, variant.seedBias, branchTarget);
+              const masked = bindSpineAttachmentId
+                ? snapToSpineAttachmentMask(struck, bindSpineAttachmentId, spineBindMode, surfaceTightness, true, false)
+                : struck;
+              lBranches.push({ pts: masked, subset: 1, generation });
+            }
+          });
+
+          // ── Branches: more aggressive taper (start at 40%); dim deeper generations ──
+          lBranches.forEach(b => {
+            const genScale = Math.pow(0.75, b.generation) * arcOpacityMul;
+            addGlowChain(b.pts, haloD  * 0.7, 0.10 * genScale, -0.2 + variantIndex * 0.01, 0.40, noiseFn);
+            addGlowChain(b.pts, glowD  * 0.8, 0.28 * genScale, -0.1 + variantIndex * 0.01, 0.40, noiseFn);
+            addGlowChain(b.pts, coreD  * 0.9, 0.55 * genScale,  0.0 + variantIndex * 0.01, 0.40, noiseFn);
+          });
+
+          // ── Main arc: taper starts at 65% ──
+          addGlowChain(lMain, haloD,  0.12 * arcOpacityMul, 0.0 + variantIndex * 0.01, 0.65, noiseFn);
+          addGlowChain(lMain, glowD,  0.35 * arcOpacityMul, 0.1 + variantIndex * 0.01, 0.65, noiseFn);
+          addGlowChain(lMain, coreD,  0.75 * arcOpacityMul, 0.2 + variantIndex * 0.01, 0.65, noiseFn);
+        });
+
+        // ── Bone marker dots at segment junctions (shown only for selected bolt) ──
+        const isSelected = selectedObjectIdRef.current === lObj.id && !exportState;
+        const hasCurveFollow = followCurves.length > 0;
+        if (isSelected) {
+          const addBoneDot = (pt: { x: number; y: number; z?: number }, color: number) => {
+            const marker = new THREE.Mesh(
+              new THREE.SphereGeometry(Math.max(0.6, coreD * 0.22), 10, 10),
+              new THREE.MeshBasicMaterial({
+                color,
+                transparent: true,
+                opacity: 0.95,
+                depthTest: occludeByGeometry,
+                depthWrite: false,
+              }),
+            );
+            marker.position.set(pt.x, pt.y, (pt.z ?? 0) + 0.5);
+            lGroup.add(marker);
+          };
+          if (!hasCurveFollow) {
+            lWpts.forEach(wp => addBoneDot(wp, 0xffdd44));
+            lBrWpts.forEach(brWpts => brWpts.forEach(wp => addBoneDot(wp, 0xff9933)));
+          }
+        }
+      });
+      // ── End lightning live preview ───────────────────────────────────────────────────────────
 
       // Update particle stats every few frames
       if (Math.random() < 0.1) {
@@ -3517,10 +5261,26 @@ Emitters: ${numEmitters}`;
 
   
   useEffect(() => {
-    sceneObjectMeshesRef.current.forEach((mesh) => {
-      mesh.visible = sceneSettings.showObjects ?? true;
+    const showObjects = sceneSettings.showObjects ?? true;
+    const showBones = sceneSettings.showBones ?? true;
+    sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
+      const obj = sceneObjects.find((o) => o.id === objectId);
+      if (!obj) return;
+      if (obj.type === 'Bone') {
+        // Keep the bone parent visible so spine attachment planes can remain visible
+        // even when bone visuals are filtered out.
+        mesh.visible = showObjects;
+        mesh.children.forEach((child) => {
+          const isSpineAttachment = child.name?.startsWith('spine-att-') ?? false;
+          if (!isSpineAttachment) {
+            child.visible = showBones;
+          }
+        });
+      } else {
+        mesh.visible = showObjects;
+      }
     });
-  }, [sceneSettings.showObjects, sceneObjects]);
+  }, [sceneSettings.showObjects, sceneSettings.showBones, sceneObjects]);
 
   useEffect(() => {
     particleSystemsRef.current.forEach((system) => {
@@ -3575,6 +5335,11 @@ Emitters: ${numEmitters}`;
   // Sync quadViewport prop into ref (read by render loop without causing re-renders)
   useEffect(() => {
     quadViewportRef.current = quadViewport;
+    // Clear focused panel when leaving quad mode
+    if (!quadViewport) {
+      focusedQuadPanelRef.current = null;
+      setFocusedQuadPanel(null);
+    }
   }, [quadViewport]);
 
   // Clear particles when stopped (frame reset to 0)
@@ -3669,6 +5434,97 @@ Emitters: ${numEmitters}`;
           if (!particleSystemsRef.current.has(obj.id)) {
             particleSystemsRef.current.set(obj.id, { particles: [], lastEmit: Date.now() });
           }
+        } else if (obj.type === 'Lightning') {
+          // Bolt geometry is rebuilt every rAF in the animate loop
+          mesh = new THREE.Group();
+          (mesh as any).isLightningRender = true;
+        } else if (obj.type === 'LightningPoint') {
+          // Crosshair gizmo — teal for start, magenta for end
+          const isStart = (obj.properties as any)?.role === 'start';
+          const color = isStart ? 0x00ffcc : 0xff00cc;
+          const xhGroup = new THREE.Group();
+          const size = 14;
+          const crossGeo = new THREE.BufferGeometry();
+          crossGeo.setAttribute('position', new THREE.BufferAttribute(
+            new Float32Array([
+              -size, 0, 0,  size, 0, 0,
+              0, -size, 0,  0, size, 0,
+              0, 0, -size,  0, 0,  size,
+            ]), 3,
+          ));
+          xhGroup.add(new THREE.LineSegments(
+            crossGeo,
+            new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9, depthTest: false }),
+          ));
+          mesh = xhGroup;
+        } else if (obj.type === 'ImportedModel') {
+          const modelGroup = new THREE.Group();
+          (modelGroup as any).isImportedModel = true;
+          mesh = modelGroup;
+
+          const props = (obj.properties ?? {}) as any;
+          const dataUrl = String(props.importedModelDataUrl ?? '');
+          const fmt = String(props.importedModelFormat ?? '').toLowerCase();
+
+          if (dataUrl && fmt) {
+            const applyLoadedModel = (root: THREE.Object3D) => {
+              const currentMesh = sceneObjectMeshesRef.current.get(obj.id);
+              if (currentMesh !== modelGroup) return;
+
+              root.traverse((child: any) => {
+                if (child?.isMesh) {
+                  child.castShadow = false;
+                  child.receiveShadow = false;
+                }
+              });
+
+              const box = new THREE.Box3().setFromObject(root);
+              const size = box.getSize(new THREE.Vector3());
+              const center = box.getCenter(new THREE.Vector3());
+              const maxDim = Math.max(1e-5, size.x, size.y, size.z);
+              const targetSize = 60;
+              const s = targetSize / maxDim;
+              root.position.sub(center);
+              root.scale.multiplyScalar(s);
+
+              modelGroup.add(root);
+            };
+
+            const failImport = (err: unknown) => {
+              console.error(`Failed to import model ${props.sourceFileName ?? obj.id}:`, err);
+            };
+
+            if (fmt === 'obj') {
+              fetch(dataUrl)
+                .then((r) => r.text())
+                .then((text) => {
+                  const loader = new OBJLoader();
+                  applyLoadedModel(loader.parse(text));
+                })
+                .catch(failImport);
+            } else if (fmt === 'fbx') {
+              fetch(dataUrl)
+                .then((r) => r.arrayBuffer())
+                .then((ab) => {
+                  const loader = new FBXLoader();
+                  applyLoadedModel(loader.parse(ab, ''));
+                })
+                .catch(failImport);
+            } else if (fmt === 'gltf' || fmt === 'glb') {
+              fetch(dataUrl)
+                .then((r) => r.arrayBuffer())
+                .then((ab) => {
+                  const loader = new GLTFLoader();
+                  loader.parse(
+                    ab,
+                    '',
+                    (gltf) => applyLoadedModel(gltf.scene),
+                    (err) => failImport(err),
+                  );
+                })
+                .catch(failImport);
+            }
+          }
         } else if (obj.type === 'Bone') {
           // Render bone as a small yellow diamond (octahedron) with thin bone-spine line toward parent
           const boneGroup = new THREE.Group();
@@ -3742,8 +5598,10 @@ Emitters: ${numEmitters}`;
              return;
          }
       }
-        // Update existing object transforms (but not while dragging with transform controls)
-        if (mesh && (!transformControlsRef.current || transformControlsRef.current.object !== mesh || !(transformControlsRef.current as any).dragging)) {
+        // Update existing object transforms (but not while dragging with transform controls,
+        // and not while the rigid-body physics loop is actively driving the object's position)
+        const isPhysicsDriven = rigidBodyStateRef.current.has(obj.id);
+        if (mesh && !isPhysicsDriven && (!transformControlsRef.current || transformControlsRef.current.object !== mesh || !(transformControlsRef.current as any).dragging)) {
           mesh.position.set(obj.position.x, obj.position.y, obj.position.z);
           mesh.rotation.set(obj.rotation.x, obj.rotation.y, obj.rotation.z);
           mesh.scale.set(obj.scale.x, obj.scale.y, obj.scale.z);
@@ -3835,7 +5693,7 @@ Emitters: ${numEmitters}`;
     }
   }, [spineAttachments]);
 
-  // Pre-cache each attachment's image as raw pixel data for alpha-based spawn sampling
+  // Pre-cache each attachment's alpha mask and sampled visible/edge pixels
   useEffect(() => {
     spineAttachPixelDataRef.current.clear();
     for (const att of spineAttachments) {
@@ -3851,7 +5709,7 @@ Emitters: ${numEmitters}`;
           if (!ctx) return;
           ctx.drawImage(img, 0, 0);
           const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-          spineAttachPixelDataRef.current.set(attId, { data, w: canvas.width, h: canvas.height });
+          spineAttachPixelDataRef.current.set(attId, buildSpineAttachmentMaskData(data, canvas.width, canvas.height));
         } catch (_e) { /* cross-origin or decode error — leave entry absent */ }
       };
       img.src = att.imageDataUrl;
@@ -3863,8 +5721,18 @@ Emitters: ${numEmitters}`;
 
   // ── Fast per-frame: toggle visibility + swap sequence textures + apply animated alpha/tint ──
   useEffect(() => {
-    if (!spineFrameOverrides) return;
+    const showSpineImages = sceneSettings.showSpineImages ?? true;
     spineAttachmentMeshesRef.current.forEach((mesh, id) => {
+      if (!showSpineImages) {
+        mesh.visible = false;
+        return;
+      }
+
+      if (!spineFrameOverrides) {
+        mesh.visible = true;
+        return;
+      }
+
       const ov = spineFrameOverrides[id];
       if (!ov) { mesh.visible = false; return; }
       mesh.visible = ov.visible;
@@ -3890,18 +5758,14 @@ Emitters: ${numEmitters}`;
         }
       }
     });
-  }, [spineFrameOverrides]);
+  }, [spineFrameOverrides, sceneSettings.showSpineImages]);
 
   // Update object materials based on selection
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
 
-    // Remove any existing outline
-    const existingOutline = scene.getObjectByName('selection-outline');
-    if (existingOutline) {
-      scene.remove(existingOutline);
-    }
+    const selectedIds = new Set<string>(getViewportSelectedIds());
 
     sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
       const obj = sceneObjects.find(o => o.id === objectId);
@@ -3912,7 +5776,7 @@ Emitters: ${numEmitters}`;
         const emitterGroup = mesh.children[0] as THREE.Group;
         if (!emitterGroup) return;
         
-        if (objectId === selectedObjectId) {
+        if (selectedIds.has(objectId)) {
           // Highlight selected emitter with brighter color
           emitterGroup.children.forEach(child => {
             if (child instanceof THREE.Line) {
@@ -3933,7 +5797,13 @@ Emitters: ${numEmitters}`;
         }
       }
     });
-  }, [selectedObjectId, sceneObjects]);
+
+    rebuildSelectionOutlines();
+
+    return () => {
+      clearSelectionOutlines();
+    };
+  }, [selectedObjectId, selectedObjectIds, sceneObjects]);
 
   // Handle physics force gizmos
   useEffect(() => {
@@ -4184,7 +6054,41 @@ Emitters: ${numEmitters}`;
       scene.remove(oldHandles);
     }
     
-    if (selectedObjectId) {
+    if (selectedForceId) {
+      const selectedGizmo = physicsForceGizmosRef.current.get(selectedForceId);
+      if (selectedGizmo) {
+        transformControls.attach(selectedGizmo);
+        transformControls.enabled = false;
+        transformControls.setMode('translate');
+
+        const handlesGroup = new THREE.Group();
+        handlesGroup.name = 'transform-handles';
+        handlesGroup.position.copy(selectedGizmo.position);
+        handlesGroup.rotation.set(0, 0, 0);
+
+        const xArrowGeom = new THREE.ConeGeometry(4 * handleScale, 16 * handleScale, 8);
+        const yArrowGeom = new THREE.ConeGeometry(4 * handleScale, 16 * handleScale, 8);
+        const zArrowGeom = new THREE.ConeGeometry(4 * handleScale, 16 * handleScale, 8);
+
+        const xArrow = new THREE.Mesh(xArrowGeom, new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+        const yArrow = new THREE.Mesh(yArrowGeom, new THREE.MeshBasicMaterial({ color: 0x00ff00 }));
+        const zArrow = new THREE.Mesh(zArrowGeom, new THREE.MeshBasicMaterial({ color: 0x0000ff }));
+
+        xArrow.rotation.z = -Math.PI / 2;
+        xArrow.position.x = 40 * handleScale;
+        yArrow.position.y = 40 * handleScale;
+        zArrow.rotation.x = Math.PI / 2;
+        zArrow.position.z = 40 * handleScale;
+
+        xArrow.name = 'x-arrow';
+        yArrow.name = 'y-arrow';
+        zArrow.name = 'z-arrow';
+        handlesGroup.add(xArrow, yArrow, zArrow);
+
+        scene.add(handlesGroup);
+        handlesRef.current = { xArrow, yArrow, zArrow };
+      }
+    } else if (selectedObjectId) {
       const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectId);
       if (selectedMesh) {
         transformControls.attach(selectedMesh);
@@ -4256,14 +6160,16 @@ Emitters: ${numEmitters}`;
       handlesRef.current = null;
       dragStateRef.current.active = false;
     }
-  }, [selectedObjectId, manipulatorMode, handleScale]);
+  }, [selectedObjectId, selectedForceId, manipulatorMode, handleScale]);
 
   // Keep visual helpers in sync when object transforms are changed from property sliders
   useEffect(() => {
-    if (!sceneRef.current || !selectedObjectId) return;
+    if (!sceneRef.current) return;
 
     const scene = sceneRef.current;
-    const selectedMesh = sceneObjectMeshesRef.current.get(selectedObjectId);
+    const selectedMesh = selectedForceId
+      ? physicsForceGizmosRef.current.get(selectedForceId)
+      : (selectedObjectId ? sceneObjectMeshesRef.current.get(selectedObjectId) : null);
     if (!selectedMesh) return;
 
     const handles = scene.getObjectByName('transform-handles');
@@ -4273,13 +6179,8 @@ Emitters: ${numEmitters}`;
     }
 
     const outline = scene.getObjectByName('selection-outline');
-    if (outline) {
-      outline.position.copy(selectedMesh.position);
-      outline.rotation.copy(selectedMesh.rotation);
-      outline.scale.copy(selectedMesh.scale);
-      outline.scale.multiplyScalar(1.05);
-    }
-  }, [sceneObjects, selectedObjectId]);
+    if (outline && selectedObjectId) refreshSelectionOutlines();
+  }, [sceneObjects, physicsForces, selectedObjectId, selectedForceId]);
 
   // Setup gizmo renderer
   useEffect(() => {
@@ -4498,6 +6399,111 @@ Emitters: ${numEmitters}`;
   }, [onViewModeChange]);
 
   useImperativeHandle(ref, () => ({
+    exportLightningSequenceFromViewport: async ({ lightningId, frameCount, fps, width, height, mode }) => {
+      const renderer = rendererRef.current;
+      const scene = sceneRef.current;
+      // Use the focused quad panel's camera for export when in quad mode
+      const focusedPanel = focusedQuadPanelRef.current;
+      const quadCams = quadCamerasRef.current;
+      const exportCamera: THREE.PerspectiveCamera | THREE.OrthographicCamera | null =
+        quadViewportRef.current && focusedPanel && quadCams
+          ? (focusedPanel === 'top' ? quadCams.top
+            : focusedPanel === 'front' ? quadCams.front
+            : focusedPanel === 'side' ? quadCams.side
+            : currentCameraRef.current)
+          : currentCameraRef.current;
+      const activeCamera = exportCamera;
+      if (!renderer || !scene || !activeCamera) return [];
+
+      const nextFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      const size = renderer.getSize(new THREE.Vector2());
+      const prevPixelRatio = renderer.getPixelRatio();
+      const prevBackground = scene.background;
+      const prevQuad = quadViewportRef.current;
+      const visibility = new Map<THREE.Object3D, boolean>();
+      const particleVisibility = new Map<THREE.Object3D, boolean>();
+      const helperVisibility = new Map<any, boolean>();
+      const sceneSettingsBg = sceneSettingsRef.current.referenceImage ? null : new THREE.Color(sceneSettingsRef.current.backgroundColor);
+      const prevAspect = activeCamera instanceof THREE.PerspectiveCamera ? activeCamera.aspect : null;
+
+      try {
+        sceneObjectMeshesRef.current.forEach((mesh, id) => {
+          visibility.set(mesh, mesh.visible);
+          mesh.visible = id === lightningId;
+        });
+        physicsForceGizmosRef.current.forEach((gizmo) => {
+          helperVisibility.set(gizmo, gizmo.visible);
+          gizmo.visible = false;
+        });
+        gridHelpersRef.current.forEach((grid) => {
+          helperVisibility.set(grid, grid.visible);
+          grid.visible = false;
+        });
+        selectionOutlineHelpersRef.current.forEach((helper) => {
+          helperVisibility.set(helper, helper.visible);
+          helper.visible = false;
+        });
+        const handles = scene.getObjectByName('transform-handles');
+        if (handles) {
+          helperVisibility.set(handles, handles.visible);
+          handles.visible = false;
+        }
+        spineAttachmentMeshesRef.current.forEach((mesh) => {
+          helperVisibility.set(mesh, mesh.visible);
+          mesh.visible = false;
+        });
+        particleSystemsRef.current.forEach((system) => {
+          system.particles.forEach((p) => {
+            particleVisibility.set(p.mesh, p.mesh.visible);
+            p.mesh.visible = false;
+          });
+        });
+
+        quadViewportRef.current = false;
+        scene.background = null;
+        renderer.setPixelRatio(1);
+        renderer.setSize(width, height, false);
+        renderer.setScissor(0, 0, width, height);
+        renderer.setViewport(0, 0, width, height);
+        if (activeCamera instanceof THREE.PerspectiveCamera) {
+          activeCamera.aspect = width / Math.max(1, height);
+          activeCamera.updateProjectionMatrix();
+        }
+
+        const frames: string[] = [];
+        for (let i = 0; i < Math.max(1, frameCount); i++) {
+          lightningViewportExportRef.current = {
+            lightningId,
+            frameIndex: i,
+            frameCount: Math.max(1, frameCount),
+            fps,
+            mode,
+          };
+          await nextFrame();
+          renderer.render(scene, activeCamera);
+          frames.push(renderer.domElement.toDataURL('image/png'));
+        }
+
+        lightningViewportExportRef.current = null;
+        await nextFrame();
+        return frames;
+      } finally {
+        lightningViewportExportRef.current = null;
+        visibility.forEach((value, mesh) => { mesh.visible = value; });
+        particleVisibility.forEach((value, mesh) => { mesh.visible = value; });
+        helperVisibility.forEach((value, mesh) => { mesh.visible = value; });
+        quadViewportRef.current = prevQuad;
+        scene.background = prevBackground ?? sceneSettingsBg;
+        renderer.setPixelRatio(prevPixelRatio);
+        renderer.setSize(size.x, size.y, false);
+        renderer.setScissor(0, 0, size.x, size.y);
+        renderer.setViewport(0, 0, size.x, size.y);
+        if (activeCamera instanceof THREE.PerspectiveCamera && prevAspect) {
+          activeCamera.aspect = prevAspect;
+          activeCamera.updateProjectionMatrix();
+        }
+      }
+    },
     getParticleTextureBlob: async () => {
         const particleType = sceneSettings.particleType ?? 'dots';
         const customGlow = sceneSettings.customGlow ?? false;
@@ -4794,56 +6800,66 @@ Emitters: ${numEmitters}`;
           if (!trackData.has(uniqueId)) trackData.set(uniqueId, []);
           
           let pushedState = state;
-          if (sceneSettings.exportProjectionMode === 'perspective' && perspectiveCameraRef.current) {
-            let cam = perspectiveCameraRef.current;
-            
+          const activeCam = currentCameraRef.current;
+          const basePerspectiveCam = activeCam instanceof THREE.PerspectiveCamera
+            ? activeCam
+            : perspectiveCameraRef.current;
+          if (sceneSettings.exportProjectionMode === 'perspective' && basePerspectiveCam) {
+            let cam = basePerspectiveCam;
+            const cameraState = cameraStateRef.current;
+            const orbitTarget = new THREE.Vector3(
+              cameraState.viewOffsetX,
+              cameraState.viewOffsetY,
+              cameraState.viewOffsetZ,
+            );
+
             if (sceneSettings.cameraOrbitSpeed) {
                 cam = cam.clone();
                 const orbitOffset = (sceneSettings.cameraOrbitSpeed || 0) * (frameObj / 24) * (Math.PI / 180);
-                const cameraState = cameraStateRef.current;
                 const effectiveTheta = cameraState.theta + orbitOffset;
                 const sin_phi = Math.sin(cameraState.phi);
                 const cos_phi = Math.cos(cameraState.phi);
                 const sin_theta = Math.sin(effectiveTheta);
                 const cos_theta = Math.cos(effectiveTheta);
-                const oTargetX = cameraState.viewOffsetX;
-                const oTargetY = cameraState.viewOffsetY;
-                const oTargetZ = cameraState.viewOffsetZ;
-                cam.position.x = oTargetX + cameraState.radius * sin_phi * sin_theta;
-                cam.position.y = oTargetY + cameraState.radius * cos_phi;
-                cam.position.z = oTargetZ + cameraState.radius * sin_phi * cos_theta;
-                cam.lookAt(oTargetX, oTargetY, oTargetZ);
-                cam.updateMatrixWorld();
+                cam.position.x = orbitTarget.x + cameraState.radius * sin_phi * sin_theta;
+                cam.position.y = orbitTarget.y + cameraState.radius * cos_phi;
+                cam.position.z = orbitTarget.z + cameraState.radius * sin_phi * cos_theta;
+                cam.lookAt(orbitTarget);
             }
+            cam.updateMatrixWorld(true);
 
-            const particlePos = new THREE.Vector3(state.position.x, state.position.y, state.position.z);
-            const particleVel = new THREE.Vector3(state.position.x + state.velocity.x, state.position.y + state.velocity.y, state.position.z + state.velocity.z);
-            
-            const dist = cam.position.length();
+            const particlePosNdc = new THREE.Vector3(state.position.x, state.position.y, state.position.z).project(cam);
+            const particleVelNdc = new THREE.Vector3(
+              state.position.x + state.velocity.x,
+              state.position.y + state.velocity.y,
+              state.position.z + state.velocity.z,
+            ).project(cam);
+
+            const refDist = Math.max(1e-4, cam.position.distanceTo(orbitTarget));
             const fov = cam.fov;
             const aspect = cam.aspect;
-            const scaleY = Math.tan(fov * Math.PI / 360) * dist;
+            const scaleY = Math.tan(fov * Math.PI / 360) * refDist;
             const scaleX = scaleY * aspect;
-            
-            particlePos.project(cam);
-            particleVel.project(cam);
-            
-            const pDist = cam.position.distanceTo(new THREE.Vector3(state.position.x, state.position.y, state.position.z));
-            const distRatio = pDist > 0 ? (dist / pDist) : 1;
+
+            const particleDist = Math.max(
+              1e-4,
+              cam.position.distanceTo(new THREE.Vector3(state.position.x, state.position.y, state.position.z)),
+            );
+            const distRatio = refDist / particleDist;
 
             pushedState = {
               ...state,
               position: {
-                x: particlePos.x * scaleX,
-                y: particlePos.y * scaleY,
-                z: state.position.z
+                x: particlePosNdc.x * scaleX,
+                y: particlePosNdc.y * scaleY,
+                z: state.position.z,
               },
               velocity: {
-                x: (particleVel.x - particlePos.x) * scaleX,
-                y: (particleVel.y - particlePos.y) * scaleY,
-                z: state.velocity.z
+                x: (particleVelNdc.x - particlePosNdc.x) * scaleX,
+                y: (particleVelNdc.y - particlePosNdc.y) * scaleY,
+                z: state.velocity.z,
               },
-              size: state.size * distRatio
+              size: state.size * distRatio,
             };
           }
 
@@ -4928,12 +6944,9 @@ Emitters: ${numEmitters}`;
             const life = lifespans[i];
             if (life.length === 0) continue;
 
-            // Rebirth gap invisible frame handling
-            if (i > 0 || life[0].frame > 0) {
-              slotAnim.rgba.push({ time: Math.max(0, (life[0].frame - 1)) / 24, color: 'ffffff00', curve: "stepped" });
-              boneAnim.scale.push({ time: Math.max(0, (life[0].frame - 1)) / 24, x: 0, y: 0, curve: "stepped" });
-              boneAnim.rotate.push({ time: Math.max(0, (life[0].frame - 1)) / 24, value: 0, curve: "stepped" });
-            }
+            // No rebirth-gap key needed here: the death key of the previous lifespan already sets
+            // scale/rgba to 0 at deathFrame+1, and Spine maintains that value until the next keyframe.
+            // Pushing a key at (life[0].frame - 1) creates out-of-order or duplicate entries.
             
             slotAnim.attachment.push({ time: life[0].frame / 24, name: "particles/png/particle" });
 
@@ -4988,8 +7001,10 @@ Emitters: ${numEmitters}`;
               const { frame, state } = bakedKeys[k];
               const time = frame / 24;
 
-              // Used real opacity from material instead of forcing fade
-              const finalAlpha = Math.floor(Math.max(0, Math.min(1, state.opacity)) * 255).toString(16).padStart(2, '0');
+              // Gate alpha by the lifecycle visibility flag: when visible=false (birth 0-20% / death 80-100%
+              // windows), emit rgba=0 so the particle is transparent at origin/end in Spine — no snap flash.
+              const effectiveOpacity = state.visible ? state.opacity : 0;
+              const finalAlpha = Math.floor(Math.max(0, Math.min(1, effectiveOpacity)) * 255).toString(16).padStart(2, '0');
               
               const isLastKey = k === bakedKeys.length - 1;
               const steppedDef = { curve: "stepped" };
@@ -5015,7 +7030,8 @@ Emitters: ${numEmitters}`;
               if (!isLastKey) {
                   const nextObj = bakedKeys[k + 1];
                   const nextTime = nextObj.frame / 24;
-                  const getA = (bk: BakedKey) => Math.max(0, Math.min(1, bk.state.opacity));
+                  // Respect visibility flag so fade-in/out is baked into the bezier curve
+                  const getA = (bk: BakedKey) => bk.state.visible ? Math.max(0, Math.min(1, bk.state.opacity)) : 0;
                   const tanA0 = crTangent(bakedKeys, k,     getA);
                   const tanA1 = crTangent(bakedKeys, k + 1, getA);
                   // rgba curve = [r0..3, g4..7, b8..11, a12..15]; r/g/b are constant 1→1 so use linear ctrl pts
@@ -5034,15 +7050,22 @@ Emitters: ${numEmitters}`;
               });
 
               // ── Scale bezier (Catmull-Rom tangents) ──
-              const sizeScale = Math.max(0.05, state.size * (sceneSettings.exportProjectionMode === "orthographic" ? 10 : 4)) / 64;
+              // Also gate scale by visibility so the bone collapses to 0 at birth/death windows
+              // For perspective mode, state.size already has distRatio baked in by the projection step
+              // above, so we use the same x10/64 factor as ortho — no separate constant needed.
+              const rawScale = Math.max(0.05, state.size * 10) / 64;
+              const sizeScale = state.visible ? rawScale : 0;
               let scaleCurveDefinition: any = steppedDef;
               if (!isLastKey) {
                   const nextObj = bakedKeys[k + 1];
                   const nextTime = nextObj.frame / 24;
-                  const scaleOf = (bk: BakedKey) => Math.max(0.01, Math.max(0.05, bk.state.size * (sceneSettings.exportProjectionMode === "orthographic" ? 10 : 4)) / 64);
+                  const scaleOf = (bk: BakedKey) => {
+                      if (!bk.state.visible) return 0;
+                      return Math.max(0.01, Math.max(0.05, bk.state.size * 10) / 64);
+                  };
                   const tan0 = crTangent(bakedKeys, k,     scaleOf);
                   const tan1 = crTangent(bakedKeys, k + 1, scaleOf);
-                  const bs = makeBezier1(time, scaleOf(bakedKeys[k]), tan0, nextTime, scaleOf(nextObj), tan1, 0.01);
+                  const bs = makeBezier1(time, scaleOf(bakedKeys[k]), tan0, nextTime, scaleOf(nextObj), tan1, 0);
                   // x and y are identical — duplicate the same bezier
                   scaleCurveDefinition = { curve: [...bs, ...bs] };
               }
@@ -5150,11 +7173,88 @@ Emitters: ${numEmitters}`;
       });
 
       return spineData;
-    }
+    },
+    focusSelectedObject: () => {
+      focusSelectedObjectRef.current?.();
+    },
+    resetRigidBodies: () => {
+      // Stop any active simulation state
+      rigidBodyStateRef.current.clear();
+      // Restore every physics-driven object to the position it had when play last started
+      if (rigidBodyOriginRef.current.size === 0) return;
+      rigidBodyOriginRef.current.forEach((origin, objId) => {
+        const mesh = sceneObjectMeshesRef.current.get(objId);
+        const obj = sceneObjectsRef.current.find(o => o.id === objId);
+        if (mesh) {
+          mesh.position.set(origin.x, origin.y, origin.z);
+        }
+        if (obj && onObjectTransformRef.current) {
+          const rotation = obj.rotation;
+          const scale = obj.scale;
+          onObjectTransformRef.current(
+            objId,
+            { x: origin.x, y: origin.y, z: origin.z },
+            { x: rotation.x, y: rotation.y, z: rotation.z },
+            { x: scale.x, y: scale.y, z: scale.z },
+          );
+        }
+      });
+    },
   }));
 
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', backgroundColor: sceneSettings.backgroundColor }}>
+      {/* Quad viewport panel labels + active highlight overlay */}
+      {quadViewport && (
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 4 }}>
+          {(['top', 'front', 'side', 'perspective'] as QuadPanel[]).map((panel) => {
+            const isLeft = panel === 'top' || panel === 'side';
+            const isTopRow = panel === 'top' || panel === 'front';
+            const isFocused = focusedQuadPanel === panel;
+            const labels: Record<QuadPanel, string> = { top: 'TOP', front: 'FRONT', side: 'RIGHT', perspective: 'PERSP' };
+            return (
+              <div key={panel} style={{
+                position: 'absolute',
+                top: isTopRow ? 0 : '50%',
+                bottom: isTopRow ? '50%' : 0,
+                left: isLeft ? 0 : '50%',
+                right: isLeft ? '50%' : 0,
+                border: isFocused ? '2px solid #f39c12' : '1px solid rgba(255,255,255,0.1)',
+                boxSizing: 'border-box',
+                boxShadow: isFocused ? 'inset 0 0 0 1px #f39c12' : 'none',
+              }}>
+                <span style={{
+                  position: 'absolute',
+                  top: '6px',
+                  left: '8px',
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '0.08em',
+                  color: isFocused ? '#f39c12' : 'rgba(255,255,255,0.4)',
+                  userSelect: 'none',
+                }}>{labels[panel]}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {/* Viewport label in single-view mode */}
+      {!quadViewport && (
+        <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 4 }}>
+          <span style={{
+            position: 'absolute',
+            top: '6px',
+            left: '8px',
+            fontSize: '10px',
+            fontWeight: 700,
+            letterSpacing: '0.08em',
+            color: 'rgba(255,255,255,0.4)',
+            userSelect: 'none',
+          }}>
+            {viewMode === 'y' ? 'TOP' : viewMode === 'z' ? 'FRONT' : viewMode === 'x' ? 'RIGHT' : 'PERSPECTIVE'}
+          </span>
+        </div>
+      )}
       {sceneSettings.referenceImage && (
         <img
           src={sceneSettings.referenceImage}
@@ -5216,6 +7316,20 @@ Emitters: ${numEmitters}`;
             checked={sceneSettings.showObjects ?? true}
             onChange={(e) => onUpdateSceneSettings?.({ showObjects: e.target.checked })}
           /> Objects
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px' }}>
+          <input
+            type="checkbox"
+            checked={sceneSettings.showBones ?? true}
+            onChange={(e) => onUpdateSceneSettings?.({ showBones: e.target.checked })}
+          /> Bones
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px' }}>
+          <input
+            type="checkbox"
+            checked={sceneSettings.showSpineImages ?? true}
+            onChange={(e) => onUpdateSceneSettings?.({ showSpineImages: e.target.checked })}
+          /> Spine Images
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px' }}>
           <input

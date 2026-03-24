@@ -242,6 +242,34 @@ app.on('ready', () => {
     }
   });
 
+  ipcMain.handle('save-lightning-export', async (_event, payload) => {
+    const { assets, projectName } = payload;
+
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Lightning Export Directory',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (canceled || filePaths.length === 0) return { success: false, error: 'Cancelled' };
+
+    const projectDir = path.join(filePaths[0], projectName || 'lightning_export');
+    try {
+      await fs.mkdir(projectDir, { recursive: true });
+      for (const asset of assets) {
+        const fullPath = path.join(projectDir, asset.name);
+        await fs.mkdir(path.dirname(fullPath), { recursive: true });
+        if (asset.isText) {
+          await fs.writeFile(fullPath, asset.data, 'utf8');
+        } else {
+          await fs.writeFile(fullPath, Buffer.from(asset.data, 'base64'));
+        }
+      }
+      return { success: true, dir: projectDir };
+    } catch (err) {
+      console.error('save-lightning-export error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('save-spine-export', async (event, payload) => {
     const { jsonString, assets, projectName } = payload;
 

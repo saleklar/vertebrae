@@ -18,7 +18,9 @@ export const defaultTorchParams: GeneratorParams = {
   resolution: 128,
   noiseType: 'voronoi',
   distortion: 0.8,
-  detail: 1.0, alphaThreshold: 0.0, particleSize: 1.5, flowX: 0, flowY: 1, flowZ: 0, rotX: 0, rotY: 0, rotZ: 0,
+  detail: 1.0,
+  density: 1.0,
+  alphaThreshold: 0.0, particleSize: 1.5, flowX: 0, flowY: 1, flowZ: 0, rotX: 0, rotY: 0, rotZ: 0,
   baseBlur: 0.0, baseOpacity: 1.0, glow1Blur: 4.0, glow1Opacity: 0.6, glow2Blur: 12.0, glow2Opacity: 0.3
 };
 
@@ -39,7 +41,9 @@ export const defaultCampfireParams: GeneratorParams = {
   resolution: 128,
   noiseType: 'voronoi',
   distortion: 0.5,
-  detail: 1.0, alphaThreshold: 0.0, particleSize: 1.5, flowX: 0, flowY: 1, flowZ: 0, rotX: 0, rotY: 0, rotZ: 0,
+  detail: 1.0,
+  density: 1.0,
+  alphaThreshold: 0.0, particleSize: 1.5, flowX: 0, flowY: 1, flowZ: 0, rotX: 0, rotY: 0, rotZ: 0,
   baseBlur: 0.0, baseOpacity: 1.0, glow1Blur: 4.0, glow1Opacity: 0.6, glow2Blur: 12.0, glow2Opacity: 0.3
 };
 
@@ -98,6 +102,7 @@ export const generateFireSequenceHeadless = async (params: GeneratorParams): Pro
         noiseType: { value: params.noiseType === 'value' ? 3.0 : (params.noiseType === 'cellular' ? 2.0 : (params.noiseType === 'voronoi' ? 1.0 : 0.0)) },
         distortion: { value: params.distortion },
         detail: { value: params.detail },
+          densityMultiplier: { value: params.density ?? 1.0 },
           
           alphaThreshold: { value: params.alphaThreshold || 0.0 },
           emitterTurbulence: { value: params.emitterTurbulence ?? 0.5 },

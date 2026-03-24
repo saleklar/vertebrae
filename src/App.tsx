@@ -1,9 +1,11 @@
 import { generateFireSequenceHeadless, defaultTorchParams, defaultCampfireParams } from './FireHeadless';
 import * as THREE from 'three';
+import { loadImagesFromDB, saveImageToDB, deleteImageFromDB, StoredImage } from './imageStorage';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Scene3D, Scene3DRef, SpineAttachmentInfo, SpineFrameOverrides } from './Scene3D';
 import { Animator3D } from './Animator3D';
 import { CurveEditor } from './CurveEditor';
+import { FireGenerator } from './FireGenerator';
 import { ParticleCreator } from './ParticleCreator';
 
 type SceneSize = {
@@ -429,6 +431,10 @@ function spineBoneWorldTransform(
 
 export function App() {
   const [showFireModal, setShowFireModal] = useState(false);
+  const [spriteLibrary, setSpriteLibrary] = useState<StoredImage[]>([]);
+  useEffect(() => {
+    loadImagesFromDB().then((imgs) => setSpriteLibrary(imgs));
+  }, []);
     // Add state for Bezier curve drawing mode
     const [drawBezierCurveMode, setDrawBezierCurveMode] = useState(false);
   const [appMode, setAppMode] = useState<'particle-system' | '3d-animator'>('particle-system');
@@ -452,6 +458,7 @@ export function App() {
   const [showCreateMenu, setShowCreateMenu] = useState(false);
   const [showPresetsMenu, setShowPresetsMenu] = useState(false);
   const [showCreateSubmenu, setShowCreateSubmenu] = useState<'Shapes' | 'Modifiers' | 'Presets' | null>(null);
+  const [activeShelfTab, setActiveShelfTab] = useState<'Objects' | 'Shapes' | 'Modifiers' | 'Presets' | 'FX' | null>('Objects');
   const [showPrefsSubmenu, setShowPrefsSubmenu] = useState(false);
   const [guiScale, setGuiScaleState] = useState<number>(() => {
     try { const v = localStorage.getItem('vertebrae_gui_scale'); return v ? parseFloat(v) : 1.0; } catch { return 1.0; }
@@ -731,6 +738,7 @@ export function App() {
   const [snapSettings, setSnapSettings] = useState<SnapSettings>(DEFAULT_SNAP_SETTINGS);
   const [viewMode, setViewMode] = useState<'perspective' | 'x' | 'y' | 'z'>('perspective');
   const [quadViewport, setQuadViewport] = useState(false);
+  const [manipulatorMode, setManipulatorMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
   const [sceneObjects, setSceneObjects] = useState<SceneObject[]>([]);
   const [undoStack, setUndoStack] = useState<SceneObject[][]>([]);
   const [redoStack, setRedoStack] = useState<SceneObject[][]>([]);
@@ -3119,6 +3127,114 @@ export function App() {
         </div>
       </div>
 
+      {/* ─── Create Shelf ─── */}
+      <div className="create-shelf">
+        <div className="create-shelf-tabs">
+          {(['Objects', 'Shapes', 'Modifiers', 'Presets', 'FX'] as const).map(tab => (
+            <button
+              key={tab}
+              className={`create-shelf-tab ${activeShelfTab === tab ? 'active' : ''}`}
+              onClick={() => setActiveShelfTab(prev => prev === tab ? null : tab)}
+              type="button"
+            >
+              {tab === 'Objects' && '💫 '}
+              {tab === 'Shapes' && '⬡ '}
+              {tab === 'Modifiers' && '⚡ '}
+              {tab === 'Presets' && '✨ '}
+              {tab === 'FX' && '🎆 '}
+              {tab}
+            </button>
+          ))}
+        </div>
+        {activeShelfTab === 'Objects' && (
+          <div className="create-shelf-actions">
+            <button className="create-shelf-action" onClick={() => handleCreateObject('Emitter')} type="button">
+              <span className="create-shelf-action-icon">💫</span>
+              <span>Emitter</span>
+            </button>
+          </div>
+        )}
+        {activeShelfTab === 'Shapes' && (
+          <div className="create-shelf-actions">
+            {['Cube','Sphere','Cylinder','Cone','Plane','Torus'].map(s => (
+              <button key={s} className="create-shelf-action" onClick={() => handleCreateObject(s)} type="button">
+                <span className="create-shelf-action-icon">⬡</span>
+                <span>{s}</span>
+              </button>
+            ))}
+            {['Circle','Rectangle','Triangle','Line','Arc','Polygon'].map(s => (
+              <button key={s} className="create-shelf-action" onClick={() => handleCreateObject(s)} type="button">
+                <span className="create-shelf-action-icon">◾</span>
+                <span>{s}</span>
+              </button>
+            ))}
+            <button className="create-shelf-action" onClick={() => { handleStartDrawBezierCurve(); }} type="button">
+              <span className="create-shelf-action-icon">✏️</span>
+              <span>Draw Bezier</span>
+            </button>
+          </div>
+        )}
+        {activeShelfTab === 'Modifiers' && (
+          <div className="create-shelf-actions">
+            {[
+              { id: 'gravity',          label: 'Gravity',         icon: '⬇️' },
+              { id: 'wind',             label: 'Wind',            icon: '🌬️' },
+              { id: 'vortex',           label: 'Vortex',          icon: '🌀' },
+              { id: 'turbulence',       label: 'Turbulence',      icon: '〰️' },
+              { id: 'tornado',          label: 'Tornado',         icon: '🌪️' },
+              { id: 'attractor',        label: 'Attractor',       icon: '🧲' },
+              { id: 'collider',         label: 'Collider',        icon: '🔲' },
+              { id: 'flow-curve',       label: 'Follow Path',     icon: '↗️' },
+              { id: 'repulsor',         label: 'Repulsor',        icon: '↔️' },
+              { id: 'thermal-updraft',  label: 'Thermal Updraft', icon: '🔆' },
+              { id: 'drag',             label: 'Drag',            icon: '⏬' },
+              { id: 'damping',          label: 'Damping',         icon: '🔇' },
+            ].map(f => (
+              <button key={f.id} className="create-shelf-action" onClick={() => handleAddPhysicsForce(f.id as PhysicsForceType)} type="button">
+                <span className="create-shelf-action-icon">{f.icon}</span>
+                <span>{f.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {activeShelfTab === 'Presets' && (
+          <div className="create-shelf-actions">
+            <button className="create-shelf-action" onClick={() => handleCreateFirePreset('campfire')} type="button">
+              <span className="create-shelf-action-icon">🔥</span>
+              <span>Campfire</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateFirePreset('torch')} type="button">
+              <span className="create-shelf-action-icon">🧨</span>
+              <span>Torch</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateClassicPreset('sparks')} type="button">
+              <span className="create-shelf-action-icon">✨</span>
+              <span>Magic Sparks</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateClassicPreset('fire')} type="button">
+              <span className="create-shelf-action-icon">🔥</span>
+              <span>Stylized Fire</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateClassicPreset('smoke')} type="button">
+              <span className="create-shelf-action-icon">💨</span>
+              <span>Soft Smoke</span>
+            </button>
+          </div>
+        )}
+        {activeShelfTab === 'FX' && (
+          <div className="create-shelf-actions">
+            <button className="create-shelf-action" onClick={() => setShowParticleCreator(true)} type="button">
+              <span className="create-shelf-action-icon">🎨</span>
+              <span>Particle Creator</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => setShowFireModal(true)} type="button">
+              <span className="create-shelf-action-icon">🔥</span>
+              <span>Fire Generator</span>
+            </button>
+          </div>
+        )}
+      </div>
+
       <div className="workspace-content">
         {showScenePropertiesPanel && (
           <aside className="file-panel panel-left">
@@ -3809,7 +3925,79 @@ export function App() {
             setShowCreateMenu(false);
             setShowCreateSubmenu(null);
           }}
+          style={{ position: 'relative' }}
         >
+          {/* ─── Toolbox ─── */}
+          <div style={{
+            position: 'absolute', top: 10, left: 10, zIndex: 10,
+            display: 'flex', flexDirection: 'column', gap: 3,
+            background: 'rgba(28,28,28,0.92)', border: '1px solid rgba(255,255,255,0.1)',
+            borderRadius: 7, padding: '6px 4px', pointerEvents: 'auto',
+          }}>
+            {/* Transform tools */}
+            {([
+              { mode: 'translate', icon: '✛', title: 'Move (G)' },
+              { mode: 'rotate',    icon: '↻', title: 'Rotate (R)' },
+              { mode: 'scale',     icon: '⤡', title: 'Scale (S)' },
+            ] as const).map(({ mode, icon, title }) => (
+              <button key={mode} title={title} type="button"
+                onClick={() => setManipulatorMode(mode)}
+                style={{
+                  width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
+                  background: manipulatorMode === mode ? '#e8803a' : 'rgba(255,255,255,0.07)',
+                  color: manipulatorMode === mode ? '#fff' : '#bbb',
+                  fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'background 0.1s',
+                }}>{icon}</button>
+            ))}
+
+            {/* Divider */}
+            <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.1)', margin: '2px 0' }} />
+
+            {/* Draw bezier */}
+            <button title="Draw Bezier Curve" type="button"
+              onClick={handleStartDrawBezierCurve}
+              style={{
+                width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
+                background: drawBezierCurveMode ? '#e8803a' : 'rgba(255,255,255,0.07)',
+                color: drawBezierCurveMode ? '#fff' : '#bbb',
+                fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>✏️</button>
+
+            {/* Divider */}
+            <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.1)', margin: '2px 0' }} />
+
+            {/* View modes */}
+            {([
+              { mode: 'perspective', label: 'P', title: 'Perspective' },
+              { mode: 'y',          label: 'T', title: 'Top (Y)' },
+              { mode: 'z',          label: 'F', title: 'Front (Z)' },
+              { mode: 'x',          label: 'S', title: 'Side (X)' },
+            ] as const).map(({ mode, label, title }) => (
+              <button key={mode} title={title} type="button"
+                onClick={() => setViewMode(mode)}
+                style={{
+                  width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
+                  background: viewMode === mode ? '#4a90d9' : 'rgba(255,255,255,0.07)',
+                  color: viewMode === mode ? '#fff' : '#bbb',
+                  fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  transition: 'background 0.1s',
+                }}>{label}</button>
+            ))}
+
+            {/* Divider */}
+            <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.1)', margin: '2px 0' }} />
+
+            {/* Quad viewport toggle */}
+            <button title="Quad Viewport (Space)" type="button"
+              onClick={() => setQuadViewport(prev => !prev)}
+              style={{
+                width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
+                background: quadViewport ? '#4a90d9' : 'rgba(255,255,255,0.07)',
+                color: quadViewport ? '#fff' : '#bbb',
+                fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>⊞</button>
+          </div>
             <Scene3D
               drawBezierCurveMode={drawBezierCurveMode}
               onFinishDrawBezierCurve={handleFinishDrawBezierCurve}
@@ -3842,6 +4030,8 @@ export function App() {
             spineFrameOverrides={spineFrameOverrides}
             spineLayerSpread={spineLayerSpread}
             quadViewport={quadViewport}
+            manipulatorMode={manipulatorMode}
+            onManipulatorModeChange={setManipulatorMode}
           />
         </main>
 
@@ -4860,10 +5050,33 @@ export function App() {
                                 }}
                               >
                                 Clear Sprite Asset
-                              </button>
-                            )}
-                          </>
-                        )}
+                                </button>
+                              )}
+
+                              {/* SPRITE LIBRARY */}
+                              <div style={{ marginTop: '12px', background: '#0a0d18', borderRadius: '6px', padding: '8px', border: '1px solid #3b455c' }}>
+                                <div style={{ fontSize: '0.8rem', color: '#c8d0e0', marginBottom: '8px', fontWeight: 'bold' }}>Sprite Library</div>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(48px, 1fr))', gap: '6px', maxHeight: '160px', overflowY: 'auto', paddingRight: '4px' }}>
+                                  {spriteLibrary.length === 0 && <div style={{ fontSize: '0.7rem', color: '#8a93a2', gridColumn: '1 / -1' }}>No saved sprites. Upload a PNG to add it to your library.</div>}
+                                  {spriteLibrary.map(img => (
+                                    <div key={img.id} style={{ position: 'relative', width: '100%', aspectRatio: '1', borderRadius: '4px', background: '#1a1f2e', border: ((selectedEmitterProperties.particleSpriteImageDataUrl === img.dataUrl) ? '2px solid #4f6ef7' : '1px solid #3b455c'), cursor: 'pointer', overflow: 'hidden' }} onClick={() => {
+                                      handleUpdateEmitterProperty('particleSpriteImageDataUrl', img.dataUrl);
+                                      handleUpdateEmitterProperty('particleSpriteImageName', img.name);
+                                      handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', []);
+                                      handleUpdateEmitterProperty('particleSpriteSequenceFirstName', '');
+                                    }} title={img.name}>
+                                      <img src={img.dataUrl} style={{ width: '100%', height: '100%', objectFit: 'cover', imageRendering: 'pixelated' }} alt={img.name} />
+                                      <button type="button" onClick={(e) => {
+                                        e.stopPropagation();
+                                        deleteImageFromDB(img.id);
+                                        setSpriteLibrary(prev => prev.filter(i => i.id !== img.id));
+                                      }} style={{ position: 'absolute', top: '2px', right: '2px', background: 'rgba(0,0,0,0.6)', border: 'none', color: '#fff', fontSize: '10px', borderRadius: '3px', width: '16px', height: '16px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', zIndex: 10 }}>×</button>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </>
+                          )}
 
                         {selectedEmitterProperties.particleType === '3d-model' && (
                           <div className="live-3d-model-container" style={{ border: '1px solid #333', padding: '8px', marginTop: '12px', marginBottom: '12px', borderRadius: '4px', backgroundColor: '#1e1e1e' }}>
@@ -5430,6 +5643,41 @@ export function App() {
           }}
           onClose={() => setShowParticleCreator(false)}
         />
+      {showFireModal && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 200, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{ position: 'relative', width: '90vw', maxWidth: 1100, height: '88vh', background: '#1a1a1a', borderRadius: 10, overflow: 'hidden', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 14px', background: '#222', borderBottom: '1px solid #333', flexShrink: 0 }}>
+              <span style={{ color: '#eee', fontWeight: 600, fontSize: 14 }}>🔥 Fire Generator</span>
+              <button onClick={() => setShowFireModal(false)} style={{ background: 'none', border: 'none', color: '#aaa', cursor: 'pointer', fontSize: 18, lineHeight: 1 }} type="button">✕</button>
+            </div>
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              <FireGenerator
+                particleCameraState={particleCameraState}
+                embeddedUI
+                autoRenderOnChange
+                onAttachToEmitter={(urls) => {
+                  handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', urls);
+                  handleUpdateEmitterProperty('particleSpriteSequenceFirstName', 'fire_frame0.png');
+                  handleUpdateEmitterProperty('particleSpriteSequenceFps', 24);
+                  handleUpdateEmitterProperty('particleSpriteImageDataUrl', '');
+                  handleUpdateEmitterProperty('particleSpriteImageName', '');
+                  handleUpdateEmitterProperty('particleType', 'sprites');
+                  setShowFireModal(false);
+                }}
+                onExportToParticleSystem={(urls, fps) => {
+                  handleUpdateEmitterProperty('particleSpriteSequenceDataUrls', urls);
+                  handleUpdateEmitterProperty('particleSpriteSequenceFirstName', 'fire_frame0.png');
+                  handleUpdateEmitterProperty('particleSpriteSequenceFps', fps);
+                  handleUpdateEmitterProperty('particleSpriteImageDataUrl', '');
+                  handleUpdateEmitterProperty('particleSpriteImageName', '');
+                  handleUpdateEmitterProperty('particleType', 'sprites');
+                  setShowFireModal(false);
+                }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

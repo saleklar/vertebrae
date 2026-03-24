@@ -27,6 +27,7 @@ export interface GeneratorParams {
   noiseType: 'simplex' | 'voronoi' | 'cellular' | 'value';
   distortion: number;
   detail: number;
+  density?: number;
   alphaThreshold?: number;
   particleSize?: number;
     evolveOverLife?: boolean;
@@ -72,6 +73,7 @@ uniform vec3 rotationSpeed;
 uniform float thermalBuoyancy;
 uniform float distortion;
 uniform float detail;
+uniform float densityMultiplier;
 uniform bool useBlackbody;
 uniform float baseTemperature;
 uniform float peakTemperature;
@@ -221,7 +223,7 @@ float getDensity(vec3 p, float t) {
     float emMask = mix(1.0, smoothstep(0.1, 0.9, emN), emitterTurbulence);
     den *= mix(emMask, 1.0, smoothstep(-0.5, 1.5, p.y));
 
-    return den;
+    return den * max(0.0, densityMultiplier);
 }
 
 vec3 blackbody(float Temp) {
@@ -446,6 +448,7 @@ const [params, setParams] = useState<GeneratorParams>(() => {
           if (parsed.useBlackbody === undefined) parsed.useBlackbody = false;
           if (parsed.baseTemperature === undefined) parsed.baseTemperature = 800;
           if (parsed.peakTemperature === undefined) parsed.peakTemperature = 3500;
+          if (parsed.density === undefined) parsed.density = 1.0;
           return parsed;
 
       } catch (e) {
@@ -471,7 +474,9 @@ const [params, setParams] = useState<GeneratorParams>(() => {
       thermalBuoyancy: 1.0,
       vorticityConfinement: 1.0,
       distortion: 0.8,
-      detail: 1.0, alphaThreshold: 0.0, particleSize: 1.5, flowX: 0, flowY: 1, flowZ: 0, rotX: 0, rotY: 0, rotZ: 0,
+      detail: 1.0,
+      density: 1.0,
+      alphaThreshold: 0.0, particleSize: 1.5, flowX: 0, flowY: 1, flowZ: 0, rotX: 0, rotY: 0, rotZ: 0,
       baseBlur: 0.0,
       baseOpacity: 1.0,
       glow1Blur: 4.0,
@@ -602,6 +607,7 @@ const [params, setParams] = useState<GeneratorParams>(() => {
         noiseType: { value: params.noiseType === 'value' ? 3.0 : (params.noiseType === 'cellular' ? 2.0 : (params.noiseType === 'voronoi' ? 1.0 : 0.0)) },
         distortion: { value: params.distortion },
         detail: { value: params.detail },
+          densityMultiplier: { value: params.density ?? 1.0 },
           
           alphaThreshold: { value: params.alphaThreshold || 0.0 },
           emitterTurbulence: { value: params.emitterTurbulence ?? 0.5 },
@@ -745,6 +751,7 @@ const [params, setParams] = useState<GeneratorParams>(() => {
       materialRef.current.uniforms.noiseType.value = params.noiseType === 'value' ? 3.0 : (params.noiseType === 'cellular' ? 2.0 : (params.noiseType === 'voronoi' ? 1.0 : 0.0));
       materialRef.current.uniforms.distortion.value = params.distortion;
       materialRef.current.uniforms.detail.value = params.detail;
+      if (materialRef.current.uniforms.densityMultiplier) materialRef.current.uniforms.densityMultiplier.value = params.density ?? 1.0;
       if(materialRef.current.uniforms.thermalBuoyancy) materialRef.current.uniforms.thermalBuoyancy.value = params.thermalBuoyancy !== undefined ? params.thermalBuoyancy : 1.0;
       if(materialRef.current.uniforms.vorticityConfinement) materialRef.current.uniforms.vorticityConfinement.value = params.vorticityConfinement !== undefined ? params.vorticityConfinement : 1.0;
       
@@ -1155,6 +1162,13 @@ const [params, setParams] = useState<GeneratorParams>(() => {
           </label>
           <input type="range" min="0.0" max="2.0" step="0.05" value={params.detail} onChange={e => setParams({...params, detail: parseFloat(e.target.value)})} style={{width:'100%'}}/>
         </div>
+          <div>
+            <label style={{display: 'flex', justifyContent: 'space-between', fontSize: '12px'}}>
+              <span>Density</span>
+              <span>{(params.density ?? 1.0).toFixed(2)}</span>
+            </label>
+            <input type="range" min="0.0" max="3.0" step="0.05" value={params.density ?? 1.0} onChange={e => setParams({...params, density: parseFloat(e.target.value)})} style={{width:'100%'}}/>
+          </div>
           <div style={{ marginTop: '10px' }}>
             <label style={{display: 'block', fontSize: '12px', marginBottom:'5px'}} title="Stretch X">Stretch X</label>
             <input type="range" min="0" max="2" step="0.05" value={params.stretchX ?? 1.0} onChange={e => setParams({...params, stretchX: parseFloat(e.target.value)})} style={{width:'100%'}}/>
