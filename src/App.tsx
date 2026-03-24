@@ -5540,12 +5540,52 @@ export function App() {
                 {selectedObject.type === 'Lightning' && (() => {
                   const lp = (selectedObject.properties ?? {}) as any;
                   const upd = (k: string, v: any) => handleUpdateEmitterProperty(k, v);
+                  // Candidate anchor objects — anything except the lightning itself and its own LightningPoint children
+                  const lightningChildIds = new Set(sceneObjects.filter(o => o.parentId === selectedObject.id).map(o => o.id));
+                  const anchorCandidates = sceneObjects.filter(o => o.id !== selectedObject.id && !lightningChildIds.has(o.id));
                   return (
                     <>
                       <div className="collapsible-section" style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
                         <span style={{ fontWeight: 600, color: '#c8d0e0' }}>⚡ Lightning Properties</span>
                       </div>
                       <div className="subpanel-content">
+
+                        <div style={{ marginBottom: '6px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Anchors</div>
+                        <label>Source Object</label>
+                        <select
+                          value={lp.startShapeId ?? ''}
+                          onChange={e => upd('startShapeId', e.target.value || undefined)}
+                        >
+                          <option value="">(Start handle)</option>
+                          {anchorCandidates.map(o => (
+                            <option key={o.id} value={o.id}>{o.name || o.type} [{o.type}]</option>
+                          ))}
+                        </select>
+
+                        <label>Target Object</label>
+                        <select
+                          value={lp.endShapeId ?? ''}
+                          onChange={e => upd('endShapeId', e.target.value || undefined)}
+                        >
+                          <option value="">(End handle)</option>
+                          {anchorCandidates.map(o => (
+                            <option key={o.id} value={o.id}>{o.name || o.type} [{o.type}]</option>
+                          ))}
+                        </select>
+
+                        {(lp.endShapeId) && (
+                          <>
+                            <label>Target Attraction: {(lp.targetAttraction ?? 0.6).toFixed(1)}</label>
+                            <input type="range" min={0} max={10} step={0.1}
+                              value={lp.targetAttraction ?? 0.6}
+                              onChange={e => upd('targetAttraction', Number(e.target.value))} />
+                            <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>
+                              Higher = branches crawl to surface. Set a mesh as Target to enable surface crawl.
+                            </div>
+                          </>
+                        )}
+
+                        <div style={{ marginTop: '6px', marginBottom: '6px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Bolt Shape</div>
                         <label>Mode</label>
                         <select value={lp.mode ?? 'loop-strike'} onChange={e => upd('mode', e.target.value)}>
                           <option value="loop">Loop (jitter)</option>
