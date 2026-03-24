@@ -5717,6 +5717,17 @@ export function App() {
                           </>
                         )}
 
+                        <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Rendering</div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
+                          <input type="checkbox"
+                            checked={lp.occludeByGeometry !== false}
+                            onChange={e => upd('occludeByGeometry', e.target.checked)} />
+                          Respect 3D depth (occluded by objects in front)
+                        </label>
+                        <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>
+                          Off = lightning always renders on top of everything.
+                        </div>
+
                         <div style={{ marginTop: '6px', marginBottom: '6px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Bolt Shape</div>
                         <label>Mode</label>
                         <select value={lp.mode ?? 'loop-strike'} onChange={e => upd('mode', e.target.value)}>

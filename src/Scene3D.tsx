@@ -5029,7 +5029,9 @@ const timelineOutRef = useRef(timelineOut);
         const coreW = Math.max(0.5, Number(lProps.coreWidth ?? 2));
         const glowW = Math.max(1,   Number(lProps.glowWidth ?? 6));
         const density = Math.max(0.5, Math.min(4, Number(lProps.density ?? 1.6)));
-        const occludeByGeometry = !!(lProps.occludeByGeometry);
+        // occludeByGeometry now defaults TRUE — sprites are depth-tested against scene geometry.
+        // Set lProps.occludeByGeometry = false for the old always-on-top / overlay style.
+        const occludeByGeometry = lProps.occludeByGeometry !== false;
 
         // ── Fractal glow noise ────────────────────────────────────────────────
         const glowNoiseIntensity = Math.max(0, Math.min(1,  Number(lProps.glowNoiseIntensity ?? 0)));
