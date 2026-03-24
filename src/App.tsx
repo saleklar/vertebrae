@@ -471,6 +471,33 @@ export function App() {
   const [drawMode, setDrawMode] = useState(false);
 
   // Handler to enable Bezier curve drawing mode
+  const importModelInputRef = useRef<HTMLInputElement>(null);
+  const handleImportModelFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    if (!['obj','fbx','gltf','glb'].includes(ext)) { alert('Supported formats: OBJ, FBX, GLTF, GLB'); e.target.value = ''; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const id = 'model_' + Date.now();
+      setSceneObjects(prev => [...prev, {
+        id,
+        name: file.name.replace(/\.[^.]+$/, ''),
+        type: 'ImportedModel',
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+        parentId: null,
+        properties: { importedModelDataUrl: dataUrl, importedModelFormat: ext },
+      }]);
+      setSelectedObjectId(id);
+      setShowScenePropertiesPanel(true);
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  }, []);
+
   const handleStartDrawBezierCurve = useCallback(() => {
     setDrawBezierCurveMode(true);
   }, []);
@@ -3175,6 +3202,17 @@ export function App() {
               <span className="create-shelf-action-icon">✏️</span>
               <span>Draw Bezier</span>
             </button>
+            <button className="create-shelf-action" onClick={() => importModelInputRef.current?.click()} type="button">
+              <span className="create-shelf-action-icon">📦</span>
+              <span>Import 3D</span>
+            </button>
+            <input
+              ref={importModelInputRef}
+              type="file"
+              accept=".obj,.fbx,.gltf,.glb"
+              style={{ display: 'none' }}
+              onChange={handleImportModelFile}
+            />
           </div>
         )}
         {activeShelfTab === 'Modifiers' && (
@@ -5582,6 +5620,47 @@ export function App() {
                             <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>
                               Higher = branches crawl to surface. Set a mesh as Target to enable surface crawl.
                             </div>
+                          </>
+                        )}
+
+                        <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Follow Bezier Curves</div>
+                        {anchorCandidates.filter(o => o.type === 'Path').length === 0 ? (
+                          <div style={{ fontSize: '0.72rem', color: '#6a7382', marginBottom: '4px' }}>No Path objects in scene. Draw a Bezier curve first.</div>
+                        ) : (
+                          anchorCandidates.filter(o => o.type === 'Path').map(pathObj => {
+                            const ids: string[] = Array.isArray(lp.followBezierPathIds) ? lp.followBezierPathIds : [];
+                            const checked = ids.includes(pathObj.id);
+                            return (
+                              <label key={pathObj.id} style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', marginBottom: '2px', fontWeight: 400 }}>
+                                <input type="checkbox" checked={checked} onChange={e => {
+                                  const next = e.target.checked ? [...ids, pathObj.id] : ids.filter(x => x !== pathObj.id);
+                                  upd('followBezierPathIds', next);
+                                }} />
+                                {pathObj.name || 'Path'}
+                              </label>
+                            );
+                          })
+                        )}
+                        {(() => { const ids: string[] = Array.isArray(lp.followBezierPathIds) ? lp.followBezierPathIds : []; return ids.length > 0; })() && (
+                          <>
+                            <label>Curve Tightness: {(lp.curveTightness ?? 0.65).toFixed(2)}</label>
+                            <input type="range" min={0} max={10} step={0.05}
+                              value={lp.curveTightness ?? 0.65}
+                              onChange={e => upd('curveTightness', Number(e.target.value))} />
+                          </>
+                        )}
+
+                        <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Physics Modifiers</div>
+                        <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
+                          <input type="checkbox" checked={!!(lp.usePhysicsModifiers)} onChange={e => upd('usePhysicsModifiers', e.target.checked)} />
+                          Apply Physics Forces
+                        </label>
+                        {!!(lp.usePhysicsModifiers) && (
+                          <>
+                            <label>Modifier Strength: {(lp.modifierStrength ?? 1).toFixed(2)}</label>
+                            <input type="range" min={0} max={4} step={0.05}
+                              value={lp.modifierStrength ?? 1}
+                              onChange={e => upd('modifierStrength', Number(e.target.value))} />
                           </>
                         )}
 
