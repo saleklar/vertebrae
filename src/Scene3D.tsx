@@ -5269,12 +5269,15 @@ const timelineOutRef = useRef(timelineOut);
             for (let pi = 0; pi < FLAME_PTS; pi++) {
               const yNorm    = pi / (FLAME_PTS - 1);
               const y        = fBase.y + yNorm * flameHeight;
-              const widthEnv = Math.sqrt(Math.max(0, 1.0 - yNorm)) * flameWidth * 0.5;
+              // Turbulence envelope: zero at base (anchored), grows toward tip
+              const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5;
+              // Base spread fades out as we rise so tendrils converge upward
+              const baseSpread = 1.0 - yNorm;
               const noiseT   = tendrilPhase + yNorm * 3.0;
               const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)       * 1.0
                         + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7)  * 0.4) * turbulence * widthEnv;
               const dz = Math.cos(noiseT * 0.9  + tendrilSeed * 2.3)          * turbulence * widthEnv * 0.6;
-              pts.push({ x: fBase.x + baseOffX + dx, y, z: fBase.z + baseOffZ + dz });
+              pts.push({ x: fBase.x + baseOffX * baseSpread + dx, y, z: fBase.z + baseOffZ * baseSpread + dz });
             }
 
             // Optional physics modifiers (attractor / repulsor / flow-curve)
