@@ -5332,8 +5332,12 @@ const timelineOutRef = useRef(timelineOut);
             else                     lifeFade = 1.0 - (age01 - 0.75) / 0.25; // 1→0 fade-out
             lifeFade = Math.max(0, lifeFade);
 
-            // Height shrinks toward end of life (tendril dissipates upward / shortens)
-            const activeHeight = flameHeight * (0.4 + 0.6 * lifeFade);
+            // The whole tendril drifts upward as it ages — accelerating rise
+            // At birth base = fBase.y; at death it has risen ~55% of flameHeight
+            const riseOffset = Math.pow(age01, 1.3) * flameHeight * 0.55;
+
+            // Height stays close to full length; just narrows slightly at very end of life
+            const activeHeight = flameHeight * (0.75 + 0.25 * lifeFade);
 
             // The actual noise seed varies per life cycle so each new tendril wiggles differently
             const tendrilSeed  = slotSeed + Math.floor((fAnimT + birthOffset) / lifespan) * 1.618;
@@ -5349,7 +5353,7 @@ const timelineOutRef = useRef(timelineOut);
             const pts: { x: number; y: number; z: number }[] = [];
             for (let pi = 0; pi < FLAME_PTS; pi++) {
               const yNorm    = pi / (FLAME_PTS - 1);
-              const y        = fBase.y + yNorm * activeHeight;
+              const y        = fBase.y + riseOffset + yNorm * activeHeight;
               // Turbulence envelope: zero at base (anchored), grows toward tip
               const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5;
               // Base spread fades out as we rise so tendrils converge upward
