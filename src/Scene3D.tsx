@@ -5213,6 +5213,8 @@ const timelineOutRef = useRef(timelineOut);
           const modStrengthF   = fp.modifierStrength  ?? 1.0;
           const flickerIntensF = Math.max(0, Math.min(1, fp.flickerIntensity ?? 0.45));
           const flickerTypeF   = (fp.flickerType ?? 'fractal') as 'smooth' | 'fractal' | 'turbulent';
+          // coreBlur 0=tight sharp core, 1=wide diffuse bloom
+          const coreBlurF      = Math.max(0, Math.min(1, fp.coreBlur ?? 0.2));
 
           const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
           const coreNum = hexStrToNum(coreHexF);
@@ -5432,10 +5434,14 @@ const timelineOutRef = useRef(timelineOut);
             // Three sprite layers: outer halo, glow, bright core — scaled by lifeFade + ageScale
             const haloD = glowW * 4.0 * ageScale;
             const glowD = glowW * 2.0 * ageScale;
-            const coreD = coreW * 2.2 * ageScale;
+            // coreBlur widens the core sprite (0 = tight 2.2×, 1 = wide 8×)
+            // Opacity compensates so a wider core doesn't over-brighten
+            const coreBlurSizeMul = 1.0 + coreBlurF * 2.6;
+            const coreBlurOpaMul  = 1.0 / Math.sqrt(coreBlurSizeMul);
+            const coreD = coreW * 2.2 * coreBlurSizeMul * ageScale;
             addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed);
             addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1);
-            addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade,  0.1, tendrilSeed + 2.2);
+            addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade * coreBlurOpaMul,  0.1, tendrilSeed + 2.2);
           }
         });
       }

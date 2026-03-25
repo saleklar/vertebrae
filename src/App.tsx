@@ -3304,6 +3304,7 @@ export function App() {
                   coreWidth: 6,
                   glowWidth: 16,
                   density: 1.6,
+                  coreBlur: 0.2,
                   flickerIntensity: 0.45,
                   flickerType: 'fractal',
                   usePhysicsModifiers: false,
@@ -5885,6 +5886,9 @@ export function App() {
                       <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Glow</div>
                       <label>Core Width: {fp.coreWidth ?? 6}</label>
                       <input type="range" min={1} max={20} step={0.5} value={fp.coreWidth ?? 6} onChange={e => upd('coreWidth', Number(e.target.value))} />
+                      <label>Core Blur: {((fp.coreBlur ?? 0.2) * 100).toFixed(0)}%</label>
+                      <input type="range" min={0} max={1} step={0.01} value={fp.coreBlur ?? 0.2} onChange={e => upd('coreBlur', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>0% = tight bright spike, 100% = wide soft bloom.</div>
                       <label>Glow Width: {fp.glowWidth ?? 16}</label>
                       <input type="range" min={2} max={60} step={1} value={fp.glowWidth ?? 16} onChange={e => upd('glowWidth', Number(e.target.value))} />
                       <label>Density: {(fp.density ?? 1.6).toFixed(1)}</label>
