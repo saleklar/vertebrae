@@ -5244,7 +5244,8 @@ const timelineOutRef = useRef(timelineOut);
                 ? 1.0
                 : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
               // Per-sprite opacity flicker — controllable type + intensity
-              const phase = fAnimT * speed * 2.3 + noiseSeed + t * 5.1;
+              // phase: spatial (t*k) travels upward, time term subtracted → upward wave
+              const phase = noiseSeed + t * 5.1 - fAnimT * speed * 2.3;
               let noise01: number;
               if (flickerTypeF === 'smooth') {
                 // Two gentle sine waves → soft pulsing
@@ -5287,20 +5288,45 @@ const timelineOutRef = useRef(timelineOut);
           };
 
           for (let ti = 0; ti < numTendrils; ti++) {
-            const tendrilSeed = ti * 2.399963; // golden-angle spread
-            const tendrilPhase = tendrilSeed + fAnimT * speed;
+            // ── Tendril lifecycle ──────────────────────────────────────────────
+            // Each slot has its own pseudo-random lifetime derived from its seed.
+            // A sawtooth over time gives a normalised age [0..1].
+            // When age resets the tendril "re-ignites" at a new random base angle.
+            const slotSeed    = ti * 2.399963;          // stable golden-angle seed
+            const minLife     = 1.2 / Math.max(0.1, speed);
+            const maxLife     = 3.8 / Math.max(0.1, speed);
+            // Deterministic pseudo-random lifetime per slot (0..1 → minLife..maxLife)
+            const pr1 = Math.abs(Math.sin(slotSeed * 13.7 + 0.5));
+            const lifespan    = minLife + pr1 * (maxLife - minLife);
+            // Offset each slot so they don't all birth at t=0
+            const birthOffset = Math.abs(Math.sin(slotSeed * 7.3 + 1.1)) * lifespan;
+            const age01       = ((fAnimT + birthOffset) % lifespan) / lifespan; // 0=birth 1=death
 
-            // Base offset to spread tendrils inside the flame footprint
-            const spreadAngle = (numTendrils > 1 ? (ti / (numTendrils - 1)) : 0.5) * Math.PI * 2;
-            const baseR = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0);
-            const baseOffX = Math.cos(spreadAngle + tendrilSeed) * baseR;
-            const baseOffZ = Math.sin(spreadAngle + tendrilSeed) * baseR * 0.4;
+            // Fade envelope: quick fade-in, long plateau, sharp fade-out at tip
+            let lifeFade: number;
+            if (age01 < 0.12)        lifeFade = age01 / 0.12;           // 0→1 fade-in
+            else if (age01 < 0.75)   lifeFade = 1.0;                    // plateau
+            else                     lifeFade = 1.0 - (age01 - 0.75) / 0.25; // 1→0 fade-out
+            lifeFade = Math.max(0, lifeFade);
+
+            // Height shrinks toward end of life (tendril dissipates upward / shortens)
+            const activeHeight = flameHeight * (0.4 + 0.6 * lifeFade);
+
+            // The actual noise seed varies per life cycle so each new tendril wiggles differently
+            const tendrilSeed  = slotSeed + Math.floor((fAnimT + birthOffset) / lifespan) * 1.618;
+
+            // Base spread angle shifts each new life
+            const spreadAngle  = (numTendrils > 1 ? (ti / (numTendrils - 1)) : 0.5) * Math.PI * 2
+                                 + Math.floor((fAnimT + birthOffset) / lifespan) * 0.97;
+            const baseR        = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0);
+            const baseOffX     = Math.cos(spreadAngle + slotSeed) * baseR;
+            const baseOffZ     = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
 
             // Build polyline from base to tip
             const pts: { x: number; y: number; z: number }[] = [];
             for (let pi = 0; pi < FLAME_PTS; pi++) {
               const yNorm    = pi / (FLAME_PTS - 1);
-              const y        = fBase.y + yNorm * flameHeight;
+              const y        = fBase.y + yNorm * activeHeight;
               // Turbulence envelope: zero at base (anchored), grows toward tip
               const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5;
               // Base spread fades out as we rise so tendrils converge upward
@@ -5365,13 +5391,13 @@ const timelineOutRef = useRef(timelineOut);
               });
             }
 
-            // Three sprite layers: outer halo, glow, bright core
+            // Three sprite layers: outer halo, glow, bright core — all scaled by lifeFade
             const haloD = glowW * 4.0;
             const glowD = glowW * 2.0;
             const coreD = coreW * 2.2;
-            addFlameChain(pts, gTexF, haloD, 0.09, -0.1, tendrilSeed);
-            addFlameChain(pts, gTexF, glowD, 0.28,  0.0, tendrilSeed + 1.1);
-            addFlameChain(pts, cTexF, coreD, 0.60,  0.1, tendrilSeed + 2.2);
+            addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed);
+            addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1);
+            addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade,  0.1, tendrilSeed + 2.2);
           }
         });
       }
