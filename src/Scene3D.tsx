@@ -5272,6 +5272,29 @@ const timelineOutRef = useRef(timelineOut);
               }
               // Map [0..1] noise to [1-intensity .. 1] brightness range
               const flicker = (1.0 - flickerIntensF) + flickerIntensF * noise01;
+
+              // Size modulation from turbulence — same noise type, shifted phase
+              const sizePhase = noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9;
+              let sizeNoise01: number;
+              if (flickerTypeF === 'smooth') {
+                sizeNoise01 = 0.5 + 0.5 * Math.sin(sizePhase);
+              } else if (flickerTypeF === 'turbulent') {
+                let sv = 0, sa = 1.0, sfr = 1.0, snm = 0;
+                for (let oct = 0; oct < 3; oct++) {
+                  sv += sa * Math.abs(Math.sin(sizePhase * sfr + oct * 2.1));
+                  snm += sa; sfr *= 2.07; sa *= 0.5;
+                }
+                sizeNoise01 = sv / snm;
+              } else {
+                let sv = 0, sa = 1.0, sfr = 1.0, snm = 0;
+                for (let oct = 0; oct < 3; oct++) {
+                  sv += sa * (0.5 + 0.5 * Math.sin(sizePhase * sfr + oct * 2.1));
+                  snm += sa; sfr *= 2.07; sa *= 0.5;
+                }
+                sizeNoise01 = sv / snm;
+              }
+              // turbulence controls how much the width can swell/shrink (0 = fixed, 1 = ±45%)
+              const sizeScale = 1.0 + turbulence * (sizeNoise01 * 2.0 - 1.0) * 0.45;
               const mat = new THREE.SpriteMaterial({
                 map:         tex,
                 transparent: true,
@@ -5282,7 +5305,7 @@ const timelineOutRef = useRef(timelineOut);
               });
               const sp = new THREE.Sprite(mat);
               sp.position.set(pt.x, pt.y, (pt.z ?? 0) + zOff);
-              sp.scale.set(sprSz * taper, sprSz * taper, 1);
+              sp.scale.set(sprSz * taper * sizeScale, sprSz * taper * sizeScale, 1);
               fGroup.add(sp);
             });
           };
