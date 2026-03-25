@@ -191,6 +191,12 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   const [isExporting,    setIsExporting]    = useState(false);
   const [exportProg,     setExportProg]     = useState(0); // 0-100
   const [flameMatteChoke, setFlameMatteChoke] = useState(0); // -50…+50
+  const [bgColor,        setBgColor]        = useState('#080808');
+  const bgColorRef = useRef('#080808');
+  useEffect(() => {
+    bgColorRef.current = bgColor;
+    if (rendererRef.current) rendererRef.current.setClearColor(new THREE.Color(bgColor), 1);
+  }, [bgColor]);
 
   // Convert a black-background additive-blend render to transparent PNG by deriving alpha from luminance
   const deriveAlphaFromLuma = (url: string): Promise<string> =>
@@ -279,7 +285,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
     const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.setSize(W, H);
-    renderer.setClearColor(0x080808, 1);
+    renderer.setClearColor(new THREE.Color(bgColorRef.current), 1);
     container.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
@@ -590,7 +596,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       const t = loopDur * (fi / Math.max(1, numFrames));
       buildSprites(t, true /* seamless */);
       renderer.setRenderTarget(rt);
-      renderer.setClearColor(0x000000, 1);
+      renderer.setClearColor(new THREE.Color(bgColorRef.current), 1);
       renderer.clear();
       renderer.render(scene, exportCam);
       renderer.setRenderTarget(null);
@@ -742,6 +748,11 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         {/* Colors */}
         <div style={S.sec}>Colors</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={S.label}>Background</label>
+            <input type="color" value={bgColor} onChange={e => setBgColor(e.target.value)}
+              style={{ width: '100%', height: '28px', border: '1px solid #3b455c', borderRadius: '4px', cursor: 'pointer', background: 'none' }} />
+          </div>
           <div>
             <label style={S.label}>Core Base</label>
             <input type="color" value={fp.coreColor} onChange={e => upd('coreColor', e.target.value)}
@@ -907,7 +918,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       </div>
 
       {/* ── Right: 3-D viewport ────────────────────────────────────────── */}
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#080808' }}>
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: bgColor }}>
         <div ref={mountRef} style={{ width: '100%', height: '100%' }} />
         {/* Camera reset button */}
         <button type="button" onClick={handleResetCamera}
