@@ -12,59 +12,94 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import JSZip from 'jszip';
 
-// ─── Self-contained helpers (mirrors what Scene3D exposes at module level) ────
+// ─── Texture helpers ──────────────────────────────────────────────────────────
 
-const _fgFlameTexCache = new Map<string, THREE.CanvasTexture>();
-
-function fgBuildFlameTex(innerHex: number, outerHex: number): THREE.CanvasTexture {
-  const key = `fg_${innerHex}_${outerHex}`;
-  if (_fgFlameTexCache.has(key)) return _fgFlameTexCache.get(key)!;
+/** White radial gradient — colour applied via SpriteMaterial.color */
+let _fgShapeTex: THREE.CanvasTexture | null = null;
+function fgShape(): THREE.CanvasTexture {
+  if (_fgShapeTex) return _fgShapeTex;
   const S = 128, H = S / 2;
-  const cv = document.createElement('canvas');
-  cv.width = S; cv.height = S;
+  const cv = document.createElement('canvas'); cv.width = S; cv.height = S;
   const ctx = cv.getContext('2d')!;
-  const rgb = (hex: number) => `${(hex >> 16) & 0xff},${(hex >> 8) & 0xff},${hex & 0xff}`;
-  const bri = (c: number) => Math.min(255, Math.round(c + (255 - c) * 0.4));
-  const rr = bri((innerHex >> 16) & 0xff), rgg = bri((innerHex >> 8) & 0xff), rb = bri(innerHex & 0xff);
   const gr = ctx.createRadialGradient(H, H, 0, H, H, H);
-  gr.addColorStop(0.00, `rgba(${rr},${rgg},${rb},1.00)`);
-  gr.addColorStop(0.15, `rgba(${rgb(innerHex)},0.94)`);
-  gr.addColorStop(0.38, `rgba(${rgb(outerHex)},0.78)`);
-  gr.addColorStop(0.62, `rgba(${rgb(outerHex)},0.32)`);
-  gr.addColorStop(0.84, `rgba(${rgb(outerHex)},0.07)`);
-  gr.addColorStop(1.00, `rgba(${rgb(outerHex)},0.00)`);
-  ctx.fillStyle = gr;
-  ctx.fillRect(0, 0, S, S);
-  const tex = new THREE.CanvasTexture(cv);
-  _fgFlameTexCache.set(key, tex);
-  return tex;
+  gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+  gr.addColorStop(0.15, 'rgba(255,255,255,0.94)');
+  gr.addColorStop(0.38, 'rgba(255,255,255,0.78)');
+  gr.addColorStop(0.62, 'rgba(255,255,255,0.32)');
+  gr.addColorStop(0.84, 'rgba(255,255,255,0.07)');
+  gr.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, S, S);
+  _fgShapeTex = new THREE.CanvasTexture(cv);
+  return _fgShapeTex;
 }
 
-function fgSamplePolylineEvenly(
+/** Tiny sharp dot for embers */
+let _fgEmberTex: THREE.CanvasTexture | null = null;
+function fgEmber(): THREE.CanvasTexture {
+  if (_fgEmberTex) return _fgEmberTex;
+  const S = 64, H = S / 2;
+  const cv = document.createElement('canvas'); cv.width = S; cv.height = S;
+  const ctx = cv.getContext('2d')!;
+  const gr = ctx.createRadialGradient(H, H, 0, H, H, H);
+  gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+  gr.addColorStop(0.20, 'rgba(255,255,255,0.90)');
+  gr.addColorStop(0.45, 'rgba(255,255,255,0.50)');
+  gr.addColorStop(0.75, 'rgba(255,255,255,0.12)');
+  gr.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, S, S);
+  _fgEmberTex = new THREE.CanvasTexture(cv);
+  return _fgEmberTex;
+}
+
+// ─── Polyline sampler ──────────────────────────────────────────────────────────
+
+function fgSample(
   pts: { x: number; y: number; z?: number }[],
   spacing: number,
 ): { x: number; y: number; z: number }[] {
   if (pts.length < 2) return [{ x: pts[0].x, y: pts[0].y, z: pts[0].z ?? 0 }];
   const out: { x: number; y: number; z: number }[] = [{ x: pts[0].x, y: pts[0].y, z: pts[0].z ?? 0 }];
-  let accumulated = 0;
+  let acc = 0;
   for (let i = 1; i < pts.length; i++) {
-    const az = pts[i - 1].z ?? 0, bz = pts[i].z ?? 0;
-    const dx = pts[i].x - pts[i - 1].x, dy = pts[i].y - pts[i - 1].y, dz = bz - az;
-    const segLen = Math.sqrt(dx * dx + dy * dy + dz * dz);
-    if (segLen < 1e-6) continue;
-    let d = spacing - accumulated;
-    while (d <= segLen) {
-      const t = d / segLen;
-      out.push({ x: pts[i - 1].x + dx * t, y: pts[i - 1].y + dy * t, z: az + dz * t });
+    const az = pts[i-1].z ?? 0, bz = pts[i].z ?? 0;
+    const dx = pts[i].x-pts[i-1].x, dy = pts[i].y-pts[i-1].y, dz = bz-az;
+    const len = Math.sqrt(dx*dx+dy*dy+dz*dz);
+    if (len < 1e-6) continue;
+    let d = spacing - acc;
+    while (d <= len) {
+      const u = d/len;
+      out.push({ x: pts[i-1].x+dx*u, y: pts[i-1].y+dy*u, z: az+dz*u });
       d += spacing;
     }
-    accumulated = segLen - (d - spacing);
+    acc = len-(d-spacing);
   }
-  out.push({ x: pts[pts.length - 1].x, y: pts[pts.length - 1].y, z: pts[pts.length - 1].z ?? 0 });
+  out.push({ x: pts[pts.length-1].x, y: pts[pts.length-1].y, z: pts[pts.length-1].z ?? 0 });
   return out;
 }
 
-const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
+const h2n = (s: string) => parseInt(s.replace('#',''), 16);
+const n2c = (n: number) => new THREE.Color(((n>>16)&0xff)/255, ((n>>8)&0xff)/255, (n&0xff)/255);
+
+// ─── Seamless-loop LCM helpers ───────────────────────────────────────────
+
+function fGcd(a: number, b: number): number { return b < 1e-6 ? a : fGcd(b, a % b); }
+function fLcm(a: number, b: number): number { return a / fGcd(a, b) * b; }
+
+/** Returns a loop duration that is an integer multiple of every tendril lifespan. */
+function computeLoopDur(fp: FP, maxSecs = 8): number {
+  const speed = Math.max(0.1, fp.speed);
+  const PREC  = 100; // 0.01 s precision
+  let lcmInt  = 1;
+  for (let ti = 0; ti < fp.numTendrils; ti++) {
+    const ss   = ti * 2.399963;
+    const minL = 1.2 / speed, maxL = 3.8 / speed;
+    const life = minL + Math.abs(Math.sin(ss*13.7+0.5)) * (maxL - minL);
+    const intL = Math.max(1, Math.round(life * PREC));
+    lcmInt = Math.round(fLcm(lcmInt, intL));
+    if (lcmInt / PREC > maxSecs) { lcmInt = Math.round(maxSecs * PREC); break; }
+  }
+  return Math.min(lcmInt / PREC, maxSecs);
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,38 +109,58 @@ export interface FlameGeneratorProps {
 }
 
 interface FP {
-  coreColor: string;
-  glowColor: string;
-  height: number;
-  width: number;
-  numTendrils: number;
-  turbulence: number;
-  speed: number;
-  coreWidth: number;
-  coreBlur: number;
-  glowWidth: number;
-  density: number;
-  glowFalloff: number;
+  coreColor:        string;
+  coreColorTop:     string;
+  glowColor:        string;
+  glowColorTop:     string;
+  height:           number;
+  width:            number;
+  numTendrils:      number;
+  turbulence:       number;
+  speed:            number;
+  thermalDraft:     number;
+  coreWidth:        number;
+  coreBlur:         number;
+  glowWidth:        number;
+  density:          number;
+  glowFalloff:      number;
   flickerIntensity: number;
-  flickerType: 'smooth' | 'fractal' | 'turbulent';
+  flickerType:      'smooth' | 'fractal' | 'turbulent';
+  emberCount:       number;
+  emberSize:        number;
 }
 
+interface Preset { name: string; fp: FP; }
+
 const DEFAULT_FP: FP = {
-  coreColor: '#ffff88',
-  glowColor: '#ff3300',
-  height: 80,
-  width: 30,
-  numTendrils: 5,
-  turbulence: 0.55,
-  speed: 1.4,
-  coreWidth: 6,
-  coreBlur: 0.2,
-  glowWidth: 16,
-  density: 1.6,
-  glowFalloff: 1.2,
+  coreColor:        '#ffff88',
+  coreColorTop:     '#ffaa00',
+  glowColor:        '#ff3300',
+  glowColorTop:     '#880000',
+  height:           80,
+  width:            30,
+  numTendrils:      5,
+  turbulence:       0.55,
+  speed:            1.4,
+  thermalDraft:     0.45,
+  coreWidth:        6,
+  coreBlur:         0.2,
+  glowWidth:        16,
+  density:          1.6,
+  glowFalloff:      1.2,
   flickerIntensity: 0.45,
-  flickerType: 'fractal',
+  flickerType:      'fractal',
+  emberCount:       20,
+  emberSize:        4,
 };
+
+const LS_KEY = 'flameGeneratorPresets';
+function loadPresets(): Preset[] {
+  try { return JSON.parse(localStorage.getItem(LS_KEY) ?? '[]'); } catch { return []; }
+}
+function savePresets(p: Preset[]) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(p)); } catch { /* quota */ }
+}
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -113,6 +168,20 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   const [fp, setFp] = useState<FP>(DEFAULT_FP);
   const fpRef = useRef<FP>(fp);
   useEffect(() => { fpRef.current = fp; }, [fp]);
+
+  const [presets,     setPresets]     = useState<Preset[]>(loadPresets);
+  const [presetName,  setPresetName]  = useState('');
+
+  const handleSavePreset = () => {
+    const name = presetName.trim() || `Preset ${presets.length + 1}`;
+    const next = [...presets.filter(p => p.name !== name), { name, fp: { ...fpRef.current } }];
+    setPresets(next); savePresets(next); setPresetName('');
+  };
+  const handleLoadPreset  = (p: Preset) => { setFp({ ...DEFAULT_FP, ...p.fp }); };
+  const handleDeletePreset = (name: string) => {
+    const next = presets.filter(p => p.name !== name);
+    setPresets(next); savePresets(next);
+  };
 
   const [exportRes,    setExportRes]    = useState(256);
   const [exportFrames, setExportFrames] = useState(24);
@@ -183,7 +252,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   }, []);
 
   // ── Sprite-chain builder (flame tendril rendering) ───────────────────────
-  const buildSprites = useCallback((fAnimT: number) => {
+  const buildSprites = useCallback((fAnimT: number, seamless = false) => {
     const g = groupRef.current;
     if (!g) return;
 
@@ -195,39 +264,61 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       g.remove(c);
     }
 
-    const f          = fpRef.current;
-    const flameHeight  = f.height;
-    const flameWidth   = f.width;
-    const numTendrils  = f.numTendrils;
-    const turbulence   = f.turbulence;
-    const speed        = f.speed;
-    const coreW        = Math.max(0.5, f.coreWidth);
-    const glowW        = Math.max(1, f.glowWidth);
-    const densityF     = Math.max(0.5, Math.min(4, f.density));
+    const f             = fpRef.current;
+    const flameHeight   = f.height;
+    const flameWidth    = f.width;
+    const numTendrils   = f.numTendrils;
+    const turbulence    = f.turbulence;
+    const speed         = f.speed;
+    const coreW         = Math.max(0.5, f.coreWidth);
+    const glowW         = Math.max(1, f.glowWidth);
+    const densityF      = Math.max(0.5, Math.min(4, f.density));
     const flickerIntensF = Math.max(0, Math.min(1, f.flickerIntensity));
     const flickerTypeF  = f.flickerType;
     const coreBlurF     = Math.max(0, Math.min(1, f.coreBlur));
     const glowFalloffF  = Math.max(0, f.glowFalloff);
+    const thermalDraft  = Math.max(0, Math.min(1, f.thermalDraft));
+    const emberCount    = Math.max(0, Math.round(f.emberCount));
+    const emberSize     = Math.max(1, f.emberSize);
 
-    const coreNum = hexStrToNum(f.coreColor);
-    const glowNum = hexStrToNum(f.glowColor);
-    const gTexF   = fgBuildFlameTex(coreNum, glowNum);
-    const cTexF   = fgBuildFlameTex(coreNum, coreNum);
+    // Shared white sprite texture (colour applied via mat.color)
+    const shapeTex = fgShape();
+    const emberTex = fgEmber();
 
-    /** Add a sprite chain along `pts` */
-    const addFlameChain = (
+    // Color endpoints
+    const coreColorA = n2c(h2n(f.coreColor));
+    const coreColorB = n2c(h2n(f.coreColorTop));
+    const glowColorA = n2c(h2n(f.glowColor));
+    const glowColorB = n2c(h2n(f.glowColorTop));
+
+    // Inline fbm helper
+    const fbm = (phase: number, octs = 4): number => {
+      let v = 0, a = 1.0, fr = 1.0, nm = 0;
+      if (flickerTypeF === 'smooth') {
+        for (let o = 0; o < octs; o++) { v += a * (0.5 + 0.5 * Math.sin(phase * fr + o * 1.3)); nm += a; fr *= 2.07; a *= 0.5; }
+      } else if (flickerTypeF === 'turbulent') {
+        for (let o = 0; o < octs; o++) { v += a * Math.abs(Math.sin(phase * fr + o * 1.3)); nm += a; fr *= 2.07; a *= 0.5; }
+      } else {
+        for (let o = 0; o < octs; o++) { v += a * (0.5 + 0.5 * Math.sin(phase * fr + o * 1.3)); nm += a; fr *= 2.07; a *= 0.5; }
+      }
+      return v / nm;
+    };
+
+    /** Add a sprite chain along `pts` with vertical color gradient */
+    const addChain = (
       pts:       { x: number; y: number; z?: number }[],
-      tex:       THREE.Texture,
+      colorA:    THREE.Color,
+      colorB:    THREE.Color,
       sprSz:     number,
       opacity:   number,
       zOff:      number,
       noiseSeed: number,
       growFront: number,
     ) => {
-      const spacing   = Math.max(0.2, (sprSz * 0.35) / densityF);
-      const samples   = fgSamplePolylineEvenly(pts, spacing);
-      const N         = samples.length;
-      const baseOpa   = opacity / Math.sqrt(densityF);
+      const spacing = Math.max(0.2, (sprSz * 0.35) / densityF);
+      const samples = fgSample(pts, spacing);
+      const N       = samples.length;
+      const baseOpa = opacity / Math.sqrt(densityF);
 
       samples.forEach((pt, i) => {
         const t         = N > 1 ? i / (N - 1) : 0;
@@ -237,44 +328,17 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
           ? 1.0
           : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
 
-        const phase = noiseSeed + t * 5.1 - fAnimT * speed * 2.3;
-        let noise01: number;
-        if (flickerTypeF === 'smooth') {
-          noise01 = 0.5 + 0.5 * (0.65 * Math.sin(phase) + 0.35 * Math.cos(phase * 1.61 + noiseSeed * 1.4 + t * 3.2));
-        } else if (flickerTypeF === 'turbulent') {
-          let v = 0, a = 1.0, fr = 1.0, nm = 0;
-          for (let oct = 0; oct < 4; oct++) { v += a * Math.abs(Math.sin(phase * fr + oct * 1.3)); nm += a; fr *= 2.07; a *= 0.5; }
-          noise01 = v / nm;
-        } else {
-          let v = 0, a = 1.0, fr = 1.0, nm = 0;
-          for (let oct = 0; oct < 4; oct++) { v += a * (0.5 + 0.5 * Math.sin(phase * fr + oct * 1.3)); nm += a; fr *= 2.07; a *= 0.5; }
-          noise01 = v / nm;
-        }
-        const flicker = (1.0 - flickerIntensF) + flickerIntensF * noise01;
-
-        const sizePhase = noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9;
-        let sizeNoise01: number;
-        if (flickerTypeF === 'smooth') {
-          sizeNoise01 = 0.5 + 0.5 * Math.sin(sizePhase);
-        } else if (flickerTypeF === 'turbulent') {
-          let sv = 0, sa = 1.0, sfr = 1.0, snm = 0;
-          for (let oct = 0; oct < 3; oct++) { sv += sa * Math.abs(Math.sin(sizePhase * sfr + oct * 2.1)); snm += sa; sfr *= 2.07; sa *= 0.5; }
-          sizeNoise01 = sv / snm;
-        } else {
-          let sv = 0, sa = 1.0, sfr = 1.0, snm = 0;
-          for (let oct = 0; oct < 3; oct++) { sv += sa * (0.5 + 0.5 * Math.sin(sizePhase * sfr + oct * 2.1)); snm += sa; sfr *= 2.07; sa *= 0.5; }
-          sizeNoise01 = sv / snm;
-        }
-        const sizeScale = 1.0 + turbulence * (sizeNoise01 * 2.0 - 1.0) * 0.45;
+        const flicker   = (1.0 - flickerIntensF) + flickerIntensF * fbm(noiseSeed + t * 5.1 - fAnimT * speed * 2.3);
+        const sizeScale = 1.0 + turbulence * (fbm(noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9, 3) * 2.0 - 1.0) * 0.45;
         const vertGrad  = glowFalloffF > 0 ? Math.pow(Math.max(0, 1.0 - t), glowFalloffF) : 1.0;
 
         const mat = new THREE.SpriteMaterial({
-          map: tex, transparent: true,
+          map: shapeTex, transparent: true,
           opacity:  Math.max(0, baseOpa * taper * flicker * growMask * vertGrad),
           blending: THREE.AdditiveBlending,
-          depthTest:  false,
-          depthWrite: false,
+          depthTest: false, depthWrite: false,
         });
+        mat.color.lerpColors(colorA, colorB, t);
         const sp = new THREE.Sprite(mat);
         sp.position.set(pt.x, pt.y, (pt.z ?? 0) + zOff);
         sp.scale.set(sprSz * taper * sizeScale, sprSz * taper * sizeScale, 1);
@@ -284,15 +348,15 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
 
     const FLAME_PTS = 10;
     for (let ti = 0; ti < numTendrils; ti++) {
-      const slotSeed   = ti * 2.399963;
-      const minLife    = 1.2 / Math.max(0.1, speed);
-      const maxLife    = 3.8 / Math.max(0.1, speed);
-      const pr1        = Math.abs(Math.sin(slotSeed * 13.7 + 0.5));
-      const lifespan   = minLife + pr1 * (maxLife - minLife);
+      const slotSeed    = ti * 2.399963;
+      const minLife     = 1.2 / Math.max(0.1, speed);
+      const maxLife     = 3.8 / Math.max(0.1, speed);
+      const pr1         = Math.abs(Math.sin(slotSeed * 13.7 + 0.5));
+      const lifespan    = minLife + pr1 * (maxLife - minLife);
       const birthOffset = Math.abs(Math.sin(slotSeed * 7.3 + 1.1)) * lifespan;
-      const age01      = ((fAnimT + birthOffset) % lifespan) / lifespan;
+      const age01       = ((fAnimT + birthOffset) % lifespan) / lifespan;
 
-      const FADE_IN    = 0.30;
+      const FADE_IN = 0.30;
       let lifeFade: number, growFront: number;
       if (age01 < FADE_IN) {
         growFront = age01 / FADE_IN; lifeFade = 1.0;
@@ -303,41 +367,84 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       }
       lifeFade = Math.max(0, lifeFade);
 
-      const DETACH_START = 0.65;
-      const detachT    = age01 < DETACH_START ? 0 : (age01 - DETACH_START) / (1.0 - DETACH_START);
-      const riseOffset = Math.pow(detachT, 1.3) * flameHeight * 0.55;
-      const ageScale   = 1.0 - detachT * 0.70;
-      const deformMul  = 1.0 + detachT * 2.2;
-      const baseWidthMul = Math.max(0.05, 1.0 - detachT * 0.9);
-      const activeHeight = flameHeight * ageScale * (0.75 + 0.25 * lifeFade);
-      const tendrilSeed  = slotSeed + Math.floor((fAnimT + birthOffset) / lifespan) * 1.618;
-      const spreadAngle  = (numTendrils > 1 ? ti / (numTendrils - 1) : 0.5) * Math.PI * 2
-                         + Math.floor((fAnimT + birthOffset) / lifespan) * 0.97;
-      const baseR      = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0);
-      const baseOffX   = Math.cos(spreadAngle + slotSeed) * baseR;
-      const baseOffZ   = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
+      const DETACH_START  = 0.65;
+      const detachT       = age01 < DETACH_START ? 0 : (age01 - DETACH_START) / (1.0 - DETACH_START);
+      const riseOffset    = Math.pow(detachT, 1.3) * flameHeight * 0.55;
+      const ageScale      = 1.0 - detachT * 0.70;
+      const deformMul     = 1.0 + detachT * 2.2;
+      const baseWidthMul  = Math.max(0.05, 1.0 - detachT * 0.9);
+      const cycleIdx      = Math.floor((fAnimT + birthOffset) / lifespan);
+      const tendrilSeed   = seamless ? slotSeed : slotSeed + cycleIdx * 1.618;
+      const spreadAngle   = (numTendrils > 1 ? ti / (numTendrils - 1) : 0.5) * Math.PI * 2
+                          + (seamless ? 0 : cycleIdx * 0.97);
+
+      // Thermal draft: centre tendrils rise higher + are narrower at base
+      const axisProx      = 1.0 - Math.abs(Math.sin(slotSeed * 5.7));           // 0=outer, 1=centre
+      const thermalMul    = 1.0 + thermalDraft * axisProx * 0.7;
+      // Per-tendril turbulent height variation via fbm
+      const hNoise        = fbm(slotSeed * 4.1 - fAnimT * speed * 0.25);
+      const heightMul     = thermalMul * (1.0 + turbulence * (hNoise * 2.0 - 1.0) * 0.35);
+      const activeHeight  = flameHeight * ageScale * (0.75 + 0.25 * lifeFade) * heightMul;
+      // Outer ring radius, thermal centre tendrils sit closer to axis
+      const baseR         = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0)
+                          * (1.0 - thermalDraft * axisProx * 0.5);
+      const baseOffX      = Math.cos(spreadAngle + slotSeed) * baseR;
+      const baseOffZ      = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
 
       const pts: { x: number; y: number; z: number }[] = [];
       for (let pi = 0; pi < FLAME_PTS; pi++) {
-        const yNorm    = pi / (FLAME_PTS - 1);
-        const y        = riseOffset + yNorm * activeHeight;
-        const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5 * ageScale * baseWidthMul;
+        const yNorm      = pi / (FLAME_PTS - 1);
+        const y          = riseOffset + yNorm * activeHeight;
+        const widthEnv   = Math.pow(yNorm, 0.65) * flameWidth * 0.5 * ageScale * baseWidthMul;
         const baseSpread = (1.0 - yNorm) * baseWidthMul;
-        const noiseT   = tendrilSeed + yNorm * 3.0 - fAnimT * speed;
+        const noiseT     = tendrilSeed + yNorm * 3.0 - fAnimT * speed;
         const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)      * 1.0
                   + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7) * 0.4) * turbulence * widthEnv * deformMul;
         const dz = Math.cos(noiseT * 0.9 + tendrilSeed * 2.3) * turbulence * widthEnv * 0.6 * deformMul;
         pts.push({ x: baseOffX * baseSpread + dx, y, z: baseOffZ * baseSpread + dz });
       }
 
-      const haloD          = glowW * 4.0 * ageScale;
-      const glowD          = glowW * 2.0 * ageScale;
+      const haloD           = glowW * 4.0 * ageScale;
+      const glowD           = glowW * 2.0 * ageScale;
       const coreBlurSizeMul = 1.0 + coreBlurF * 2.6;
       const coreBlurOpaMul  = 1.0 / Math.sqrt(coreBlurSizeMul);
-      const coreD          = coreW * 2.2 * coreBlurSizeMul * ageScale;
-      addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
-      addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
-      addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade * coreBlurOpaMul, 0.1, tendrilSeed + 2.2, growFront);
+      const coreD           = coreW * 2.2 * coreBlurSizeMul * ageScale;
+      addChain(pts, glowColorA, glowColorB, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
+      addChain(pts, glowColorA, glowColorB, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
+      addChain(pts, coreColorA, coreColorB, coreD, 0.60 * lifeFade * coreBlurOpaMul, 0.1, tendrilSeed + 2.2, growFront);
+    }
+
+    // ── Embers ──────────────────────────────────────────────────────────────
+    const emberLife  = 2.5 / Math.max(0.1, speed);
+    const emberC1    = n2c(h2n(f.coreColor));
+    const emberC2    = n2c(h2n(f.glowColorTop));
+    for (let ei = 0; ei < emberCount; ei++) {
+      const eseed      = ei * 3.7 + 0.31;
+      const eBirth     = Math.abs(Math.sin(eseed * 7.3)) * emberLife;
+      const eAge01     = seamless
+        ? ((fAnimT + eBirth) % emberLife) / emberLife
+        : ((fAnimT + eBirth) % emberLife) / emberLife;
+      const startX     = Math.sin(eseed * 5.1) * flameWidth * 0.35;
+      const startZ     = Math.cos(eseed * 3.1) * flameWidth * 0.2;
+      const noiseT     = eseed + eAge01 * 3.0 - fAnimT * speed;
+      const driftX     = (Math.sin(noiseT * 1.3) * 0.6 + Math.cos(noiseT * 2.1 + eseed) * 0.4)
+                       * turbulence * flameWidth * 0.4 * eAge01;
+      const eX         = startX + driftX;
+      const eY         = flameHeight * (0.20 + eAge01 * 1.70);
+      const eZ         = startZ;
+      const eOpa       = eAge01 < 0.1 ? eAge01 / 0.1 : eAge01 > 0.8 ? (1.0 - eAge01) / 0.2 : 1.0;
+      const eSz        = emberSize * (1.0 - eAge01 * 0.5);
+      const eMat       = new THREE.SpriteMaterial({
+        map: emberTex, transparent: true,
+        opacity:  Math.max(0, eOpa * 0.85),
+        blending: THREE.AdditiveBlending,
+        depthTest: false, depthWrite: false,
+      });
+      eMat.color.lerpColors(emberC1, emberC2, eAge01);
+      const esp = new THREE.Sprite(eMat);
+      esp.position.set(eX, eY, eZ);
+      esp.scale.set(eSz, eSz, 1);
+      g.add(esp);
     }
   }, []);
 
@@ -393,10 +500,8 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       magFilter: THREE.LinearFilter,
     });
 
-    // Loop duration: 2× average lifespan at current speed (good coverage of all tendril phases)
-    const speed     = Math.max(0.1, f.speed);
-    const avgLife   = (1.2 + 3.8) / 2 / speed; // average life in seconds
-    const loopDur   = avgLife * 2.0;
+    // Loop duration: LCM of all tendril lifespans → perfect seamless loop
+    const loopDur = computeLoopDur(f);
 
     const urls: string[] = [];
     const pixels   = new Uint8Array(res * res * 4);
@@ -406,7 +511,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
 
     for (let fi = 0; fi < numFrames; fi++) {
       const t = loopDur * (fi / Math.max(1, numFrames));
-      buildSprites(t);
+      buildSprites(t, true /* seamless */);
       renderer.setRenderTarget(rt);
       renderer.setClearColor(0x000000, 1);
       renderer.clear();
@@ -524,17 +629,60 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       {/* ── Left: properties panel ─────────────────────────────────────── */}
       <div style={{ width: '230px', flexShrink: 0, overflowY: 'auto', padding: '10px 12px', borderRight: '1px solid #2a3450', background: '#141a28' }}>
 
+        {/* Presets */}
+        <div style={S.sec}>Presets</div>
+        <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+          <input
+            type="text"
+            placeholder="preset name…"
+            value={presetName}
+            onChange={e => setPresetName(e.target.value)}
+            style={{ flex: 1, background: '#1e2840', border: '1px solid #3b455c', color: '#c8d0e0',
+                     borderRadius: '4px', padding: '3px 6px', fontSize: '0.72rem' }}
+          />
+          <button type="button" onClick={handleSavePreset} style={S.btn('#4f6ef7')}>Save</button>
+        </div>
+        {presets.length > 0 && (
+          <div style={{ marginBottom: '8px' }}>
+            {presets.map(p => (
+              <div key={p.name} style={{ display: 'flex', alignItems: 'center', gap: '4px', marginBottom: '3px' }}>
+                <button type="button" onClick={() => handleLoadPreset(p)}
+                  style={{ flex: 1, background: '#1e2840', border: '1px solid #3b455c', color: '#c8d0e0',
+                           borderRadius: '4px', padding: '2px 6px', fontSize: '0.72rem', cursor: 'pointer',
+                           textAlign: 'left', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>
+                  {p.name}
+                </button>
+                <button type="button" onClick={() => handleDeletePreset(p.name)}
+                  style={{ background: '#3b2020', border: 'none', color: '#aa5555', borderRadius: '4px',
+                           padding: '2px 5px', fontSize: '0.72rem', cursor: 'pointer' }}>
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Colors */}
         <div style={S.sec}>Colors</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
           <div>
-            <label style={S.label}>Core</label>
+            <label style={S.label}>Core Base</label>
             <input type="color" value={fp.coreColor} onChange={e => upd('coreColor', e.target.value)}
               style={{ width: '100%', height: '28px', border: '1px solid #3b455c', borderRadius: '4px', cursor: 'pointer', background: 'none' }} />
           </div>
           <div>
-            <label style={S.label}>Glow / Outer</label>
+            <label style={S.label}>Core Tip</label>
+            <input type="color" value={fp.coreColorTop} onChange={e => upd('coreColorTop', e.target.value)}
+              style={{ width: '100%', height: '28px', border: '1px solid #3b455c', borderRadius: '4px', cursor: 'pointer', background: 'none' }} />
+          </div>
+          <div>
+            <label style={S.label}>Glow Base</label>
             <input type="color" value={fp.glowColor} onChange={e => upd('glowColor', e.target.value)}
+              style={{ width: '100%', height: '28px', border: '1px solid #3b455c', borderRadius: '4px', cursor: 'pointer', background: 'none' }} />
+          </div>
+          <div>
+            <label style={S.label}>Glow Tip</label>
+            <input type="color" value={fp.glowColorTop} onChange={e => upd('glowColorTop', e.target.value)}
               style={{ width: '100%', height: '28px', border: '1px solid #3b455c', borderRadius: '4px', cursor: 'pointer', background: 'none' }} />
           </div>
         </div>
@@ -549,6 +697,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         <div style={S.sec}>Motion</div>
         <div style={S.row}>{lbl('Speed', fp.speed.toFixed(2))}<input type="range" style={S.input} min={0.1} max={5} step={0.05} value={fp.speed}      onChange={e => upd('speed',      Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Turbulence', fp.turbulence.toFixed(2))}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.turbulence} onChange={e => upd('turbulence', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Thermal Draft', fp.thermalDraft.toFixed(2))}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.thermalDraft} onChange={e => upd('thermalDraft', Number(e.target.value))} /></div>
 
         {/* Flicker */}
         <div style={S.sec}>Flicker</div>
@@ -571,13 +720,22 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         <div style={S.row}>{lbl('Vertical Falloff', fp.glowFalloff.toFixed(2))}<input type="range" style={S.input} min={0} max={4} step={0.05} value={fp.glowFalloff} onChange={e => upd('glowFalloff', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Density', fp.density.toFixed(1))}<input type="range" style={S.input} min={0.5} max={4} step={0.1} value={fp.density} onChange={e => upd('density', Number(e.target.value))} /></div>
 
+        {/* Embers */}
+        <div style={S.sec}>Embers</div>
+        <div style={S.row}>{lbl('Count', fp.emberCount)}<input type="range" style={S.input} min={0} max={80} step={1} value={fp.emberCount} onChange={e => upd('emberCount', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Size', fp.emberSize)}<input type="range" style={S.input} min={1} max={20} step={0.5} value={fp.emberSize} onChange={e => upd('emberSize', Number(e.target.value))} /></div>
+
         {/* Export settings */}
         <div style={S.sec}>Export</div>
+        <div style={{ fontSize: '0.68rem', color: '#4a5880', marginBottom: '6px' }}>
+          Loop: <strong style={{ color: '#7a90c0' }}>{computeLoopDur(fp).toFixed(2)} s</strong>
+          &nbsp;({exportFrames} frames @ {exportFps} fps)
+        </div>
         <div style={S.row}>
           <label style={S.label}>Resolution</label>
           <select value={exportRes} onChange={e => setExportRes(Number(e.target.value))}
             style={{ width: '100%', background: '#1e2840', border: '1px solid #3b455c', color: '#c8d0e0', borderRadius: '4px', padding: '3px 6px', fontSize: '0.74rem' }}>
-            <option value={128}>128 ×128</option>
+            <option value={128}>128 × 128</option>
             <option value={256}>256 × 256</option>
             <option value={512}>512 × 512</option>
           </select>
