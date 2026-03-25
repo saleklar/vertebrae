@@ -192,6 +192,29 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   const [exportProg,     setExportProg]     = useState(0); // 0-100
   const [flameMatteChoke, setFlameMatteChoke] = useState(0); // -50…+50
 
+  // Convert a black-background additive-blend render to transparent PNG by deriving alpha from luminance
+  const deriveAlphaFromLuma = (url: string): Promise<string> =>
+    new Promise<string>(resolve => {
+      const img = new Image();
+      img.onload = () => {
+        const cv = document.createElement('canvas');
+        cv.width = img.width; cv.height = img.height;
+        const ctx = cv.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const W = cv.width, H = cv.height;
+        const iData = ctx.getImageData(0, 0, W, H);
+        const d = iData.data;
+        for (let i = 0; i < W * H; i++) {
+          const r = d[i*4], g = d[i*4+1], b = d[i*4+2];
+          // Perceptual luminance used as alpha
+          d[i*4+3] = Math.round(0.299*r + 0.587*g + 0.114*b);
+        }
+        ctx.putImageData(iData, 0, 0);
+        resolve(cv.toDataURL('image/png'));
+      };
+      img.src = url;
+    });
+
   // Apply morphological alpha erosion (choke<0) or dilation (spread>0) to a PNG data URL
   const applyMatteChoke = (url: string, choke: number): Promise<string> =>
     new Promise<string>(resolve => {
@@ -797,7 +820,8 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                 <button type="button" disabled={isExporting} onClick={async () => {
                   setIsExporting(true);
                   const urls = await renderFrames(1, exportRes, p => setExportProg(p));
-                  const url = urls[0] ? await applyMatteChoke(urls[0], flameMatteChoke) : '';
+                  let url = urls[0] ? await deriveAlphaFromLuma(urls[0]) : '';
+                  if (url) url = await applyMatteChoke(url, flameMatteChoke);
                   setIsExporting(false);
                   if (url) onSendToShape(url);
                 }} style={{ ...S.btn('#5a3fc0'), opacity: isExporting ? 0.5 : 1 }}>
@@ -808,7 +832,8 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                 <button type="button" disabled={isExporting} onClick={async () => {
                   setIsExporting(true);
                   const urls = await renderFrames(1, exportRes, p => setExportProg(p));
-                  const url = urls[0] ? await applyMatteChoke(urls[0], flameMatteChoke) : '';
+                  let url = urls[0] ? await deriveAlphaFromLuma(urls[0]) : '';
+                  if (url) url = await applyMatteChoke(url, flameMatteChoke);
                   setIsExporting(false);
                   if (url) onSendToPaint(url);
                 }} style={{ ...S.btn('#3a7fd4'), opacity: isExporting ? 0.5 : 1 }}>
