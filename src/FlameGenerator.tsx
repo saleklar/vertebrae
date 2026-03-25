@@ -191,6 +191,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   const [isExporting,    setIsExporting]    = useState(false);
   const [exportProg,     setExportProg]     = useState(0); // 0-100
   const [flameMatteChoke, setFlameMatteChoke] = useState(0); // -50…+50
+  const [flameEdgeEnhance, setFlameEdgeEnhance] = useState(0); // 0–100
   const [bgColor,        setBgColor]        = useState('#080808');
   const bgColorRef = useRef('#080808');
   useEffect(() => {
@@ -257,6 +258,40 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
               val = isChoke ? Math.min(val, tmp[ny * W + x]) : Math.max(val, tmp[ny * W + x]);
             }
             d[(y * W + x) * 4 + 3] = val;
+          }
+        }
+        ctx.putImageData(iData, 0, 0);
+        resolve(cv.toDataURL('image/png'));
+      };
+      img.src = url;
+    });
+
+  // Apply Laplacian edge sharpening to a PNG data URL
+  const applyEdgeEnhance = (url: string, strength100: number): Promise<string> =>
+    new Promise<string>(resolve => {
+      if (strength100 === 0) { resolve(url); return; }
+      const img = new Image();
+      img.onload = () => {
+        const cv = document.createElement('canvas');
+        cv.width = img.width; cv.height = img.height;
+        const ctx = cv.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const W = cv.width, H = cv.height;
+        const iData = ctx.getImageData(0, 0, W, H);
+        const src = new Uint8ClampedArray(iData.data);
+        const d   = iData.data;
+        const str = (strength100 / 100) * 3.5;
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const c  = (y * W + x) * 4;
+            const l  = (y * W + Math.max(0, x-1)) * 4;
+            const r  = (y * W + Math.min(W-1, x+1)) * 4;
+            const u  = (Math.max(0, y-1) * W + x) * 4;
+            const dn = (Math.min(H-1, y+1) * W + x) * 4;
+            for (let ch = 0; ch < 3; ch++) {
+              const lap = 4*src[c+ch] - src[l+ch] - src[r+ch] - src[u+ch] - src[dn+ch];
+              d[c+ch] = Math.max(0, Math.min(255, src[c+ch] + Math.round(str * lap)));
+            }
           }
         }
         ctx.putImageData(iData, 0, 0);
@@ -827,12 +862,22 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                 <input type="range" min={-50} max={50} step={1} value={flameMatteChoke} style={{ width: '100%' }}
                   onChange={e => setFlameMatteChoke(Number(e.target.value))} />
               </div>
+              {/* Edge Enhance pre-process */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                  <span style={{ color: '#8a93a2' }}>Edge Enhance</span>
+                  <span style={{ color: '#c8d0e0' }}>{flameEdgeEnhance}%</span>
+                </div>
+                <input type="range" min={0} max={100} step={1} value={flameEdgeEnhance} style={{ width: '100%' }}
+                  onChange={e => setFlameEdgeEnhance(Number(e.target.value))} />
+              </div>
               {onSendToShape && (
                 <button type="button" disabled={isExporting} onClick={async () => {
                   setIsExporting(true);
                   const urls = await renderFrames(1, exportRes, p => setExportProg(p));
                   let url = urls[0] ? await deriveAlphaFromLuma(urls[0]) : '';
                   if (url) url = await applyMatteChoke(url, flameMatteChoke);
+                  if (url) url = await applyEdgeEnhance(url, flameEdgeEnhance);
                   setIsExporting(false);
                   if (url) onSendToShape(url);
                 }} style={{ ...S.btn('#5a3fc0'), opacity: isExporting ? 0.5 : 1 }}>
@@ -845,6 +890,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                   const urls = await renderFrames(1, exportRes, p => setExportProg(p));
                   let url = urls[0] ? await deriveAlphaFromLuma(urls[0]) : '';
                   if (url) url = await applyMatteChoke(url, flameMatteChoke);
+                  if (url) url = await applyEdgeEnhance(url, flameEdgeEnhance);
                   setIsExporting(false);
                   if (url) onSendToPaint(url);
                 }} style={{ ...S.btn('#3a7fd4'), opacity: isExporting ? 0.5 : 1 }}>
