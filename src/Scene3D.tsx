@@ -5246,6 +5246,8 @@ const timelineOutRef = useRef(timelineOut);
           const flickerTypeF   = (fp.flickerType ?? 'fractal') as 'smooth' | 'fractal' | 'turbulent';
           // coreBlur 0=tight sharp core, 1=wide diffuse bloom
           const coreBlurF      = Math.max(0, Math.min(1, fp.coreBlur ?? 0.2));
+          // glowFalloff: vertical opacity gradient — 0=flat, higher=more concentrated at base
+          const glowFalloffF   = Math.max(0, fp.glowFalloff ?? 1.2);
 
           const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
           const coreNum = hexStrToNum(coreHexF);
@@ -5332,10 +5334,12 @@ const timelineOutRef = useRef(timelineOut);
               }
               // turbulence controls how much the width can swell/shrink (0 = fixed, 1 = ±45%)
               const sizeScale = 1.0 + turbulence * (sizeNoise01 * 2.0 - 1.0) * 0.45;
+              // Vertical gradient: pow(1-t, falloff) → full brightness at base (t=0), dims toward tip
+              const vertGrad = glowFalloffF > 0 ? Math.pow(Math.max(0, 1.0 - t), glowFalloffF) : 1.0;
               const mat = new THREE.SpriteMaterial({
                 map:         tex,
                 transparent: true,
-                opacity:     Math.max(0, baseOpacity * taper * flicker * growMask),
+                opacity:     Math.max(0, baseOpacity * taper * flicker * growMask * vertGrad),
                 blending:    THREE.AdditiveBlending,
                 depthTest:   occludeF,
                 depthWrite:  false,
