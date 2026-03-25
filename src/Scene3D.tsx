@@ -5334,20 +5334,22 @@ const timelineOutRef = useRef(timelineOut);
             else                     lifeFade = 1.0 - (age01 - 0.75) / 0.25; // 1→0 fade-out
             lifeFade = Math.max(0, lifeFade);
 
-            // The whole tendril drifts upward as it ages — accelerating rise
-            // At birth base = fBase.y; at death it has risen ~55% of flameHeight
-            const riseOffset = Math.pow(age01, 1.3) * flameHeight * 0.55;
+            // Lifecycle: rooted phase (age 0→DETACH) stays anchored at base,
+            // detach phase (age DETACH→1) drifts upward and deforms.
+            const DETACH_START = 0.65;
+            const detachT = age01 < DETACH_START
+              ? 0
+              : (age01 - DETACH_START) / (1.0 - DETACH_START); // 0→1 after detach moment
 
-            // Overall size shrinks as it drifts (1.0 at birth → 0.3 at death)
-            const ageScale = 1.0 - age01 * 0.70;
+            // Only drifts upward after detaching — accelerating rise
+            const riseOffset = Math.pow(detachT, 1.3) * flameHeight * 0.55;
 
-            // Deformation grows as tendril detaches (age01=0 → normal, age01=1 → 3× wilder)
-            const deformMul = 1.0 + age01 * 2.2;
+            // Overall size, deformation, base thinning only apply after detach
+            const ageScale     = 1.0 - detachT * 0.70;
+            const deformMul    = 1.0 + detachT * 2.2;
+            const baseWidthMul = Math.max(0.05, 1.0 - detachT * 0.9);
 
-            // Base footprint thins as it rises (1.0 at birth → 0.1 at death)
-            const baseWidthMul = Math.max(0.05, 1.0 - age01 * 0.9);
-
-            // Height also shrinks with ageScale
+            // Height also shrinks after detach
             const activeHeight = flameHeight * ageScale * (0.75 + 0.25 * lifeFade);
 
             // The actual noise seed varies per life cycle so each new tendril wiggles differently
