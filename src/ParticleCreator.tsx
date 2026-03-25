@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CustomParticlePainter } from './CustomParticlePainter';
 import { FireGenerator } from './FireGenerator';
+import { FlameGenerator } from './FlameGenerator';
 import * as THREE from 'three';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -1029,7 +1030,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
   const [anim,         setAnim        ] = useState<AnimConfig>(defaultAnim);
   const [previewFrame, setPreviewFrame] = useState(0);
   const [playing,      setPlaying     ] = useState(false);
-  const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint' | 'fire'>('shape');
+  const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint' | 'fire' | 'flame'>('shape');
   const painterGetUrlRef = useRef<(() => string) | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1283,10 +1284,10 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
 
           {/* Mode tabs */}
           <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid #3b455c' }}>
-            {(['shape', 'paint', 'fire'] as const).map(m => (
+            {(['shape', 'paint', 'fire', 'flame'] as const).map(m => (
               <button key={m} type="button" onClick={() => setCreatorMode(m)}
                 style={{ flex: 1, background: creatorMode === m ? '#252f45' : 'transparent', border: 'none', borderBottom: creatorMode === m ? '2px solid #4f6ef7' : '2px solid transparent', color: creatorMode === m ? '#c8d0e0' : '#5a6a82', padding: '6px 0', cursor: 'pointer', fontSize: '0.75rem', textTransform: 'uppercase' }}>
-                {m === 'shape' ? '✨ Shape Designer' : m === 'paint' ? '🎨 Paint' : '🔥 Fire Generator'}
+                {m === 'shape' ? '✨ Shape' : m === 'paint' ? '🎨 Paint' : m === 'fire' ? '🔥 Fire' : '🕯 Flame'}
               </button>
             ))}
           </div>
@@ -1626,6 +1627,19 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 }}
                 onExportToParticleSystem={(urls, fps) => {
                   onExportSequence(urls, 'fire', fps);
+                }}
+              />
+            </div>
+          )}
+
+          {creatorMode === 'flame' && (
+            <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: '300px' }}>
+              <FlameGenerator
+                onAttachToEmitter={(urls) => {
+                  onExportSequence(urls, 'flame', 24);
+                }}
+                onExportToParticleSystem={(urls, fps) => {
+                  onExportSequence(urls, 'flame', fps);
                 }}
               />
             </div>
