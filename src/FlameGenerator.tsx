@@ -123,6 +123,7 @@ interface FP {
   thermalDraft:     number;
   coreWidth:        number;
   coreBlur:         number;
+  coreWidthNoise:   number;  // 0 = steady core, >1 = wild fractal width variation
   glowWidth:        number;
   density:          number;
   glowFalloff:      number;
@@ -147,6 +148,7 @@ const DEFAULT_FP: FP = {
   thermalDraft:     0.45,
   coreWidth:        6,
   coreBlur:         0.2,
+  coreWidthNoise:   0.45,
   glowWidth:        16,
   density:          1.6,
   glowFalloff:      1.2,
@@ -430,6 +432,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       zOff:      number,
       noiseSeed: number,
       growFront: number,
+      sizeNoiseMul = 0.45,
     ) => {
       const spacing = Math.max(0.2, (sprSz * 0.35) / densityF);
       const samples = fgSample(pts, spacing);
@@ -445,7 +448,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
           : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
 
         const flicker   = (1.0 - flickerIntensF) + flickerIntensF * fbm(noiseSeed + t * 5.1 - fAnimT * speed * 2.3);
-        const sizeScale = 1.0 + turbulence * (fbm(noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9, 3) * 2.0 - 1.0) * 0.45;
+        const sizeScale = 1.0 + turbulence * (fbm(noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9, 3) * 2.0 - 1.0) * sizeNoiseMul;
         const vertGrad  = glowFalloffF > 0 ? Math.pow(Math.max(0, 1.0 - t), glowFalloffF) : 1.0;
 
         const mat = new THREE.SpriteMaterial({
@@ -531,9 +534,10 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       const coreBlurSizeMul = 1.0 + coreBlurF * 2.6;
       const coreBlurOpaMul  = 1.0 / Math.sqrt(coreBlurSizeMul);
       const coreD           = coreW * 2.2 * coreBlurSizeMul * ageScale;
+      const coreWidthNoiseF = Math.max(0, f.coreWidthNoise);
       addChain(pts, glowColorA, glowColorB, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
       addChain(pts, glowColorA, glowColorB, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
-      addChain(pts, coreColorA, coreColorB, coreD, 0.60 * lifeFade * coreBlurOpaMul, 0.1, tendrilSeed + 2.2, growFront);
+      addChain(pts, coreColorA, coreColorB, coreD, 0.60 * lifeFade * coreBlurOpaMul, 0.1, tendrilSeed + 2.2, growFront, coreWidthNoiseF);
     }
 
     // ── Embers ──────────────────────────────────────────────────────────────
@@ -844,6 +848,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         <div style={S.sec}>Glow</div>
         <div style={S.row}>{lbl('Core Width', fp.coreWidth)}<input  type="range" style={S.input} min={1}  max={30} step={0.5}  value={fp.coreWidth}   onChange={e => upd('coreWidth',   Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Core Blur', `${(fp.coreBlur * 100).toFixed(0)}%`)}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.coreBlur} onChange={e => upd('coreBlur', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Core Width Noise', fp.coreWidthNoise.toFixed(2))}<input type="range" style={S.input} min={0} max={3} step={0.05} value={fp.coreWidthNoise} onChange={e => upd('coreWidthNoise', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Glow Width', fp.glowWidth)}<input  type="range" style={S.input} min={2}  max={60} step={1}    value={fp.glowWidth}   onChange={e => upd('glowWidth',   Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Vertical Falloff', fp.glowFalloff.toFixed(2))}<input type="range" style={S.input} min={0} max={4} step={0.05} value={fp.glowFalloff} onChange={e => upd('glowFalloff', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Density', fp.density.toFixed(1))}<input type="range" style={S.input} min={0.5} max={4} step={0.1} value={fp.density} onChange={e => upd('density', Number(e.target.value))} /></div>
