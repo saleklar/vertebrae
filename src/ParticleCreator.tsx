@@ -71,6 +71,8 @@ export type ParticleLayer = {
   edgeGlowWidth: number; // 0.5–6 blur radius relative to shape size
   // Matte Choker
   matteChoke: number;    // –50 (choke/shrink alpha) … 0 … +50 (spread/grow alpha)
+  // Edge Enhance
+  edgeEnhance: number;  // 0–100 Laplacian edge sharpen
 };
 
 export type AnimConfig = {
@@ -110,6 +112,7 @@ export const defaultLayer = (type: ShapeType): ParticleLayer => ({
   metalSheen: 0,
   edgeGlow: 0, edgeGlowColor: '#ffffff', edgeGlowWidth: 1.5,
   matteChoke: 0,
+  edgeEnhance: 0,
 });
 
 const defaultAnim = (): AnimConfig => ({ type: 'none', frames: 8, fps: 12 });
@@ -975,6 +978,30 @@ function applyLayerPost(
     }
     ctx.putImageData(iData, 0, 0);
   }
+
+  // Edge Enhance — Laplacian sharpening: detect edges and add back at `strength`
+  if (layer.edgeEnhance > 0) {
+    const strength = (layer.edgeEnhance / 100) * 3.5;
+    const iData = ctx.getImageData(0, 0, size, size);
+    const src   = new Uint8ClampedArray(iData.data);
+    const d     = iData.data;
+    const W = size, H = size;
+    // Laplacian kernel: [0,-1,0 / -1,4,-1 / 0,-1,0]
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const c  = (y * W + x) * 4;
+        const l  = (y * W + Math.max(0, x-1)) * 4;
+        const r  = (y * W + Math.min(W-1, x+1)) * 4;
+        const u  = (Math.max(0, y-1) * W + x) * 4;
+        const dn = (Math.min(H-1, y+1) * W + x) * 4;
+        for (let ch = 0; ch < 3; ch++) {
+          const lap = 4*src[c+ch] - src[l+ch] - src[r+ch] - src[u+ch] - src[dn+ch];
+          d[c+ch] = Math.max(0, Math.min(255, src[c+ch] + Math.round(strength * lap)));
+        }
+      }
+    }
+    ctx.putImageData(iData, 0, 0);
+  }
 }
 
 // Render all layers + effects for one animation frame
@@ -1442,6 +1469,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 {numSlider('brightness',      0,  600,   1, 'Brightness',                v => `${v}%`)}
                 {numSlider('hueShift',        0,  360,   1, 'Hue Shift',                 v => `${v.toFixed(0)}°`)}
                 {numSlider('filterThreshold', 0,  100,   1, 'Threshold — cut dim pixels', v => `${v}%`)}
+                {numSlider('edgeEnhance',     0,  100,   1, 'Edge Enhance',              v => `${v}%`)}
               </>)}
 
               {sec('Matte Choker', false, <>
