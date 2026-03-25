@@ -193,7 +193,8 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   const [isExporting,    setIsExporting]    = useState(false);
   const [exportProg,     setExportProg]     = useState(0); // 0-100
   const [flameMatteChoke, setFlameMatteChoke] = useState(0); // -50…+50
-  const [flameEdgeEnhance, setFlameEdgeEnhance] = useState(0); // 0–100
+  const [flameEdgeEnhance,    setFlameEdgeEnhance]    = useState(0); // 0–100
+  const [flameFractalDistort, setFlameFractalDistort] = useState(0); // 0–100
   const [bgColor,        setBgColor]        = useState('#080808');
   const bgColorRef = useRef('#080808');
   useEffect(() => {
@@ -303,6 +304,60 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         }
         ctxA.putImageData(out, 0, 0);
         resolve(cvA.toDataURL('image/png'));
+      };
+      img.src = url;
+    });
+
+  // Fractal distort: domain-warp using multi-octave sine fBm, bilinear sampled
+  const applyFractalDistort = (url: string, strength100: number): Promise<string> =>
+    new Promise<string>(resolve => {
+      if (strength100 === 0) { resolve(url); return; }
+      const img = new Image();
+      img.onload = () => {
+        const W = img.width, H = img.height;
+        const cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        const ctx = cv.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const amp  = (strength100 / 100) * W * 0.18;
+        const freq = 3.5 / W;
+        const src  = ctx.getImageData(0, 0, W, H);
+        const s    = src.data;
+        const out  = ctx.createImageData(W, H);
+        const d    = out.data;
+        const fbmX = (px: number, py: number) => {
+          let v = 0, a = 1, f = freq;
+          for (let o = 0; o < 4; o++) {
+            v += Math.sin(px * f * 6.2831 + 1.3) * Math.cos(py * f * 6.2831 * 0.7 + 0.9) * a;
+            a *= 0.5; f *= 2.1;
+          }
+          return v;
+        };
+        const fbmY = (px: number, py: number) => {
+          let v = 0, a = 1, f = freq;
+          for (let o = 0; o < 4; o++) {
+            v += Math.cos(px * f * 6.2831 * 0.8 + 2.7) * Math.sin(py * f * 6.2831 + 1.1) * a;
+            a *= 0.5; f *= 2.1;
+          }
+          return v;
+        };
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const sx = x + fbmX(x, y) * amp;
+            const sy = y + fbmY(x, y) * amp;
+            const x0 = Math.max(0, Math.min(W-1, Math.floor(sx)));
+            const y0 = Math.max(0, Math.min(H-1, Math.floor(sy)));
+            const x1 = Math.min(W-1, x0+1), y1 = Math.min(H-1, y0+1);
+            const tx = sx - x0, ty = sy - y0;
+            const i00 = (y0*W+x0)*4, i10 = (y0*W+x1)*4;
+            const i01 = (y1*W+x0)*4, i11 = (y1*W+x1)*4;
+            const di  = (y *W+x )*4;
+            for (let c = 0; c < 4; c++)
+              d[di+c] = Math.round(s[i00+c]*(1-tx)*(1-ty)+s[i10+c]*tx*(1-ty)+s[i01+c]*(1-tx)*ty+s[i11+c]*tx*ty);
+          }
+        }
+        ctx.putImageData(out, 0, 0);
+        resolve(cv.toDataURL('image/png'));
       };
       img.src = url;
     });
@@ -881,6 +936,15 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                 <input type="range" min={0} max={100} step={1} value={flameEdgeEnhance} style={{ width: '100%' }}
                   onChange={e => setFlameEdgeEnhance(Number(e.target.value))} />
               </div>
+              {/* Fractal Distort pre-process */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                  <span style={{ color: '#8a93a2' }}>Fractal Distort</span>
+                  <span style={{ color: '#c8d0e0' }}>{flameFractalDistort}%</span>
+                </div>
+                <input type="range" min={0} max={100} step={1} value={flameFractalDistort} style={{ width: '100%' }}
+                  onChange={e => setFlameFractalDistort(Number(e.target.value))} />
+              </div>
               {onSendToShape && (
                 <button type="button" disabled={isExporting} onClick={async () => {
                   setIsExporting(true);
@@ -888,6 +952,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                   let url = urls[0] ? await deriveAlphaFromLuma(urls[0]) : '';
                   if (url) url = await applyMatteChoke(url, flameMatteChoke);
                   if (url) url = await applyEdgeEnhance(url, flameEdgeEnhance);
+                  if (url) url = await applyFractalDistort(url, flameFractalDistort);
                   setIsExporting(false);
                   if (url) onSendToShape(url);
                 }} style={{ ...S.btn('#5a3fc0'), opacity: isExporting ? 0.5 : 1 }}>
@@ -901,6 +966,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                   let url = urls[0] ? await deriveAlphaFromLuma(urls[0]) : '';
                   if (url) url = await applyMatteChoke(url, flameMatteChoke);
                   if (url) url = await applyEdgeEnhance(url, flameEdgeEnhance);
+                  if (url) url = await applyFractalDistort(url, flameFractalDistort);
                   setIsExporting(false);
                   if (url) onSendToPaint(url);
                 }} style={{ ...S.btn('#3a7fd4'), opacity: isExporting ? 0.5 : 1 }}>

@@ -73,6 +73,8 @@ export type ParticleLayer = {
   matteChoke: number;    // –50 (choke/shrink alpha) … 0 … +50 (spread/grow alpha)
   // Edge Enhance
   edgeEnhance: number;  // 0–100 Laplacian edge sharpen
+  // Fractal Distort
+  fractalDistort: number; // 0–100 domain-warp displacement strength
 };
 
 export type AnimConfig = {
@@ -113,6 +115,7 @@ export const defaultLayer = (type: ShapeType): ParticleLayer => ({
   edgeGlow: 0, edgeGlowColor: '#ffffff', edgeGlowWidth: 1.5,
   matteChoke: 0,
   edgeEnhance: 0,
+  fractalDistort: 0,
 });
 
 const defaultAnim = (): AnimConfig => ({ type: 'none', frames: 8, fps: 12 });
@@ -1005,6 +1008,59 @@ function applyLayerPost(
     }
     ctx.putImageData(out, 0, 0);
   }
+
+  // Fractal Distort — domain-warp using multi-octave sine noise, bilinear sampled
+  if (layer.fractalDistort > 0) {
+    const amp  = (layer.fractalDistort / 100) * size * 0.18;
+    const freq = 3.5 / size;
+    const src  = ctx.getImageData(0, 0, size, size);
+    const s    = src.data;
+    const out  = ctx.createImageData(size, size);
+    const d    = out.data;
+    // Multi-octave fBm displacement helpers
+    const fbmX = (px: number, py: number) => {
+      let v = 0, a = 1, f = freq;
+      for (let o = 0; o < 4; o++) {
+        v += Math.sin(px * f * 6.2831 + 1.3) * Math.cos(py * f * 6.2831 * 0.7 + 0.9) * a;
+        a *= 0.5; f *= 2.1;
+      }
+      return v;
+    };
+    const fbmY = (px: number, py: number) => {
+      let v = 0, a = 1, f = freq;
+      for (let o = 0; o < 4; o++) {
+        v += Math.cos(px * f * 6.2831 * 0.8 + 2.7) * Math.sin(py * f * 6.2831 + 1.1) * a;
+        a *= 0.5; f *= 2.1;
+      }
+      return v;
+    };
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const sx = x + fbmX(x, y) * amp;
+        const sy = y + fbmY(x, y) * amp;
+        // Bilinear sample
+        const x0 = Math.max(0, Math.min(size - 1, Math.floor(sx)));
+        const y0 = Math.max(0, Math.min(size - 1, Math.floor(sy)));
+        const x1 = Math.min(size - 1, x0 + 1);
+        const y1 = Math.min(size - 1, y0 + 1);
+        const tx = sx - x0, ty = sy - y0;
+        const i00 = (y0 * size + x0) * 4;
+        const i10 = (y0 * size + x1) * 4;
+        const i01 = (y1 * size + x0) * 4;
+        const i11 = (y1 * size + x1) * 4;
+        const di  = (y  * size + x)  * 4;
+        for (let c = 0; c < 4; c++) {
+          d[di+c] = Math.round(
+            s[i00+c] * (1-tx)*(1-ty) +
+            s[i10+c] * tx*(1-ty) +
+            s[i01+c] * (1-tx)*ty +
+            s[i11+c] * tx*ty
+          );
+        }
+      }
+    }
+    ctx.putImageData(out, 0, 0);
+  }
 }
 
 // Render all layers + effects for one animation frame
@@ -1473,6 +1529,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 {numSlider('hueShift',        0,  360,   1, 'Hue Shift',                 v => `${v.toFixed(0)}°`)}
                 {numSlider('filterThreshold', 0,  100,   1, 'Threshold — cut dim pixels', v => `${v}%`)}
                 {numSlider('edgeEnhance',     0,  100,   1, 'Edge Enhance',              v => `${v}%`)}
+                {numSlider('fractalDistort',   0,  100,   1, 'Fractal Distort',           v => `${v}%`)}
               </>)}
 
               {sec('Matte Choker', false, <>
