@@ -76,6 +76,37 @@ function buildLightningGlowTex(glowHex: number, coreHex: number): THREE.CanvasTe
   return tex;
 }
 
+const _flameTexCache = new Map<string, THREE.CanvasTexture>();
+
+/**
+ * Flame-specific radial texture: no forced white — brightened innerHex at centre,
+ * fading through innerHex → outerHex → transparent edge.
+ */
+function buildFlameTex(innerHex: number, outerHex: number): THREE.CanvasTexture {
+  const key = `flame_${innerHex}_${outerHex}`;
+  if (_flameTexCache.has(key)) return _flameTexCache.get(key)!;
+  const S = 128, H = S / 2;
+  const cv = document.createElement('canvas');
+  cv.width = S; cv.height = S;
+  const ctx = cv.getContext('2d')!;
+  const rgb = (hex: number) => `${(hex>>16)&0xff},${(hex>>8)&0xff},${hex&0xff}`;
+  // Brighten centre by blending with white at 40% — keeps hue, avoids pure white
+  const bri = (c: number) => Math.min(255, Math.round(c + (255 - c) * 0.4));
+  const rr = bri((innerHex>>16)&0xff), rg = bri((innerHex>>8)&0xff), rb = bri(innerHex&0xff);
+  const gr  = ctx.createRadialGradient(H, H, 0, H, H, H);
+  gr.addColorStop(0.00, `rgba(${rr},${rg},${rb},1.00)`);
+  gr.addColorStop(0.15, `rgba(${rgb(innerHex)},0.94)`);
+  gr.addColorStop(0.38, `rgba(${rgb(outerHex)},0.78)`);
+  gr.addColorStop(0.62, `rgba(${rgb(outerHex)},0.32)`);
+  gr.addColorStop(0.84, `rgba(${rgb(outerHex)},0.07)`);
+  gr.addColorStop(1.00, `rgba(${rgb(outerHex)},0.00)`);
+  ctx.fillStyle = gr;
+  ctx.fillRect(0, 0, S, S);
+  const tex = new THREE.CanvasTexture(cv);
+  _flameTexCache.set(key, tex);
+  return tex;
+}
+
 /**
  * Walks a polyline and returns points sampled at `spacing` world-unit intervals.
  * Ensures the first and last original points are always included.
@@ -5219,21 +5250,22 @@ const timelineOutRef = useRef(timelineOut);
           const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
           const coreNum = hexStrToNum(coreHexF);
           const glowNum = hexStrToNum(glowHexF);
-          // glow texture: full gradient (white centre → coreHex → glowHex → transparent)
-          const gTexF = buildLightningGlowTex(glowNum, coreNum);
-          // core texture: same gradient but coreHex used as the outer colour for max brightness
-          const cTexF = buildLightningGlowTex(coreNum, 0xffffff);
+          // glow texture: inner = coreColor, outer = glowColor (no forced white)
+          const gTexF = buildFlameTex(coreNum, glowNum);
+          // core texture: full core color family, slightly brightened at centre
+          const cTexF = buildFlameTex(coreNum, coreNum);
 
           const fBase = { x: fObj.position.x, y: fObj.position.y, z: fObj.position.z };
 
           // Sprite chain helper (mirrors addGlowChain but for Flame group)
           const addFlameChain = (
-            pts:      { x: number; y: number; z?: number }[],
-            tex:      THREE.Texture,
-            sprSz:    number,
-            opacity:  number,
-            zOff:     number,
+            pts:       { x: number; y: number; z?: number }[],
+            tex:       THREE.Texture,
+            sprSz:     number,
+            opacity:   number,
+            zOff:      number,
             noiseSeed: number,  // per-tendril seed so each tendril flickers independently
+            growFront: number,  // 0=nothing visible, 1=full tendril visible (for emerge animation)
           ) => {
             const spacing = Math.max(0.2, (sprSz * 0.35) / densityF);
             const samples = samplePolylineEvenly(pts, spacing);
@@ -5241,6 +5273,9 @@ const timelineOutRef = useRef(timelineOut);
             const baseOpacity = opacity / Math.sqrt(densityF);
             samples.forEach((pt, i) => {
               const t = N > 1 ? i / (N - 1) : 0;
+              // Grow mask: soft leading edge sweeping from base (t=0) to tip (t=1)
+              // Edge width ~0.14 so it's a gradual reveal not a hard cut
+              const growMask = Math.max(0, Math.min(1, (growFront - t) / 0.14 + 1));
               const taperStart = 0.5;
               const taper = t <= taperStart
                 ? 1.0
@@ -5300,7 +5335,7 @@ const timelineOutRef = useRef(timelineOut);
               const mat = new THREE.SpriteMaterial({
                 map:         tex,
                 transparent: true,
-                opacity:     Math.max(0, baseOpacity * taper * flicker),
+                opacity:     Math.max(0, baseOpacity * taper * flicker * growMask),
                 blending:    THREE.AdditiveBlending,
                 depthTest:   occludeF,
                 depthWrite:  false,
@@ -5327,11 +5362,21 @@ const timelineOutRef = useRef(timelineOut);
             const birthOffset = Math.abs(Math.sin(slotSeed * 7.3 + 1.1)) * lifespan;
             const age01       = ((fAnimT + birthOffset) % lifespan) / lifespan; // 0=birth 1=death
 
-            // Fade envelope: quick fade-in, long plateau, sharp fade-out at tip
+            // Fade envelope: slow grow-from-bottom, long plateau, fade-out
+            // FADE_IN extended to 30% so emergence is gradual, not a pop
+            const FADE_IN = 0.30;
             let lifeFade: number;
-            if (age01 < 0.12)        lifeFade = age01 / 0.12;           // 0→1 fade-in
-            else if (age01 < 0.75)   lifeFade = 1.0;                    // plateau
-            else                     lifeFade = 1.0 - (age01 - 0.75) / 0.25; // 1→0 fade-out
+            let growFront: number;
+            if (age01 < FADE_IN) {
+              growFront = age01 / FADE_IN;   // 0→1  sweeping base→tip
+              lifeFade  = 1.0;               // full opacity, growFront does the masking
+            } else if (age01 < 0.75) {
+              growFront = 1.0;
+              lifeFade  = 1.0;
+            } else {
+              growFront = 1.0;
+              lifeFade  = 1.0 - (age01 - 0.75) / 0.25;  // fade-out at end
+            }
             lifeFade = Math.max(0, lifeFade);
 
             // Lifecycle: rooted phase (age 0→DETACH) stays anchored at base,
@@ -5441,9 +5486,9 @@ const timelineOutRef = useRef(timelineOut);
             const coreBlurSizeMul = 1.0 + coreBlurF * 2.6;
             const coreBlurOpaMul  = 1.0 / Math.sqrt(coreBlurSizeMul);
             const coreD = coreW * 2.2 * coreBlurSizeMul * ageScale;
-            addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed);
-            addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1);
-            addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade * coreBlurOpaMul,  0.1, tendrilSeed + 2.2);
+            addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
+            addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
+            addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade * coreBlurOpaMul,  0.1, tendrilSeed + 2.2, growFront);
           }
         });
       }
