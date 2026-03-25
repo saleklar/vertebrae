@@ -5336,8 +5336,17 @@ const timelineOutRef = useRef(timelineOut);
             // At birth base = fBase.y; at death it has risen ~55% of flameHeight
             const riseOffset = Math.pow(age01, 1.3) * flameHeight * 0.55;
 
-            // Height stays close to full length; just narrows slightly at very end of life
-            const activeHeight = flameHeight * (0.75 + 0.25 * lifeFade);
+            // Overall size shrinks as it drifts (1.0 at birth → 0.3 at death)
+            const ageScale = 1.0 - age01 * 0.70;
+
+            // Deformation grows as tendril detaches (age01=0 → normal, age01=1 → 3× wilder)
+            const deformMul = 1.0 + age01 * 2.2;
+
+            // Base footprint thins as it rises (1.0 at birth → 0.1 at death)
+            const baseWidthMul = Math.max(0.05, 1.0 - age01 * 0.9);
+
+            // Height also shrinks with ageScale
+            const activeHeight = flameHeight * ageScale * (0.75 + 0.25 * lifeFade);
 
             // The actual noise seed varies per life cycle so each new tendril wiggles differently
             const tendrilSeed  = slotSeed + Math.floor((fAnimT + birthOffset) / lifespan) * 1.618;
@@ -5355,14 +5364,16 @@ const timelineOutRef = useRef(timelineOut);
               const yNorm    = pi / (FLAME_PTS - 1);
               const y        = fBase.y + riseOffset + yNorm * activeHeight;
               // Turbulence envelope: zero at base (anchored), grows toward tip
-              const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5;
-              // Base spread fades out as we rise so tendrils converge upward
-              const baseSpread = 1.0 - yNorm;
+              // Also scaled by ageScale so detached tendril is proportionally thinner
+              const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5 * ageScale * baseWidthMul;
+              // Base spread shrinks both along the stem (baseSpread) and with age (baseWidthMul)
+              const baseSpread = (1.0 - yNorm) * baseWidthMul;
               // yNorm*k - fAnimT*speed → upward-traveling wave (sin(ky - ωt))
+              // deformMul amplifies displacement so drifting tendrils writhe more
               const noiseT   = tendrilSeed + yNorm * 3.0 - fAnimT * speed;
               const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)       * 1.0
-                        + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7)  * 0.4) * turbulence * widthEnv;
-              const dz = Math.cos(noiseT * 0.9  + tendrilSeed * 2.3)          * turbulence * widthEnv * 0.6;
+                        + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7)  * 0.4) * turbulence * widthEnv * deformMul;
+              const dz = Math.cos(noiseT * 0.9  + tendrilSeed * 2.3)          * turbulence * widthEnv * 0.6 * deformMul;
               pts.push({ x: fBase.x + baseOffX * baseSpread + dx, y, z: fBase.z + baseOffZ * baseSpread + dz });
             }
 
@@ -5418,10 +5429,10 @@ const timelineOutRef = useRef(timelineOut);
               });
             }
 
-            // Three sprite layers: outer halo, glow, bright core — all scaled by lifeFade
-            const haloD = glowW * 4.0;
-            const glowD = glowW * 2.0;
-            const coreD = coreW * 2.2;
+            // Three sprite layers: outer halo, glow, bright core — scaled by lifeFade + ageScale
+            const haloD = glowW * 4.0 * ageScale;
+            const glowD = glowW * 2.0 * ageScale;
+            const coreD = coreW * 2.2 * ageScale;
             addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed);
             addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1);
             addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade,  0.1, tendrilSeed + 2.2);
