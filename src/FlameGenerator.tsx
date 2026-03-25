@@ -346,6 +346,10 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       });
     };
 
+    // Collect tendril base positions so embers can spawn from each one
+    const tendrilBaseX: number[] = [];
+    const tendrilBaseZ: number[] = [];
+
     const FLAME_PTS = 10;
     for (let ti = 0; ti < numTendrils; ti++) {
       const slotSeed    = ti * 2.399963;
@@ -390,6 +394,8 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                           * (1.0 - thermalDraft * axisProx * 0.5);
       const baseOffX      = Math.cos(spreadAngle + slotSeed) * baseR;
       const baseOffZ      = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
+      tendrilBaseX.push(baseOffX);
+      tendrilBaseZ.push(baseOffZ);
 
       const pts: { x: number; y: number; z: number }[] = [];
       for (let pi = 0; pi < FLAME_PTS; pi++) {
@@ -418,14 +424,15 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
     const emberLife  = 2.5 / Math.max(0.1, speed);
     const emberC1    = n2c(h2n(f.coreColor));
     const emberC2    = n2c(h2n(f.glowColorTop));
+    const nT = tendrilBaseX.length || 1;
     for (let ei = 0; ei < emberCount; ei++) {
       const eseed      = ei * 3.7 + 0.31;
       const eBirth     = Math.abs(Math.sin(eseed * 7.3)) * emberLife;
-      const eAge01     = seamless
-        ? ((fAnimT + eBirth) % emberLife) / emberLife
-        : ((fAnimT + eBirth) % emberLife) / emberLife;
-      const startX     = Math.sin(eseed * 5.1) * flameWidth * 0.35;
-      const startZ     = Math.cos(eseed * 3.1) * flameWidth * 0.2;
+      const eAge01     = ((fAnimT + eBirth) % emberLife) / emberLife;
+      // Pin this ember to the base of one of the tendrils
+      const ti         = ei % nT;
+      const startX     = tendrilBaseX[ti] + Math.sin(eseed * 5.1) * flameWidth * 0.08;
+      const startZ     = tendrilBaseZ[ti] + Math.cos(eseed * 3.1) * flameWidth * 0.05;
       const noiseT     = eseed + eAge01 * 3.0 - fAnimT * speed;
       const driftX     = (Math.sin(noiseT * 1.3) * 0.6 + Math.cos(noiseT * 2.1 + eseed) * 0.4)
                        * turbulence * flameWidth * 0.4 * eAge01;
