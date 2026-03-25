@@ -1442,12 +1442,18 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 {numSlider('brightness',      0,  600,   1, 'Brightness',                v => `${v}%`)}
                 {numSlider('hueShift',        0,  360,   1, 'Hue Shift',                 v => `${v.toFixed(0)}°`)}
                 {numSlider('filterThreshold', 0,  100,   1, 'Threshold — cut dim pixels', v => `${v}%`)}
-                {row('Matte Choker', (
+              </>)}
+
+              {sec('Matte Choker', false, <>
+                <div style={{ fontSize: '0.73rem', color: '#8a93a2', marginBottom: '6px' }}>
+                  Erode or dilate the alpha channel to tighten halos or fill gaps.
+                </div>
+                {row('Choke ⟵  /  ⟶ Spread', (
                   <div>
                     <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#8a93a2', marginBottom: '2px' }}>
-                      <span>Choke ⟵</span>
+                      <span style={{ color: '#e07070' }}>Choke (−{Math.abs(Math.min(0, selectedLayer.matteChoke))})</span>
                       <strong style={{ color: '#c8d0e0' }}>{selectedLayer.matteChoke > 0 ? `+${selectedLayer.matteChoke}` : selectedLayer.matteChoke}</strong>
-                      <span>⟶ Spread</span>
+                      <span style={{ color: '#70c0e0' }}>Spread (+{Math.max(0, selectedLayer.matteChoke)})</span>
                     </div>
                     <input type="range" min={-50} max={50} step={1} value={selectedLayer.matteChoke} style={{ width: '100%' }}
                       onChange={e => updateLayer(selectedLayer.id, { matteChoke: parseFloat(e.target.value) })} />
