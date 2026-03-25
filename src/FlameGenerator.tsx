@@ -106,6 +106,8 @@ function computeLoopDur(fp: FP, maxSecs = 8): number {
 export interface FlameGeneratorProps {
   onExportToParticleSystem?: (urls: string[], fps: number) => void;
   onAttachToEmitter?: (urls: string[]) => void;
+  onSendToShape?: (url: string) => void;
+  onSendToPaint?: (url: string) => void;
 }
 
 interface FP {
@@ -164,7 +166,7 @@ function savePresets(p: Preset[]) {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToParticleSystem, onAttachToEmitter }) => {
+export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToParticleSystem, onAttachToEmitter, onSendToShape, onSendToPaint }) => {
   const [fp, setFp] = useState<FP>(DEFAULT_FP);
   const fpRef = useRef<FP>(fp);
   useEffect(() => { fpRef.current = fp; }, [fp]);
@@ -183,11 +185,56 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
     setPresets(next); savePresets(next);
   };
 
-  const [exportRes,    setExportRes]    = useState(256);
-  const [exportFrames, setExportFrames] = useState(24);
-  const [exportFps,    setExportFps]    = useState(24);
-  const [isExporting,  setIsExporting]  = useState(false);
-  const [exportProg,   setExportProg]   = useState(0); // 0-100
+  const [exportRes,      setExportRes]      = useState(256);
+  const [exportFrames,   setExportFrames]   = useState(24);
+  const [exportFps,      setExportFps]      = useState(24);
+  const [isExporting,    setIsExporting]    = useState(false);
+  const [exportProg,     setExportProg]     = useState(0); // 0-100
+  const [flameMatteChoke, setFlameMatteChoke] = useState(0); // -50…+50
+
+  // Apply morphological alpha erosion (choke<0) or dilation (spread>0) to a PNG data URL
+  const applyMatteChoke = (url: string, choke: number): Promise<string> =>
+    new Promise<string>(resolve => {
+      if (choke === 0) { resolve(url); return; }
+      const img = new Image();
+      img.onload = () => {
+        const cv = document.createElement('canvas');
+        cv.width = img.width; cv.height = img.height;
+        const ctx = cv.getContext('2d')!;
+        ctx.drawImage(img, 0, 0);
+        const W = cv.width, H = cv.height;
+        const iData = ctx.getImageData(0, 0, W, H);
+        const src = new Uint8ClampedArray(iData.data);
+        const d = iData.data;
+        const radius = Math.max(1, Math.min(15, Math.round(Math.abs(choke) * 0.3)));
+        const isChoke = choke < 0;
+        const tmp = new Uint8ClampedArray(W * H);
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            let val = isChoke ? 255 : 0;
+            for (let dx = -radius; dx <= radius; dx++) {
+              const nx = Math.max(0, Math.min(W - 1, x + dx));
+              const a = src[(y * W + nx) * 4 + 3];
+              val = isChoke ? Math.min(val, a) : Math.max(val, a);
+            }
+            tmp[y * W + x] = val;
+          }
+        }
+        for (let x = 0; x < W; x++) {
+          for (let y = 0; y < H; y++) {
+            let val = isChoke ? 255 : 0;
+            for (let dy = -radius; dy <= radius; dy++) {
+              const ny = Math.max(0, Math.min(H - 1, y + dy));
+              val = isChoke ? Math.min(val, tmp[ny * W + x]) : Math.max(val, tmp[ny * W + x]);
+            }
+            d[(y * W + x) * 4 + 3] = val;
+          }
+        }
+        ctx.putImageData(iData, 0, 0);
+        resolve(cv.toDataURL('image/png'));
+      };
+      img.src = url;
+    });
 
   const mountRef     = useRef<HTMLDivElement>(null);
   const rendererRef  = useRef<THREE.WebGLRenderer | null>(null);
@@ -731,6 +778,45 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         <div style={S.sec}>Embers</div>
         <div style={S.row}>{lbl('Count', fp.emberCount)}<input type="range" style={S.input} min={0} max={80} step={1} value={fp.emberCount} onChange={e => upd('emberCount', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Size', fp.emberSize)}<input type="range" style={S.input} min={1} max={20} step={0.5} value={fp.emberSize} onChange={e => upd('emberSize', Number(e.target.value))} /></div>
+
+        {/* Send-to buttons */}
+          {(onSendToShape || onSendToPaint) && (
+            <div style={{ borderTop: '1px solid #2a3450', paddingTop: '8px', marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '5px' }}>
+              <div style={{ fontSize: '0.68rem', color: '#4a5880', marginBottom: '2px' }}>Send still to…</div>
+              {/* Matte Choker pre-process */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.68rem' }}>
+                  <span style={{ color: '#e07070' }}>Choke (−{Math.abs(Math.min(0, flameMatteChoke))})</span>
+                  <span style={{ color: '#c8d0e0' }}>Matte {flameMatteChoke > 0 ? `+${flameMatteChoke}` : flameMatteChoke}</span>
+                  <span style={{ color: '#70c0e0' }}>Spread (+{Math.max(0, flameMatteChoke)})</span>
+                </div>
+                <input type="range" min={-50} max={50} step={1} value={flameMatteChoke} style={{ width: '100%' }}
+                  onChange={e => setFlameMatteChoke(Number(e.target.value))} />
+              </div>
+              {onSendToShape && (
+                <button type="button" disabled={isExporting} onClick={async () => {
+                  setIsExporting(true);
+                  const urls = await renderFrames(1, exportRes, p => setExportProg(p));
+                  const url = urls[0] ? await applyMatteChoke(urls[0], flameMatteChoke) : '';
+                  setIsExporting(false);
+                  if (url) onSendToShape(url);
+                }} style={{ ...S.btn('#5a3fc0'), opacity: isExporting ? 0.5 : 1 }}>
+                  ✨ Add to Shape tab
+                </button>
+              )}
+              {onSendToPaint && (
+                <button type="button" disabled={isExporting} onClick={async () => {
+                  setIsExporting(true);
+                  const urls = await renderFrames(1, exportRes, p => setExportProg(p));
+                  const url = urls[0] ? await applyMatteChoke(urls[0], flameMatteChoke) : '';
+                  setIsExporting(false);
+                  if (url) onSendToPaint(url);
+                }} style={{ ...S.btn('#3a7fd4'), opacity: isExporting ? 0.5 : 1 }}>
+                  🎨 Send to Paint tab
+                </button>
+              )}
+            </div>
+          )}
 
         {/* Export settings */}
         <div style={S.sec}>Export</div>
