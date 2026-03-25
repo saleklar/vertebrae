@@ -266,36 +266,41 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       img.src = url;
     });
 
-  // Apply Laplacian edge sharpening to a PNG data URL
+  // Unsharp mask edge enhancement: sharp = original + amount*(original - blurred)
   const applyEdgeEnhance = (url: string, strength100: number): Promise<string> =>
     new Promise<string>(resolve => {
       if (strength100 === 0) { resolve(url); return; }
       const img = new Image();
       img.onload = () => {
-        const cv = document.createElement('canvas');
-        cv.width = img.width; cv.height = img.height;
-        const ctx = cv.getContext('2d')!;
-        ctx.drawImage(img, 0, 0);
-        const W = cv.width, H = cv.height;
-        const iData = ctx.getImageData(0, 0, W, H);
-        const src = new Uint8ClampedArray(iData.data);
-        const d   = iData.data;
-        const str = (strength100 / 100) * 3.5;
-        for (let y = 0; y < H; y++) {
-          for (let x = 0; x < W; x++) {
-            const c  = (y * W + x) * 4;
-            const l  = (y * W + Math.max(0, x-1)) * 4;
-            const r  = (y * W + Math.min(W-1, x+1)) * 4;
-            const u  = (Math.max(0, y-1) * W + x) * 4;
-            const dn = (Math.min(H-1, y+1) * W + x) * 4;
-            for (let ch = 0; ch < 3; ch++) {
-              const lap = 4*src[c+ch] - src[l+ch] - src[r+ch] - src[u+ch] - src[dn+ch];
-              d[c+ch] = Math.max(0, Math.min(255, src[c+ch] + Math.round(str * lap)));
-            }
-          }
+        const W = img.width, H = img.height;
+        // Canvas A: original pixels
+        const cvA = document.createElement('canvas');
+        cvA.width = W; cvA.height = H;
+        const ctxA = cvA.getContext('2d')!;
+        ctxA.drawImage(img, 0, 0);
+        const orig = ctxA.getImageData(0, 0, W, H);
+
+        // Canvas B: blurred version (use CSS filter on a temp canvas)
+        const blurPx = 1 + (strength100 / 100) * 3; // 1–4 px blur
+        const cvB = document.createElement('canvas');
+        cvB.width = W; cvB.height = H;
+        const ctxB = cvB.getContext('2d')!;
+        ctxB.filter = `blur(${blurPx.toFixed(1)}px)`;
+        ctxB.drawImage(img, 0, 0);
+        const blurred = ctxB.getImageData(0, 0, W, H);
+
+        // Unsharp mask: result = orig + amount * (orig - blurred)
+        const amount = (strength100 / 100) * 2.5;
+        const out = ctxA.getImageData(0, 0, W, H);
+        const o = orig.data, b = blurred.data, d = out.data;
+        for (let i = 0; i < o.length; i += 4) {
+          d[i]   = Math.max(0, Math.min(255, o[i]   + amount * (o[i]   - b[i])));
+          d[i+1] = Math.max(0, Math.min(255, o[i+1] + amount * (o[i+1] - b[i+1])));
+          d[i+2] = Math.max(0, Math.min(255, o[i+2] + amount * (o[i+2] - b[i+2])));
+          d[i+3] = o[i+3]; // preserve alpha
         }
-        ctx.putImageData(iData, 0, 0);
-        resolve(cv.toDataURL('image/png'));
+        ctxA.putImageData(out, 0, 0);
+        resolve(cvA.toDataURL('image/png'));
       };
       img.src = url;
     });

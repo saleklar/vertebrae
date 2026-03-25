@@ -979,28 +979,31 @@ function applyLayerPost(
     ctx.putImageData(iData, 0, 0);
   }
 
-  // Edge Enhance — Laplacian sharpening: detect edges and add back at `strength`
+  // Edge Enhance — unsharp mask: sharp = original + amount*(original - blurred)
   if (layer.edgeEnhance > 0) {
-    const strength = (layer.edgeEnhance / 100) * 3.5;
-    const iData = ctx.getImageData(0, 0, size, size);
-    const src   = new Uint8ClampedArray(iData.data);
-    const d     = iData.data;
+    const strength = layer.edgeEnhance / 100;
+    const blurPx   = 1 + strength * 3;
+    const amount   = strength * 2.5;
     const W = size, H = size;
-    // Laplacian kernel: [0,-1,0 / -1,4,-1 / 0,-1,0]
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const c  = (y * W + x) * 4;
-        const l  = (y * W + Math.max(0, x-1)) * 4;
-        const r  = (y * W + Math.min(W-1, x+1)) * 4;
-        const u  = (Math.max(0, y-1) * W + x) * 4;
-        const dn = (Math.min(H-1, y+1) * W + x) * 4;
-        for (let ch = 0; ch < 3; ch++) {
-          const lap = 4*src[c+ch] - src[l+ch] - src[r+ch] - src[u+ch] - src[dn+ch];
-          d[c+ch] = Math.max(0, Math.min(255, src[c+ch] + Math.round(strength * lap)));
-        }
-      }
+
+    // Blurred copy via CSS filter on a temp canvas
+    const blurCv = document.createElement('canvas');
+    blurCv.width = W; blurCv.height = H;
+    const blurCtx = blurCv.getContext('2d')!;
+    blurCtx.filter = `blur(${blurPx.toFixed(1)}px)`;
+    blurCtx.drawImage(canvas, 0, 0);
+
+    const orig    = ctx.getImageData(0, 0, W, H);
+    const blurred = blurCtx.getImageData(0, 0, W, H);
+    const out     = ctx.createImageData(W, H);
+    const o = orig.data, b = blurred.data, d = out.data;
+    for (let i = 0; i < o.length; i += 4) {
+      d[i]   = Math.max(0, Math.min(255, o[i]   + amount * (o[i]   - b[i])));
+      d[i+1] = Math.max(0, Math.min(255, o[i+1] + amount * (o[i+1] - b[i+1])));
+      d[i+2] = Math.max(0, Math.min(255, o[i+2] + amount * (o[i+2] - b[i+2])));
+      d[i+3] = o[i+3];
     }
-    ctx.putImageData(iData, 0, 0);
+    ctx.putImageData(out, 0, 0);
   }
 }
 
