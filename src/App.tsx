@@ -3304,6 +3304,8 @@ export function App() {
                   coreWidth: 6,
                   glowWidth: 16,
                   density: 1.6,
+                  flickerIntensity: 0.45,
+                  flickerType: 'fractal',
                   usePhysicsModifiers: false,
                   modifierStrength: 1.0,
                   occludeByGeometry: true,
@@ -5866,6 +5868,19 @@ export function App() {
                       <input type="range" min={0} max={2} step={0.05} value={fp.turbulence ?? 0.55} onChange={e => upd('turbulence', Number(e.target.value))} />
                       <label>Speed: {(fp.speed ?? 1.4).toFixed(2)}</label>
                       <input type="range" min={0.1} max={5} step={0.1} value={fp.speed ?? 1.4} onChange={e => upd('speed', Number(e.target.value))} />
+
+                      <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Flicker</div>
+                      <label>Type</label>
+                      <select value={fp.flickerType ?? 'fractal'} onChange={e => upd('flickerType', e.target.value)}>
+                        <option value="smooth">Smooth — gentle sine pulses</option>
+                        <option value="fractal">Fractal — natural FBM complexity</option>
+                        <option value="turbulent">Turbulent — sharp combustion bursts</option>
+                      </select>
+                      <label>Intensity: {((fp.flickerIntensity ?? 0.45) * 100).toFixed(0)}%</label>
+                      <input type="range" min={0} max={1} step={0.01}
+                        value={fp.flickerIntensity ?? 0.45}
+                        onChange={e => upd('flickerIntensity', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>0% = constant glow, 100% = full flicker range.</div>
 
                       <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Glow</div>
                       <label>Core Width: {fp.coreWidth ?? 6}</label>

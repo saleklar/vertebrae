@@ -5208,9 +5208,11 @@ const timelineOutRef = useRef(timelineOut);
           const densityF      = fp.density           ?? 1.6;
           const coreHexF      = fp.coreColor         ?? '#ffff88';
           const glowHexF      = fp.glowColor         ?? '#ff3300';
-          const occludeF      = fp.occludeByGeometry !== false;
-          const usePhysicsF   = fp.usePhysicsModifiers ?? false;
-          const modStrengthF  = fp.modifierStrength  ?? 1.0;
+          const occludeF         = fp.occludeByGeometry !== false;
+          const usePhysicsF    = fp.usePhysicsModifiers ?? false;
+          const modStrengthF   = fp.modifierStrength  ?? 1.0;
+          const flickerIntensF = Math.max(0, Math.min(1, fp.flickerIntensity ?? 0.45));
+          const flickerTypeF   = (fp.flickerType ?? 'fractal') as 'smooth' | 'fractal' | 'turbulent';
 
           const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
           const coreNum = hexStrToNum(coreHexF);
@@ -5241,10 +5243,34 @@ const timelineOutRef = useRef(timelineOut);
               const taper = t <= taperStart
                 ? 1.0
                 : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
-              // Per-sprite opacity flicker: two overlapping sine waves at different frequencies
-              const flicker = 0.55
-                + 0.30 * Math.sin(fAnimT * speed * 2.3 + noiseSeed + t * 5.1)
-                + 0.15 * Math.cos(fAnimT * speed * 3.7 + noiseSeed * 1.4 + t * 8.3);
+              // Per-sprite opacity flicker — controllable type + intensity
+              const phase = fAnimT * speed * 2.3 + noiseSeed + t * 5.1;
+              let noise01: number;
+              if (flickerTypeF === 'smooth') {
+                // Two gentle sine waves → soft pulsing
+                noise01 = 0.5 + 0.5 * (
+                  0.65 * Math.sin(phase) +
+                  0.35 * Math.cos(phase * 1.61 + noiseSeed * 1.4 + t * 3.2)
+                );
+              } else if (flickerTypeF === 'turbulent') {
+                // abs(sin) FBM → sharp spiky bursts like combustion
+                let v = 0, a = 1.0, fr = 1.0, nm = 0;
+                for (let oct = 0; oct < 4; oct++) {
+                  v += a * Math.abs(Math.sin(phase * fr + oct * 1.3));
+                  nm += a; fr *= 2.07; a *= 0.5;
+                }
+                noise01 = v / nm;
+              } else {
+                // fractal FBM: smooth octave stacking → natural flame complexity
+                let v = 0, a = 1.0, fr = 1.0, nm = 0;
+                for (let oct = 0; oct < 4; oct++) {
+                  v += a * (0.5 + 0.5 * Math.sin(phase * fr + oct * 1.3));
+                  nm += a; fr *= 2.07; a *= 0.5;
+                }
+                noise01 = v / nm;
+              }
+              // Map [0..1] noise to [1-intensity .. 1] brightness range
+              const flicker = (1.0 - flickerIntensF) + flickerIntensF * noise01;
               const mat = new THREE.SpriteMaterial({
                 map:         tex,
                 transparent: true,
