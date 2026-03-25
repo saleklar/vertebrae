@@ -65,6 +65,12 @@ export type ParticleLayer = {
   lightAngle: number;
   specularColor: string;
   metalSheen: number;   // 0–100 sheen overlay strength (works on any shape type)
+  // Edge Glow
+  edgeGlow: number;      // 0–100 rim/outline glow around shape boundary
+  edgeGlowColor: string;
+  edgeGlowWidth: number; // 0.5–6 blur radius relative to shape size
+  // Matte Choker
+  matteChoke: number;    // –50 (choke/shrink alpha) … 0 … +50 (spread/grow alpha)
 };
 
 export type AnimConfig = {
@@ -102,6 +108,8 @@ export const defaultLayer = (type: ShapeType): ParticleLayer => ({
   lightAngle: 315,
   specularColor: '#ffffff',
   metalSheen: 0,
+  edgeGlow: 0, edgeGlowColor: '#ffffff', edgeGlowWidth: 1.5,
+  matteChoke: 0,
 });
 
 const defaultAnim = (): AnimConfig => ({ type: 'none', frames: 8, fps: 12 });
@@ -931,6 +939,42 @@ function applyLayerPost(
     }
     ctx.putImageData(imageData, 0, 0);
   }
+
+  // Matte Choker — morphological alpha erosion (choke, negative) or dilation (spread, positive)
+  // Uses separable 1-D box min/max passes for efficiency on 2-D alpha channel.
+  if (layer.matteChoke !== 0) {
+    const iData   = ctx.getImageData(0, 0, size, size);
+    const src     = new Uint8ClampedArray(iData.data);
+    const d       = iData.data;
+    const radius  = Math.max(1, Math.min(15, Math.round(Math.abs(layer.matteChoke) * 0.3)));
+    const isChoke = layer.matteChoke < 0;
+    const tmp     = new Uint8ClampedArray(size * size);
+
+    // Horizontal pass
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        let val = isChoke ? 255 : 0;
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = Math.max(0, Math.min(size - 1, x + dx));
+          const a  = src[(y * size + nx) * 4 + 3];
+          val = isChoke ? Math.min(val, a) : Math.max(val, a);
+        }
+        tmp[y * size + x] = val;
+      }
+    }
+    // Vertical pass (operates on horizontal result)
+    for (let x = 0; x < size; x++) {
+      for (let y = 0; y < size; y++) {
+        let val = isChoke ? 255 : 0;
+        for (let dy = -radius; dy <= radius; dy++) {
+          const ny = Math.max(0, Math.min(size - 1, y + dy));
+          val = isChoke ? Math.min(val, tmp[ny * size + x]) : Math.max(val, tmp[ny * size + x]);
+        }
+        d[(y * size + x) * 4 + 3] = val;
+      }
+    }
+    ctx.putImageData(iData, 0, 0);
+  }
 }
 
 // Render all layers + effects for one animation frame
@@ -1031,7 +1075,8 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
   const [previewFrame, setPreviewFrame] = useState(0);
   const [playing,      setPlaying     ] = useState(false);
   const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint' | 'fire' | 'flame'>('shape');
-  const painterGetUrlRef = useRef<(() => string) | null>(null);
+  const painterGetUrlRef  = useRef<(() => string) | null>(null);
+  const painterLoadImgRef = useRef<((url: string) => void) | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const mainCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -1397,6 +1442,17 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 {numSlider('brightness',      0,  600,   1, 'Brightness',                v => `${v}%`)}
                 {numSlider('hueShift',        0,  360,   1, 'Hue Shift',                 v => `${v.toFixed(0)}°`)}
                 {numSlider('filterThreshold', 0,  100,   1, 'Threshold — cut dim pixels', v => `${v}%`)}
+                {row('Matte Choker', (
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: '#8a93a2', marginBottom: '2px' }}>
+                      <span>Choke ⟵</span>
+                      <strong style={{ color: '#c8d0e0' }}>{selectedLayer.matteChoke > 0 ? `+${selectedLayer.matteChoke}` : selectedLayer.matteChoke}</strong>
+                      <span>⟶ Spread</span>
+                    </div>
+                    <input type="range" min={-50} max={50} step={1} value={selectedLayer.matteChoke} style={{ width: '100%' }}
+                      onChange={e => updateLayer(selectedLayer.id, { matteChoke: parseFloat(e.target.value) })} />
+                  </div>
+                ))}
               </>)}
 
               {sec('Glow', false, <>
@@ -1416,6 +1472,16 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 {numSlider('starGlow',       0, 100,  1,    'Star Glow',     v => `${v}%`)}
                 {numSlider('starGlowArms',   2, 8,    1,    'Arms',          v => `${Math.round(v)}`)}
                 {numSlider('starGlowLength', 0.2, 3,  0.05, 'Streak Length', v => `×${v.toFixed(2)}`)}
+              </>)}
+
+              {sec('Edge Glow', false, <>
+                {numSlider('edgeGlow',      0, 100, 1,   'Rim Strength',  v => `${v}%`)}
+                {numSlider('edgeGlowWidth', 0.5, 6, 0.1, 'Ring Width',    v => `×${v.toFixed(1)}`)}
+                {row('Ring Colour', (
+                  <input type="color" value={selectedLayer.edgeGlowColor}
+                    onChange={e => updateLayer(selectedLayer.id, { edgeGlowColor: e.target.value })}
+                    style={{ width: '100%', height: '30px', border: '1px solid #3b455c', borderRadius: '4px', cursor: 'pointer', background: 'none' }} />
+                ))}
               </>)}
 
               {sec('Glitter', false, <>
@@ -1612,7 +1678,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
               emitters={[]}
               onInjectToEmitter={() => {}}
               onClose={() => {}}
-              onReady={(fn) => { painterGetUrlRef.current = fn; }}
+              onReady={(getFn, loadFn) => { painterGetUrlRef.current = getFn; painterLoadImgRef.current = loadFn; }}
             />
           )}
 
@@ -1640,6 +1706,15 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
                 }}
                 onExportToParticleSystem={(urls, fps) => {
                   onExportSequence(urls, 'flame', fps);
+                }}
+                onSendToShape={(url) => {
+                  addLayer('image', url);
+                  setCreatorMode('shape');
+                }}
+                onSendToPaint={(url) => {
+                  setCreatorMode('paint');
+                  // Give the paint tab a tick to mount before loading
+                  setTimeout(() => painterLoadImgRef.current?.(url), 80);
                 }}
               />
             </div>
