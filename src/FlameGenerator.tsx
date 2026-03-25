@@ -308,7 +308,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       img.src = url;
     });
 
-  // Fractal distort: domain-warp using multi-octave sine fBm, bilinear sampled
+  // Fractal distort: hash-based value noise fBm domain-warp, bilinear sampled
   const applyFractalDistort = (url: string, strength100: number): Promise<string> =>
     new Promise<string>(resolve => {
       if (strength100 === 0) { resolve(url); return; }
@@ -319,39 +319,39 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         cv.width = W; cv.height = H;
         const ctx = cv.getContext('2d')!;
         ctx.drawImage(img, 0, 0);
-        const amp  = (strength100 / 100) * W * 0.18;
-        const freq = 3.5 / W;
-        const src  = ctx.getImageData(0, 0, W, H);
-        const s    = src.data;
-        const out  = ctx.createImageData(W, H);
-        const d    = out.data;
-        const fbmX = (px: number, py: number) => {
-          let v = 0, a = 1, f = freq;
-          for (let o = 0; o < 4; o++) {
-            v += Math.sin(px * f * 6.2831 + 1.3) * Math.cos(py * f * 6.2831 * 0.7 + 0.9) * a;
-            a *= 0.5; f *= 2.1;
-          }
-          return v;
+        const amp = (strength100 / 100) * W * 0.45;
+        const src = ctx.getImageData(0, 0, W, H);
+        const s = src.data;
+        const out = ctx.createImageData(W, H);
+        const d = out.data;
+        const hash = (n: number) => { const x = Math.sin(n) * 43758.5453; return x - Math.floor(x); };
+        const vnoise = (x: number, y: number) => {
+          const ix = Math.floor(x), iy = Math.floor(y);
+          const fx = x-ix, fy = y-iy;
+          const ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy);
+          const a = hash(ix + iy*157), b = hash(ix+1 + iy*157);
+          const c = hash(ix + (iy+1)*157), dd = hash(ix+1 + (iy+1)*157);
+          return a + (b-a)*ux + (c-a)*uy + (b-a+a-b-c+dd)*ux*uy;
         };
-        const fbmY = (px: number, py: number) => {
-          let v = 0, a = 1, f = freq;
+        const fbm = (ox: number, oy: number, seedX: number, seedY: number) => {
+          let v = 0, a = 0.5, f = 3.0;
           for (let o = 0; o < 4; o++) {
-            v += Math.cos(px * f * 6.2831 * 0.8 + 2.7) * Math.sin(py * f * 6.2831 + 1.1) * a;
-            a *= 0.5; f *= 2.1;
+            v += (vnoise(ox/W*f + seedX + o*31.7, oy/H*f + seedY + o*17.3) * 2 - 1) * a;
+            a *= 0.5; f *= 2.0;
           }
           return v;
         };
         for (let y = 0; y < H; y++) {
           for (let x = 0; x < W; x++) {
-            const sx = x + fbmX(x, y) * amp;
-            const sy = y + fbmY(x, y) * amp;
+            const sx = x + fbm(x, y, 0.0, 4.2) * amp;
+            const sy = y + fbm(x, y, 8.3, 1.7) * amp;
             const x0 = Math.max(0, Math.min(W-1, Math.floor(sx)));
             const y0 = Math.max(0, Math.min(H-1, Math.floor(sy)));
             const x1 = Math.min(W-1, x0+1), y1 = Math.min(H-1, y0+1);
-            const tx = sx - x0, ty = sy - y0;
-            const i00 = (y0*W+x0)*4, i10 = (y0*W+x1)*4;
-            const i01 = (y1*W+x0)*4, i11 = (y1*W+x1)*4;
-            const di  = (y *W+x )*4;
+            const tx = sx-x0, ty = sy-y0;
+            const i00=(y0*W+x0)*4, i10=(y0*W+x1)*4;
+            const i01=(y1*W+x0)*4, i11=(y1*W+x1)*4;
+            const di=(y*W+x)*4;
             for (let c = 0; c < 4; c++)
               d[di+c] = Math.round(s[i00+c]*(1-tx)*(1-ty)+s[i10+c]*tx*(1-ty)+s[i01+c]*(1-tx)*ty+s[i11+c]*tx*ty);
           }

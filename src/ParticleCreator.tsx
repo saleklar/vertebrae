@@ -1009,54 +1009,48 @@ function applyLayerPost(
     ctx.putImageData(out, 0, 0);
   }
 
-  // Fractal Distort — domain-warp using multi-octave sine noise, bilinear sampled
+  // Fractal Distort — domain-warp using hash-based value noise fBm, bilinear sampled
   if (layer.fractalDistort > 0) {
-    const amp  = (layer.fractalDistort / 100) * size * 0.18;
-    const freq = 3.5 / size;
+    const amp  = (layer.fractalDistort / 100) * size * 0.45;
     const src  = ctx.getImageData(0, 0, size, size);
     const s    = src.data;
     const out  = ctx.createImageData(size, size);
     const d    = out.data;
-    // Multi-octave fBm displacement helpers
-    const fbmX = (px: number, py: number) => {
-      let v = 0, a = 1, f = freq;
-      for (let o = 0; o < 4; o++) {
-        v += Math.sin(px * f * 6.2831 + 1.3) * Math.cos(py * f * 6.2831 * 0.7 + 0.9) * a;
-        a *= 0.5; f *= 2.1;
-      }
-      return v;
+    // Smooth hash noise in [0,1]
+    const hash = (n: number) => { const x = Math.sin(n) * 43758.5453; return x - Math.floor(x); };
+    const vnoise = (x: number, y: number) => {
+      const ix = Math.floor(x), iy = Math.floor(y);
+      const fx = x-ix, fy = y-iy;
+      const ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy);
+      const a = hash(ix + iy*157), b = hash(ix+1 + iy*157);
+      const c = hash(ix + (iy+1)*157), dd = hash(ix+1 + (iy+1)*157);
+      return a + (b-a)*ux + (c-a)*uy + (b-a+a-b-c+dd)*ux*uy;
     };
-    const fbmY = (px: number, py: number) => {
-      let v = 0, a = 1, f = freq;
+    // Domain-warp fBm: 4 octaves, per-octave seed offsets
+    const DW = size;
+    const fbm = (ox: number, oy: number, seedX: number, seedY: number) => {
+      let v = 0, a = 0.5, f = 3.0;
       for (let o = 0; o < 4; o++) {
-        v += Math.cos(px * f * 6.2831 * 0.8 + 2.7) * Math.sin(py * f * 6.2831 + 1.1) * a;
-        a *= 0.5; f *= 2.1;
+        const nx = ox/DW*f + seedX + o*31.7;
+        const ny = oy/DW*f + seedY + o*17.3;
+        v += (vnoise(nx, ny) * 2 - 1) * a;
+        a *= 0.5; f *= 2.0;
       }
       return v;
     };
     for (let y = 0; y < size; y++) {
       for (let x = 0; x < size; x++) {
-        const sx = x + fbmX(x, y) * amp;
-        const sy = y + fbmY(x, y) * amp;
-        // Bilinear sample
-        const x0 = Math.max(0, Math.min(size - 1, Math.floor(sx)));
-        const y0 = Math.max(0, Math.min(size - 1, Math.floor(sy)));
-        const x1 = Math.min(size - 1, x0 + 1);
-        const y1 = Math.min(size - 1, y0 + 1);
-        const tx = sx - x0, ty = sy - y0;
-        const i00 = (y0 * size + x0) * 4;
-        const i10 = (y0 * size + x1) * 4;
-        const i01 = (y1 * size + x0) * 4;
-        const i11 = (y1 * size + x1) * 4;
-        const di  = (y  * size + x)  * 4;
-        for (let c = 0; c < 4; c++) {
-          d[di+c] = Math.round(
-            s[i00+c] * (1-tx)*(1-ty) +
-            s[i10+c] * tx*(1-ty) +
-            s[i01+c] * (1-tx)*ty +
-            s[i11+c] * tx*ty
-          );
-        }
+        const sx = x + fbm(x, y, 0.0, 4.2) * amp;
+        const sy = y + fbm(x, y, 8.3, 1.7) * amp;
+        const x0 = Math.max(0, Math.min(size-1, Math.floor(sx)));
+        const y0 = Math.max(0, Math.min(size-1, Math.floor(sy)));
+        const x1 = Math.min(size-1, x0+1), y1 = Math.min(size-1, y0+1);
+        const tx = sx-x0, ty = sy-y0;
+        const i00=(y0*size+x0)*4, i10=(y0*size+x1)*4;
+        const i01=(y1*size+x0)*4, i11=(y1*size+x1)*4;
+        const di=(y*size+x)*4;
+        for (let c = 0; c < 4; c++)
+          d[di+c] = Math.round(s[i00+c]*(1-tx)*(1-ty)+s[i10+c]*tx*(1-ty)+s[i01+c]*(1-tx)*ty+s[i11+c]*tx*ty);
       }
     }
     ctx.putImageData(out, 0, 0);
