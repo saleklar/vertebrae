@@ -83,6 +83,8 @@ uniform vec3 color3;
 uniform float alphaThreshold;
 uniform float emitterTurbulence;
 uniform float emitterSpeed;
+uniform float vorticityConfinement;
+uniform float noiseType;
 
 varying vec2 vUv;
 varying vec3 vColor;
@@ -111,12 +113,38 @@ float noise(vec3 x) {
                    mix( hash(n + dot(step, vec3(0, 1, 1))), hash(n + dot(step, vec3(1, 1, 1))), u.x), u.y), u.z);
 }
 
+// Voronoi (cellular) noise
+float voronoiNoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    float minD = 8.0;
+    for(int xi = -1; xi <= 1; xi++) {
+        for(int yi = -1; yi <= 1; yi++) {
+            for(int zi = -1; zi <= 1; zi++) {
+                vec3 nb = vec3(float(xi), float(yi), float(zi));
+                float h = dot(i + nb, vec3(127.1, 311.7, 74.7));
+                vec3 pt = nb + fract(sin(vec3(h, h * 1.31, h * 2.71)) * 43758.5453) - f;
+                minD = min(minD, dot(pt, pt));
+            }
+        }
+    }
+    return sqrt(minD);
+}
+
+// Dispatch to selected noise type (uniform noiseType: 0=value, 1=voronoi, 2=invVoronoi, 3=value-hifreq)
+float noiseAt(vec3 p) {
+    if (noiseType < 0.5) return noise(p);
+    if (noiseType < 1.5) return voronoiNoise(p * 1.2);
+    if (noiseType < 2.5) return 1.0 - voronoiNoise(p);
+    return noise(p * 1.7) * 0.7 + noise(p * 3.1) * 0.3;
+}
+
 float fbm(vec3 p) {
     float f = 0.0;
     float amp = 0.5;
     vec3 shift = vec3(100.0);
     for(int i=0; i<4; i++) {
-        f += amp * noise(p);
+        f += amp * noiseAt(p);
         p = p * 2.01 + shift;
         amp *= 0.5;
     }
@@ -148,7 +176,18 @@ float getDensity(vec3 p, float t) {
 
     // Use lifted coordinates for sampling noise so turbulence follows the flame up
     vec3 np = vec3(p.x, liftedY, p.z) * scale * 0.5;
-    
+
+    // VORTICITY CONFINEMENT: domain-warp the sample space to create turbulent curling
+    // Uses a second noise field sampled at offset positions for the warp direction
+    if (vorticityConfinement > 0.01) {
+        vec3 wp = np * 0.8;
+        float wx = noise(wp + vec3(13.71, 7.33, 19.17)) - 0.5;
+        float wy = noise(wp + vec3(-9.13, 2.77, -5.83)) - 0.5;
+        float wz = noise(wp + vec3(-5.83, 23.11, -11.99)) - 0.5;
+        // Primarily warp XZ (horizontal swirl), gentle Y (vertical stretch)
+        np += vec3(wx, wy * 0.15, wz) * vorticityConfinement * 0.045;
+    }
+
     // To make it seamlessly loop over t from 0.0 to 1.0
     // We blend two noise offsets
     // Pass 1: current time

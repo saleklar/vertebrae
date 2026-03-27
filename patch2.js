@@ -1,19 +1,35 @@
 const fs = require('fs');
-let code = fs.readFileSync('e:/VIBE_PROJECTS/vertebrae/src/App.tsx', 'utf8');
+const filepath = 'src/Scene3D.tsx';
+let content = fs.readFileSync(filepath, 'utf8');
+const newText = fs.readFileSync('new_physics.txt', 'utf8');
 
-const targetStr = \        const dataUrl = await readFileAsDataUrl(file);
-        handleUpdateEmitterProperty('particleSpriteImageDataUrl', dataUrl);\;
+const startTag = 'if (usePhysicsF && physicsForceRef.current.length > 0)';
+const startIdx = content.indexOf(startTag);
 
-const replacementStr = \        const dataUrl = await readFileAsDataUrl(file);
-        const newStored = { id: crypto.randomUUID(), name: file.name, dataUrl, timestamp: Date.now() };
-        saveImageToDB(newStored).catch(e => console.warn('Could not save to library', e));
-        setSpriteLibrary(prev => [newStored, ...prev]);
-        handleUpdateEmitterProperty('particleSpriteImageDataUrl', dataUrl);\;
+if (startIdx !== -1) {
+    let braceCount = 0;
+    let started = false;
+    let endIdx = -1;
+    for (let i = startIdx; i < content.length; i++) {
+        if (content[i] === '{') {
+            braceCount++;
+            started = true;
+        } else if (content[i] === '}') {
+            braceCount--;
+        }
+        if (started && braceCount === 0) {
+            endIdx = i;
+            break;
+        }
+    }
 
-if (code.includes(targetStr)) {
-    code = code.replace(targetStr, replacementStr);
-    fs.writeFileSync('e:/VIBE_PROJECTS/vertebrae/src/App.tsx', code);
-    console.log('App.tsx upload handler patched.');
+    if (endIdx !== -1) {
+        content = content.substring(0, startIdx) + newText + content.substring(endIdx + 1);
+        fs.writeFileSync(filepath, content, 'utf8');
+        console.log("Updated!");
+    } else {
+        console.log("Could not find matching end brace for block.");
+    }
 } else {
-    console.log('Target string not found.');
+    console.log("Tags not found");
 }

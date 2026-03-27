@@ -1,9 +1,12 @@
 import { generateFireSequenceHeadless, defaultTorchParams, defaultCampfireParams } from './FireHeadless';
-import { defaultLightningOpts, LightningGenOptions } from './LightningGenerator';
+import { defaultLightningOpts, LightningGenOptions, exportLightningHierarchyToSpine } from './LightningGenerator';
+import { exportSaberToSpine } from './SaberExporter';
+import JSZip from 'jszip';
 import * as THREE from 'three';
 import { loadImagesFromDB, saveImageToDB, deleteImageFromDB, StoredImage } from './imageStorage';
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Scene3D, Scene3DRef, SpineAttachmentInfo, SpineFrameOverrides, TintStop } from './Scene3D';
+import { MarkingMenu, MarkingMenuItem } from './MarkingMenu';
 import { Animator3D } from './Animator3D';
 import { CurveEditor } from './CurveEditor';
 import { ParticleCreator } from './ParticleCreator';
@@ -37,6 +40,8 @@ export type SnapSettings = {
   snapY: boolean;
   snapZ: boolean;
   snapTarget: 'vertices' | 'lines' | 'both';
+  snapTo3DObject?: boolean;
+  snap3DTarget?: 'face' | 'vertex';
 };
 
 export type PhysicsForceType = 'gravity' | 'wind' | 'tornado' | 'drag' | 'damping' | 'attractor' | 'repulsor' | 'collider' | 'flow-curve' | 'vortex' | 'turbulence' | 'thermal-updraft';
@@ -155,6 +160,8 @@ const DEFAULT_SNAP_SETTINGS: SnapSettings = {
   snapY: false,
   snapZ: false,
   snapTarget: 'both',
+  snapTo3DObject: false,
+  snap3DTarget: 'face',
 };
 
 const RECENT_FILES_STORAGE_KEY = 'vertebrae_recent_files';
@@ -431,13 +438,71 @@ function spineBoneWorldTransform(
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+function SpiralPropertiesPanel({
+  objectId,
+  initialTurns,
+  initialDiameter,
+  initialCW,
+  onRegenerate,
+}: {
+  objectId: string;
+  initialTurns: number;
+  initialDiameter: number;
+  initialCW: boolean;
+  onRegenerate: (id: string, turns: number, diameter: number, cw: boolean) => void;
+}) {
+  const [turns,    setTurns]    = React.useState(initialTurns);
+  const [diameter, setDiameter] = React.useState(initialDiameter);
+  const [cw,       setCW]       = React.useState(initialCW);
+  React.useEffect(() => {
+    setTurns(initialTurns);
+    setDiameter(initialDiameter);
+    setCW(initialCW);
+  }, [objectId]);
+  return (
+    <>
+      <div style={{ fontWeight: 700, fontSize: '0.82rem', marginBottom: '6px', color: '#7ab8f5' }}>🌀 Spiral Parameters</div>
+      <label>Turns: {turns}</label>
+      <input type="range" min={0.5} max={20} step={0.5} value={turns}
+        onChange={e => setTurns(Number(e.target.value))} />
+      <input type="number" min={0.5} max={20} step={0.5} value={turns}
+        onChange={e => setTurns(Math.max(0.5, Number(e.target.value)))}
+        style={{ width: '70px', marginBottom: '6px' }} />
+      <label>Diameter: {diameter}</label>
+      <input type="range" min={10} max={2000} step={10} value={diameter}
+        onChange={e => setDiameter(Number(e.target.value))} />
+      <input type="number" min={10} max={2000} step={10} value={diameter}
+        onChange={e => setDiameter(Math.max(10, Number(e.target.value)))}
+        style={{ width: '70px', marginBottom: '6px' }} />
+      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
+        <input type="checkbox" checked={cw} onChange={e => setCW(e.target.checked)} />
+        Clockwise
+      </label>
+      <button type="button"
+        onClick={() => onRegenerate(objectId, turns, diameter, cw)}
+        style={{ marginTop: '6px', padding: '4px 12px', background: '#3e7de8', border: 'none', borderRadius: '4px', color: '#fff', fontSize: '0.75rem', cursor: 'pointer', fontWeight: 600, width: '100%' }}>
+        Regenerate
+      </button>
+    </>
+  );
+}
+
 export function App() {
   const [spriteLibrary, setSpriteLibrary] = useState<StoredImage[]>([]);
+  const [customFlamePresets, setCustomFlamePresets] = useState<{label: string; emoji: string; tendrilDensity: number; props: any}[]>(() => {
+    try { return JSON.parse(localStorage.getItem('v_customFlamePresets') || '[]'); } catch(e) { return []; }
+  });
   useEffect(() => {
     loadImagesFromDB().then((imgs) => setSpriteLibrary(imgs));
   }, []);
     // Add state for Bezier curve drawing mode
     const [drawBezierCurveMode, setDrawBezierCurveMode] = useState(false);
+    const [bezierSurfaceObjectId, setBezierSurfaceObjectId] = useState<string | null>(null);
+    // Vine generator state
+    const [showVinePanel, setShowVinePanel] = useState(false);
+    const [vineNumPoints, setVineNumPoints] = useState(9);
+    const [vineLength, setVineLength] = useState(120);
+    const [vineCurliness, setVineCurliness] = useState(0.55);
   const [appMode, setAppMode] = useState<'particle-system' | '3d-animator'>('particle-system');
   const [showScenePropertiesPanel, setShowScenePropertiesPanel] = useState(true);
   const [leftPanelTab, setLeftPanelTab] = useState<'scene' | 'hierarchy' | 'spine'>('hierarchy');
@@ -455,11 +520,27 @@ export function App() {
   const [spineLayerSpread, setSpineLayerSpread] = useState(0);
   const [renamingObjectId, setRenamingObjectId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  const [collapsedHierarchyIds, setCollapsedHierarchyIds] = useState<Set<string>>(new Set);
+  const [hierarchyHiddenTypes, setHierarchyHiddenTypes] = useState<Set<string>>(new Set<string>());
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
   const [showPresetsMenu, setShowPresetsMenu] = useState(false);
   const [showCreateSubmenu, setShowCreateSubmenu] = useState<'Shapes' | 'Modifiers' | 'Presets' | null>(null);
-  const [activeShelfTab, setActiveShelfTab] = useState<'Objects' | 'Shapes' | 'Modifiers' | 'Presets' | 'FX' | null>('Objects');
+  const [activeShelfTab, setActiveShelfTab] = useState<'Objects' | '3D' | '2D' | 'Curves' | 'Modifiers' | 'Particle Systems' | 'FX' | null>('Objects');
+  const [spiralDialog, setSpiralDialog] = useState<{ turns: number; diameter: number; cw: boolean } | null>(null);
+  const [viewportSeqDialog, setViewportSeqDialog] = useState<{
+    lightningId: string;
+    name: string;
+    width: number;
+    height: number;
+    frameCount: number;
+    fps: number;
+    mode: string;
+    rendering: boolean;
+  } | null>(null);
+  const [renderFramePreview, setRenderFramePreview] = useState<{
+    width: number; height: number; frameCount: number; fps: number;
+  } | null>(null);
   const [showPrefsSubmenu, setShowPrefsSubmenu] = useState(false);
   const [guiScale, setGuiScaleState] = useState<number>(() => {
     try { const v = localStorage.getItem('vertebrae_gui_scale'); return v ? parseFloat(v) : 1.0; } catch { return 1.0; }
@@ -472,6 +553,89 @@ export function App() {
 
   // Handler to enable Bezier curve drawing mode
   const importModelInputRef = useRef<HTMLInputElement>(null);
+  const importCurveInputRef = useRef<HTMLInputElement>(null);
+
+  const buildSpiralPts = useCallback((
+    turns: number,
+    diameter: number,
+    cw: boolean,
+  ): { x: number; y: number; z: number }[] => {
+    const R = diameter / 2;
+    const steps = Math.max(24, Math.round(turns * 24));
+    const dir = cw ? 1 : -1;
+    return Array.from({ length: steps }, (_, i) => {
+      const t = (i / (steps - 1)) * turns * Math.PI * 2 * dir;
+      const r = (i / (steps - 1)) * R;
+      return { x: Math.cos(t - Math.PI / 2) * r, y: 0, z: Math.sin(t - Math.PI / 2) * r };
+    });
+  }, []);
+
+  const handleCreateSpiral = useCallback((
+    turns: number,
+    diameter: number,
+    cw: boolean,
+  ) => {
+    const pts = buildSpiralPts(turns, diameter, cw);
+    const pathId = 'spiral_' + Date.now();
+    const pathObject: SceneObject = {
+      id: pathId,
+      name: 'Spiral Path',
+      type: 'Path',
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      parentId: null,
+      properties: { spiralShape: true, spiralTurns: turns, spiralDiameter: diameter, spiralCW: cw },
+    };
+    const pointObjects: SceneObject[] = pts.map((pt, i) => ({
+      id: 'spiralpt_' + Date.now() + '_' + i,
+      name: 'Point ' + i,
+      type: 'PathPoint',
+      position: { x: pt.x, y: pt.y, z: pt.z },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      parentId: pathId,
+      properties: {},
+    }));
+    setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
+    setSelectedObjectId(pathId);
+    setShowScenePropertiesPanel(true);
+    setSpiralDialog(null);
+  }, [buildSpiralPts]);
+
+  const handleRegenerateSpiral = useCallback((
+    pathId: string,
+    turns: number,
+    diameter: number,
+    cw: boolean,
+  ) => {
+    const pts = buildSpiralPts(turns, diameter, cw);
+    setSceneObjects(prev => {
+      // remove old PathPoints belonging to this path
+      const filtered = prev.filter(o => !(o.type === 'PathPoint' && o.parentId === pathId));
+      // update spiral properties on the Path node
+      const withProps = filtered.map(o =>
+        o.id === pathId
+          ? { ...o, properties: { ...(o.properties as any), spiralShape: true, spiralTurns: turns, spiralDiameter: diameter, spiralCW: cw } }
+          : o
+      );
+      // insert new points right after the path in the list
+      const pathIdx = withProps.findIndex(o => o.id === pathId);
+      const newPoints: SceneObject[] = pts.map((pt, i) => ({
+        id: 'spiralpt_' + Date.now() + '_' + i,
+        name: 'Point ' + i,
+        type: 'PathPoint',
+        position: { x: pt.x, y: pt.y, z: pt.z },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+        parentId: pathId,
+        properties: {},
+      }));
+      return pathIdx >= 0
+        ? [...withProps.slice(0, pathIdx + 1), ...newPoints, ...withProps.slice(pathIdx + 1)]
+        : [...withProps, ...newPoints];
+    });
+  }, [buildSpiralPts]);
   const handleImportModelFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -498,6 +662,104 @@ export function App() {
     e.target.value = '';
   }, []);
 
+  const handleImportCurveFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    const ext = file.name.split('.').pop()?.toLowerCase() ?? '';
+    if (!['svg', 'ai'].includes(ext)) { alert('Supported formats: SVG, AI (SVG-based)'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = reader.result as string;
+      let svgText = text;
+      // AI files are often SVG with a different extension
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, 'image/svg+xml');
+      const pathEls = Array.from(doc.querySelectorAll('path'));
+      if (pathEls.length === 0) { alert('No path elements found in the file.'); return; }
+
+      // Tokenise an SVG path 'd' attribute into flat points (polyline approximation)
+      const parseSvgPathToPoints = (d: string): { x: number; z: number }[] => {
+        const pts: { x: number; z: number }[] = [];
+        const nums = (s: string) => s.trim().split(/[\s,]+/).map(Number);
+        // Split into commands
+        const cmds = d.match(/[MmLlHhVvCcSsQqTtAaZz][^MmLlHhVvCcSsQqTtAaZz]*/g) ?? [];
+        let cx = 0, cy = 0;
+        for (const cmd of cmds) {
+          const type = cmd[0];
+          const args = nums(cmd.slice(1));
+          switch (type) {
+            case 'M': for (let i = 0; i < args.length; i += 2) { cx = args[i]; cy = args[i+1]; pts.push({ x: cx, z: cy }); } break;
+            case 'm': for (let i = 0; i < args.length; i += 2) { cx += args[i]; cy += args[i+1]; pts.push({ x: cx, z: cy }); } break;
+            case 'L': for (let i = 0; i < args.length; i += 2) { cx = args[i]; cy = args[i+1]; pts.push({ x: cx, z: cy }); } break;
+            case 'l': for (let i = 0; i < args.length; i += 2) { cx += args[i]; cy += args[i+1]; pts.push({ x: cx, z: cy }); } break;
+            case 'H': for (let i = 0; i < args.length; i++) { cx = args[i]; pts.push({ x: cx, z: cy }); } break;
+            case 'h': for (let i = 0; i < args.length; i++) { cx += args[i]; pts.push({ x: cx, z: cy }); } break;
+            case 'V': for (let i = 0; i < args.length; i++) { cy = args[i]; pts.push({ x: cx, z: cy }); } break;
+            case 'v': for (let i = 0; i < args.length; i++) { cy += args[i]; pts.push({ x: cx, z: cy }); } break;
+            case 'C': for (let i = 0; i < args.length; i += 6) { cx = args[i+4]; cy = args[i+5]; pts.push({ x: cx, z: cy }); } break;
+            case 'c': for (let i = 0; i < args.length; i += 6) { cx += args[i+4]; cy += args[i+5]; pts.push({ x: cx, z: cy }); } break;
+            case 'S': case 'Q': for (let i = 0; i < args.length; i += 4) { cx = args[i+2]; cy = args[i+3]; pts.push({ x: cx, z: cy }); } break;
+            case 's': case 'q': for (let i = 0; i < args.length; i += 4) { cx += args[i+2]; cy += args[i+3]; pts.push({ x: cx, z: cy }); } break;
+            case 'T': for (let i = 0; i < args.length; i += 2) { cx = args[i]; cy = args[i+1]; pts.push({ x: cx, z: cy }); } break;
+            case 't': for (let i = 0; i < args.length; i += 2) { cx += args[i]; cy += args[i+1]; pts.push({ x: cx, z: cy }); } break;
+            case 'Z': case 'z': if (pts.length > 0) pts.push({ ...pts[0] }); break;
+          }
+        }
+        return pts;
+      };
+
+      const svgViewBox = doc.querySelector('svg')?.getAttribute('viewBox');
+      const vb = svgViewBox ? svgViewBox.split(/[\s,]+/).map(Number) : null;
+      const vbW = vb ? vb[2] : 500;
+      const vbH = vb ? vb[3] : 500;
+      const scale = 160 / Math.max(vbW, vbH);
+
+      pathEls.forEach((pathEl, pi) => {
+        const d = pathEl.getAttribute('d') ?? '';
+        if (!d.trim()) return;
+        const raw = parseSvgPathToPoints(d);
+        if (raw.length < 2) return;
+        // Centre + scale
+        const xs = raw.map(p => p.x), zs = raw.map(p => p.z);
+        const minX = Math.min(...xs), maxX = Math.max(...xs);
+        const minZ = Math.min(...zs), maxZ = Math.max(...zs);
+        const cxC = (minX + maxX) / 2, czC = (minZ + maxZ) / 2;
+        const pts3d = raw.map(p => ({
+          x: (p.x - cxC) * scale,
+          y: 0,
+          z: (p.z - czC) * scale,
+        }));
+        const pathId = 'svgpath_' + Date.now() + '_' + pi;
+        const baseName = file.name.replace(/\.[^.]+$/, '');
+        const pathObject: SceneObject = {
+          id: pathId,
+          name: pathEls.length > 1 ? `${baseName} Path ${pi + 1}` : `${baseName} Path`,
+          type: 'Path',
+          position: { x: 0, y: 0, z: 0 },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+          parentId: null,
+          properties: {},
+        };
+        const pointObjects: SceneObject[] = pts3d.map((pt, i) => ({
+          id: 'svgpt_' + Date.now() + '_' + pi + '_' + i,
+          name: 'Point ' + i,
+          type: 'PathPoint',
+          position: { x: pt.x, y: pt.y, z: pt.z },
+          rotation: { x: 0, y: 0, z: 0 },
+          scale: { x: 1, y: 1, z: 1 },
+          parentId: pathId,
+          properties: {},
+        }));
+        setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
+        setSelectedObjectId(pathId);
+        setShowScenePropertiesPanel(true);
+      });
+    };
+    reader.readAsText(file);
+  }, []);
+
   const handleStartDrawBezierCurve = useCallback(() => {
     setDrawBezierCurveMode(true);
   }, []);
@@ -505,6 +767,7 @@ export function App() {
   // Handler to exit Bezier curve drawing mode (could be called from Scene3D or UI)
     const handleFinishDrawBezierCurve = useCallback((points?: {x:number, y:number, z:number}[]) => {
       setDrawBezierCurveMode(false);
+      setBezierSurfaceObjectId(null);
       if (!points || points.length < 2) return;
       
       const pathId = 'drawn_bezier_' + Date.now();
@@ -533,7 +796,164 @@ export function App() {
       setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
     }, []);
 
-    // ── applySpineJson: parse Spine JSON into scene bones + keyframes ──
+  /** Generate a closed or open bezier path from a named 2-D shape preset */
+  const handleCreateBezierShape = useCallback((shape: string) => {
+    const R = 80; // base radius / half-size in world units
+    let pts: { x: number; y: number; z: number }[] = [];
+    const ring = (n: number, rx: number, rz: number, startAngle = -Math.PI / 2) =>
+      Array.from({ length: n }, (_, i) => {
+        const a = startAngle + (i / n) * Math.PI * 2;
+        return { x: Math.cos(a) * rx, y: 0, z: Math.sin(a) * rz };
+      });
+
+    switch (shape) {
+      case 'BZ Circle':
+        pts = ring(24, R, R);
+        break;
+      case 'BZ Ellipse':
+        pts = ring(24, R * 1.5, R * 0.65);
+        break;
+      case 'BZ Square': {
+        const h = R * 0.9;
+        pts = [
+          { x: -h, y: 0, z: -h }, { x:  h, y: 0, z: -h },
+          { x:  h, y: 0, z:  h }, { x: -h, y: 0, z:  h },
+        ];
+        break;
+      }
+      case 'BZ Rectangle': {
+        const w = R * 1.4, d = R * 0.7;
+        pts = [
+          { x: -w, y: 0, z: -d }, { x:  w, y: 0, z: -d },
+          { x:  w, y: 0, z:  d }, { x: -w, y: 0, z:  d },
+        ];
+        break;
+      }
+      case 'BZ Triangle':
+        pts = ring(3, R, R);
+        break;
+      case 'BZ Diamond':
+        pts = ring(4, R, R, 0);
+        break;
+      case 'BZ Pentagon':
+        pts = ring(5, R, R);
+        break;
+      case 'BZ Hexagon':
+        pts = ring(6, R, R, 0);
+        break;
+      case 'BZ Octagon':
+        pts = ring(8, R, R, -Math.PI / 8);
+        break;
+      case 'BZ Star': {
+        const n = 5, inner = R * 0.4;
+        pts = Array.from({ length: n * 2 }, (_, i) => {
+          const a = -Math.PI / 2 + (i / (n * 2)) * Math.PI * 2;
+          const r = i % 2 === 0 ? R : inner;
+          return { x: Math.cos(a) * r, y: 0, z: Math.sin(a) * r };
+        });
+        break;
+      }
+      case 'BZ Star 6': {
+        const n = 6, inner = R * 0.45;
+        pts = Array.from({ length: n * 2 }, (_, i) => {
+          const a = -Math.PI / 2 + (i / (n * 2)) * Math.PI * 2;
+          const r = i % 2 === 0 ? R : inner;
+          return { x: Math.cos(a) * r, y: 0, z: Math.sin(a) * r };
+        });
+        break;
+      }
+      case 'BZ Cross': {
+        const a = R * 0.35, b = R;
+        pts = [
+          { x: -a, y: 0, z: -b }, { x:  a, y: 0, z: -b },
+          { x:  a, y: 0, z: -a }, { x:  b, y: 0, z: -a },
+          { x:  b, y: 0, z:  a }, { x:  a, y: 0, z:  a },
+          { x:  a, y: 0, z:  b }, { x: -a, y: 0, z:  b },
+          { x: -a, y: 0, z:  a }, { x: -b, y: 0, z:  a },
+          { x: -b, y: 0, z: -a }, { x: -a, y: 0, z: -a },
+        ];
+        break;
+      }
+      case 'BZ Arrow': {
+        pts = [
+          { x:  0,        y: 0, z: -R       },
+          { x:  R * 0.6,  y: 0, z: -R * 0.2 },
+          { x:  R * 0.25, y: 0, z: -R * 0.2 },
+          { x:  R * 0.25, y: 0, z:  R * 0.5 },
+          { x: -R * 0.25, y: 0, z:  R * 0.5 },
+          { x: -R * 0.25, y: 0, z: -R * 0.2 },
+          { x: -R * 0.6,  y: 0, z: -R * 0.2 },
+        ];
+        break;
+      }
+      case 'BZ Heart': {
+        const steps = 32;
+        pts = Array.from({ length: steps }, (_, i) => {
+          const t = (i / steps) * Math.PI * 2 - Math.PI / 2;
+          const hx = R * 0.7 * Math.pow(Math.sin(t), 3);
+          const hy = -R * 0.7 * (0.8125 * Math.cos(t) - 0.3125 * Math.cos(2 * t) - 0.125 * Math.cos(3 * t) - 0.0625 * Math.cos(4 * t));
+          return { x: hx, y: 0, z: hy };
+        });
+        break;
+      }
+      case 'BZ Spiral': {
+        const turns = 3, steps = 48;
+        pts = Array.from({ length: steps }, (_, i) => {
+          const t = (i / (steps - 1)) * turns * Math.PI * 2;
+          const r = (i / (steps - 1)) * R;
+          return { x: Math.cos(t - Math.PI / 2) * r, y: 0, z: Math.sin(t - Math.PI / 2) * r };
+        });
+        break;
+      }
+      case 'BZ Wave': {
+        const steps = 32;
+        pts = Array.from({ length: steps }, (_, i) => {
+          const tx = (i / (steps - 1)) * R * 2 - R;
+          const tz = Math.sin((i / (steps - 1)) * Math.PI * 4) * R * 0.4;
+          return { x: tx, y: 0, z: tz };
+        });
+        break;
+      }
+      default:
+        return;
+    }
+
+    if (pts.length < 2) return;
+
+    // Close loops for closed shapes (everything except spiral, wave, arrow)
+    const openShapes = ['BZ Spiral', 'BZ Wave', 'BZ Arrow'];
+    if (!openShapes.includes(shape)) pts.push({ ...pts[0] }); // close loop
+
+    // Straight-sided shapes should render as sharp polylines, not smooth splines
+    const linearShapes = ['BZ Square', 'BZ Rectangle', 'BZ Triangle', 'BZ Diamond',
+      'BZ Pentagon', 'BZ Hexagon', 'BZ Octagon', 'BZ Star', 'BZ Star 6', 'BZ Cross', 'BZ Arrow'];
+    const isLinear = linearShapes.includes(shape);
+
+    const pathId = 'bzshape_' + shape.replace(/\s/g, '_') + '_' + Date.now();
+    const pathObject: SceneObject = {
+      id: pathId,
+      name: shape.replace('BZ ', '') + ' Path',
+      type: 'Path',
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      parentId: null,
+      properties: isLinear ? { linear: true } : {},
+    };
+    const pointObjects: SceneObject[] = pts.map((pt, i) => ({
+      id: 'bzpt_' + Date.now() + '_' + i,
+      name: 'Point ' + i,
+      type: 'PathPoint',
+      position: { x: pt.x, y: pt.y, z: pt.z },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      parentId: pathId,
+      properties: {},
+    }));
+    setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
+    setSelectedObjectId(pathId);
+    setShowScenePropertiesPanel(true);
+  }, []);
   const applySpineJson = useCallback((
     spineJson: any,
     fileName: string,
@@ -710,7 +1130,7 @@ export function App() {
 
   const handleExportSpine = async () => {
     if (!scene3DRef.current) return;
-    const spineData = scene3DRef.current.exportSpineData();
+    const spineData = scene3DRef.current.exportSpineData({ excludeIds: [...spineExcludedObjectIds] });
     if (!spineData) {
       alert("No particle cache data available. Please play the animation to cache frames first.");
       return;
@@ -767,6 +1187,15 @@ export function App() {
   const [viewMode, setViewMode] = useState<'perspective' | 'x' | 'y' | 'z'>('perspective');
   const [quadViewport, setQuadViewport] = useState(false);
   const [manipulatorMode, setManipulatorMode] = useState<'translate' | 'rotate' | 'scale'>('translate');
+  const [lookThroughCamera, setLookThroughCamera] = useState(false);
+  const [showCaptureOverlay, setShowCaptureOverlay] = useState(false);
+  const [capturePadding, setCapturePadding] = useState(0.3);
+  const [manualCropRect, setManualCropRect] = useState<{left:number;top:number;width:number;height:number}|null>(null);
+  const [markingMenu, setMarkingMenu] = useState<null | { x: number; y: number; type: 'tool' | 'context'; panel?: 'top' | 'front' | 'side' | 'perspective' }>(null);
+  const [quadPanelViews, setQuadPanelViews] = useState<{ top: 'perspective'|'x'|'y'|'z'; front: 'perspective'|'x'|'y'|'z'; side: 'perspective'|'x'|'y'|'z'; perspective: 'perspective'|'x'|'y'|'z' }>({ top: 'y', front: 'z', side: 'x', perspective: 'perspective' });
+  const markingMenuHoveredRef = useRef<MarkingMenuItem | null>(null);
+  const mousePosRef = useRef({ x: 0, y: 0 });
+  const spaceHoldRef = useRef<{ timer: ReturnType<typeof setTimeout> | null; menuShown: boolean }>({ timer: null, menuShown: false });
   const [sceneObjects, setSceneObjects] = useState<SceneObject[]>([]);
   const [undoStack, setUndoStack] = useState<SceneObject[][]>([]);
   const [redoStack, setRedoStack] = useState<SceneObject[][]>([]);
@@ -774,6 +1203,189 @@ export function App() {
   const previousSceneObjectsRef = useRef<SceneObject[]>([]);
   const scene3DRef = useRef<Scene3DRef>(null);
   const spineInputRef = useRef<HTMLInputElement>(null);
+
+  const handleExportLightningToSpine = useCallback(async () => {
+    if (!selectedObjectId) return;
+    const lObj = sceneObjects.find(o => o.id === selectedObjectId && o.type === 'Lightning');
+    if (!lObj) return;
+    const lp = (lObj.properties ?? {}) as any;
+    const name = (lObj.name || 'lightning').replace(/\s+/g, '_').toLowerCase();
+    const opts = { ...defaultLightningOpts(), ...lp };
+
+    // ── Viewport PNG sequence — open settings dialog before rendering ─────────
+    if ((lp.exportMode ?? 'sequence') === 'viewport-sequence') {
+      setViewportSeqDialog({
+        lightningId: lObj.id,
+        name,
+        width:       lp.viewportExportWidth  ?? 512,
+        height:      lp.viewportExportHeight ?? 512,
+        frameCount:  opts.frameCount,
+        fps:         opts.fps,
+        mode:        opts.mode ?? 'loop-strike',
+        rendering:   false,
+      });
+      return;
+    }
+
+    // ── Spine hierarchy export ───────────────────────────────────────────────
+    const children = sceneObjects.filter(o => o.parentId === lObj.id && o.type === 'LightningPoint');
+    const startPt = children.find(o => (o.properties as any)?.role === 'start');
+    const endPt   = children.find(o => (o.properties as any)?.role === 'end');
+    if (!startPt || !endPt) { alert('Lightning is missing Start or End points.'); return; }
+
+    let result: ReturnType<typeof exportLightningHierarchyToSpine> | null = null;
+    try {
+      result = exportLightningHierarchyToSpine(
+        startPt.position.x, startPt.position.y,
+        endPt.position.x,   endPt.position.y,
+        opts,
+        name,
+      );
+    } catch (err: any) {
+      console.error('Lightning export failed:', err);
+      alert('Export failed: ' + (err?.message ?? String(err)));
+      return;
+    }
+
+    const { spineJson, allSegmentFrames } = result;
+    const jsonString = JSON.stringify(spineJson, null, 2);
+
+    // Build asset list: JSON + one PNG per frame per segment
+    const assets: { name: string; data: string; isText: boolean }[] = [
+      { name: `${name}.json`, data: jsonString, isText: true },
+    ];
+    for (const [segKey, frames] of Object.entries(allSegmentFrames)) {
+      frames.forEach((dataUrl, fi) => {
+        const base64 = dataUrl.split(',')[1] ?? '';
+        const fileName = `images/${name}/${segKey}${fi.toString().padStart(4, '0')}.png`;
+        assets.push({ name: fileName, data: base64, isText: false });
+      });
+    }
+
+    // Electron path
+    if ((window as any).vertebrae?.isElectron && (window as any).vertebrae?.saveLightningExport) {
+      const res = await (window as any).vertebrae.saveLightningExport({ assets, projectName: name });
+      if (!res.success && res.error !== 'Cancelled') alert('Error saving: ' + res.error);
+      return;
+    }
+
+    // Browser fallback — download zip
+    try {
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+      for (const asset of assets) {
+        if (asset.isText) {
+          zip.file(asset.name, asset.data);
+        } else {
+          zip.file(asset.name, asset.data, { base64: true });
+        }
+      }
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name}_spine_export.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      console.error('zip error:', err);
+      alert('Error creating zip: ' + (err?.message ?? String(err)));
+    }
+  }, [selectedObjectId, sceneObjects]);
+
+  const doViewportSeqExport = useCallback(async (
+    lightningId: string,
+    name: string,
+    width: number,
+    height: number,
+    frameCount: number,
+    fps: number,
+    mode: string,
+  ) => {
+    setViewportSeqDialog(prev => prev ? { ...prev, rendering: true } : prev);
+    let frames: string[] = [];
+    try {
+      if (!scene3DRef.current) throw new Error('Scene not ready.');
+      frames = await scene3DRef.current.exportLightningSequenceFromViewport({
+        lightningId,
+        frameCount: Math.max(1, frameCount),
+        fps,
+        width,
+        height,
+        mode: mode as any,
+      });
+    } catch (err: any) {
+      console.error('Viewport export failed:', err);
+      alert('Viewport export failed: ' + (err?.message ?? String(err)));
+      setViewportSeqDialog(prev => prev ? { ...prev, rendering: false } : prev);
+      return;
+    }
+    setViewportSeqDialog(null);
+    if (!frames.length) { alert('No frames captured.'); return; }
+
+    const assets: { name: string; data: string; isText: boolean }[] = [];
+    frames.forEach((dataUrl, fi) => {
+      const base64 = dataUrl.split(',')[1] ?? '';
+      assets.push({ name: `${name}${fi.toString().padStart(4, '0')}.png`, data: base64, isText: false });
+    });
+
+    if ((window as any).vertebrae?.isElectron && (window as any).vertebrae?.saveLightningExport) {
+      const res = await (window as any).vertebrae.saveLightningExport({ assets, projectName: name });
+      if (!res.success && res.error !== 'Cancelled') alert('Error saving: ' + res.error);
+      return;
+    }
+    try {
+      const JSZip = (await import('jszip')).default;
+      const zip = new JSZip();
+      for (const asset of assets) zip.file(asset.name, asset.data, { base64: true });
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${name}_viewport_sequence.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      alert('Error creating zip: ' + (err?.message ?? String(err)));
+    }
+  }, []);
+
+  // Vine generator: auto-grow a bezier path on a surface
+  const handleGenerateVine = useCallback(() => {
+    if (!selectedObjectId) return;
+    const pts = scene3DRef.current?.generateVineOnSurface(
+      selectedObjectId,
+      vineNumPoints,
+      vineLength,
+      vineCurliness,
+    );
+    if (!pts || pts.length < 2) return;
+    setShowVinePanel(false);
+    // Directly create bezier path objects (same logic as handleFinishDrawBezierCurve)
+    const pathId = 'vine_bezier_' + Date.now();
+    const pathObject: SceneObject = {
+      id: pathId,
+      name: 'Vine Path',
+      type: 'Path',
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      parentId: null,
+      properties: {},
+    };
+    const pointObjects: SceneObject[] = pts.map((pt, i) => ({
+      id: 'vine_pt_' + Date.now() + '_' + i,
+      name: 'Point ' + i,
+      type: 'PathPoint',
+      position: { x: pt.x, y: pt.y, z: pt.z },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale: { x: 1, y: 1, z: 1 },
+      parentId: pathId,
+      properties: {},
+    }));
+    setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
+    setSelectedObjectId(pathId);
+  }, [selectedObjectId, vineNumPoints, vineLength, vineCurliness, setSceneObjects, setSelectedObjectId]);
   
   // Timeline state
   const [currentFrame, setCurrentFrame] = useState(0);
@@ -801,6 +1413,18 @@ export function App() {
   const [showPhysicsPanel, setShowPhysicsPanel] = useState(false);
   const [selectedForceId, setSelectedForceId] = useState<string | null>(null);
   const [draggingForceId, setDraggingForceId] = useState<string | null>(null);
+  const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+  const [pendingDrop, setPendingDrop] = useState<{ sourceId: string; targetId: string; x: number; y: number } | null>(null);
+  // IDs explicitly excluded from Spine animation export (all included by default)
+  const [spineExcludedObjectIds, setSpineExcludedObjectIds] = useState<Set<string>>(new Set());
+  const toggleSpineExclude = useCallback((id: string) => {
+    setSpineExcludedObjectIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
   const [dragCursorPos, setDragCursorPos] = useState<{ x: number; y: number } | null>(null);
   const hierarchyTreeRef = useRef<HTMLDivElement>(null);
   const hierarchyNodeRefsRef = useRef<Map<string, { element: HTMLElement; type: 'emitter' | 'force' }>>(new Map());
@@ -1804,7 +2428,7 @@ export function App() {
       id: `${objectType.toLowerCase()}_${Date.now()}`,
       name: objectType.toLowerCase(),
       type: objectType,
-      position: { x: 0, y: 0, z: 0 },
+      position: objectType === 'Camera' ? { x: 0, y: 150, z: 400 } : { x: 0, y: 0, z: 0 },
       rotation: { x: 0, y: 0, z: 0 },
       scale: { x: 1, y: 1, z: 1 },
       parentId: null,
@@ -1854,7 +2478,26 @@ export function App() {
       return;
     }
 
+    if (objectType === 'Camera') {
+      newObject.properties = { fov: 75 };
+      // Auto-create a movable CameraTarget child at the origin
+      const targetObj: SceneObject = {
+        id: `cameratarget_${Date.now() + 1}`,
+        name: 'camera target',
+        type: 'CameraTarget',
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: 0, y: 0, z: 0 },
+        scale: { x: 1, y: 1, z: 1 },
+        parentId: newObject.id,
+      };
+      setSceneObjects((prev) => [...prev, newObject, targetObj]);
+      setSelectedObjectId(newObject.id);
+      setShowCreateMenu(false);
+      return;
+    }
+
     setSceneObjects((prev) => [...prev, newObject]);
+    setSelectedObjectId(newObject.id);
     setShowCreateMenu(false);
   }, []);
 
@@ -2147,6 +2790,167 @@ export function App() {
     setShowPresetsMenu(false);
   }, []);
 
+  const handleCreateParticlePreset = useCallback((
+    presetType: 'rain' | 'snow' | 'explosion' | 'confetti' | 'magic-dust' | 'bubbles' | 'fireflies' | 'embers' | 'galaxy' | 'mist'
+  ) => {
+    const mkCanvas = (draw: (ctx: CanvasRenderingContext2D) => void) => {
+      const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+      const ctx = c.getContext('2d'); if (ctx) draw(ctx); return c.toDataURL();
+    };
+    const softSprite = (r: string, g: string, b: string) => mkCanvas(ctx => {
+      const gr = ctx.createRadialGradient(32,32,0,32,32,32);
+      gr.addColorStop(0,`rgba(${r},${g},${b},1)`); gr.addColorStop(1,`rgba(${r},${g},${b},0)`);
+      ctx.fillStyle=gr; ctx.fillRect(0,0,64,64);
+    });
+
+    const emId = 'emitter_' + Date.now();
+    let emProps: any = {};
+    const forces: PhysicsForce[] = [];
+    let name = '';
+
+    if (presetType === 'rain') {
+      name = 'Rain';
+      emProps = {
+        emissionRate: 500, particleType: 'sprites', particleSpriteImageDataUrl: softSprite('160','190','255'),
+        particleLifetime: 1.8, particleLifetimeVariation: 0.4,
+        particleSpeed: 8, particleSpeedVariation: 0.3,
+        particleSize: 1.8, particleSizeVariation: 0.3,
+        particleColor: '#b0d0ff', particleOpacity: 0.65, particleOpacityOverLife: true,
+        particleSpreadAngle: 6, particleGlow: false, particleBlendMode: 'normal',
+        particleStretch: true, particleStretchAmount: 0.4,
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Rain Gravity', type:'gravity', position:{x:0,y:0,z:0}, strength:4, radius:2000, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'snow') {
+      name = 'Snow';
+      emProps = {
+        emissionRate: 60, particleType: 'glow-circles',
+        particleLifetime: 5.0, particleLifetimeVariation: 0.5,
+        particleSpeed: 6, particleSpeedVariation: 0.6,
+        particleSize: 4, particleSizeVariation: 0.5,
+        particleColor: '#ddefff', particleOpacity: 0.75, particleOpacityOverLife: true,
+        particleSpreadAngle: 180, particleGlow: true, particleBlendMode: 'normal',
+        particleRotationSpeed: 0.3, particleRotationVariation: 360,
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Snow Gravity', type:'gravity', position:{x:0,y:0,z:0}, strength:0.3, radius:2000, affectedEmitterIds:[emId], enabled:true });
+      forces.push({ id:'f2_'+Date.now(), name:'Snow Drift', type:'turbulence', position:{x:0,y:0,z:0}, strength:2, radius:400, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'explosion') {
+      name = 'Explosion';
+      emProps = {
+        emissionRate: 1200, particleType: 'sprites', particleSpriteImageDataUrl: softSprite('255','160','40'),
+        particleLifetime: 0.9, particleLifetimeVariation: 0.5,
+        particleSpeed: 140, particleSpeedVariation: 0.7,
+        particleSize: 9, particleSizeVariation: 0.5,
+        particleColor: '#ff8822', particleOpacity: 1.0, particleOpacityOverLife: true,
+        particleColorOverLife: true, particleColorOverLifeTarget: '#440000',
+        particleSizeOverLife: 'shrink', particleSpreadAngle: 180,
+        particleGlow: true, particleBlendMode: 'lighter',
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Explosion Drag', type:'drag', position:{x:0,y:0,z:0}, strength:3, radius:2000, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'confetti') {
+      name = 'Confetti';
+      emProps = {
+        emissionRate: 80, particleType: 'circles',
+        particleLifetime: 4.0, particleLifetimeVariation: 0.6,
+        particleSpeed: 20, particleSpeedVariation: 0.7,
+        particleSize: 6, particleSizeVariation: 0.6,
+        particleColor: '#ff66cc', particleColorVariation: 0.9,
+        particleOpacity: 0.9, particleOpacityOverLife: true,
+        particleSpreadAngle: 180, particleGlow: false, particleBlendMode: 'normal',
+        particleRotationSpeed: 4, particleRotationVariation: 360, particleRotationSpeedVariation: 3,
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Confetti Gravity', type:'gravity', position:{x:0,y:0,z:0}, strength:0.6, radius:2000, affectedEmitterIds:[emId], enabled:true });
+      forces.push({ id:'f2_'+Date.now(), name:'Confetti Drift', type:'turbulence', position:{x:0,y:0,z:0}, strength:4, radius:400, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'magic-dust') {
+      name = 'Magic Dust';
+      emProps = {
+        emissionRate: 120, particleType: 'sparkle',
+        particleLifetime: 2.2, particleLifetimeVariation: 0.5,
+        particleSpeed: 14, particleSpeedVariation: 0.6,
+        particleSize: 5, particleSizeVariation: 0.5,
+        particleColor: '#aaddff', particleColorVariation: 0.7,
+        particleOpacity: 0.9, particleOpacityOverLife: true,
+        particleSpreadAngle: 120, particleGlow: true, particleBlendMode: 'lighter',
+        particleRotationSpeed: 2, particleRotationVariation: 360,
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Magic Updraft', type:'thermal-updraft', position:{x:0,y:0,z:0}, strength:10, radius:300, affectedEmitterIds:[emId], enabled:true });
+      forces.push({ id:'f2_'+Date.now(), name:'Magic Drift', type:'turbulence', position:{x:0,y:0,z:0}, strength:5, radius:200, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'bubbles') {
+      name = 'Bubbles';
+      emProps = {
+        emissionRate: 25, particleType: 'glow-circles',
+        particleLifetime: 3.5, particleLifetimeVariation: 0.4,
+        particleSpeed: 12, particleSpeedVariation: 0.4,
+        particleSize: 7, particleSizeVariation: 0.5,
+        particleColor: '#88eeff', particleOpacity: 0.55,
+        particleSizeOverLife: 'grow', particleOpacityOverLife: true,
+        particleSpreadAngle: 30, particleGlow: true, particleBlendMode: 'normal',
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Bubble Drift', type:'turbulence', position:{x:0,y:0,z:0}, strength:3, radius:200, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'fireflies') {
+      name = 'Fireflies';
+      emProps = {
+        emissionRate: 5, particleType: 'glow-circles',
+        particleLifetime: 6.0, particleLifetimeVariation: 0.5,
+        particleSpeed: 6, particleSpeedVariation: 0.8,
+        particleSize: 5, particleSizeVariation: 0.3,
+        particleColor: '#aaff44', particleColorVariation: 0.15,
+        particleOpacity: 0.85, particleOpacityOverLife: true,
+        particleSpreadAngle: 180, particleGlow: true, particleBlendMode: 'lighter',
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Firefly Wander', type:'turbulence', position:{x:0,y:0,z:0}, strength:4, radius:300, affectedEmitterIds:[emId], enabled:true });
+      forces.push({ id:'f2_'+Date.now(), name:'Firefly Lift', type:'thermal-updraft', position:{x:0,y:0,z:0}, strength:3, radius:300, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'embers') {
+      name = 'Embers';
+      emProps = {
+        emissionRate: 40, particleType: 'sprites', particleSpriteImageDataUrl: softSprite('255','120','20'),
+        particleLifetime: 2.5, particleLifetimeVariation: 0.5,
+        particleSpeed: 18, particleSpeedVariation: 0.5,
+        particleSize: 2.5, particleSizeVariation: 0.4,
+        particleColor: '#ff6600', particleColorVariation: 0.2,
+        particleColorOverLife: true, particleColorOverLifeTarget: '#550000',
+        particleOpacity: 0.9, particleOpacityOverLife: true,
+        particleSpreadAngle: 45, particleGlow: true, particleBlendMode: 'lighter',
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Ember Updraft', type:'thermal-updraft', position:{x:0,y:0,z:0}, strength:14, radius:200, affectedEmitterIds:[emId], enabled:true });
+      forces.push({ id:'f2_'+Date.now(), name:'Ember Turbulence', type:'turbulence', position:{x:0,y:0,z:0}, strength:8, radius:150, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'galaxy') {
+      name = 'Galaxy';
+      emProps = {
+        emissionRate: 90, particleType: 'stars',
+        particleLifetime: 5.0, particleLifetimeVariation: 0.6,
+        particleSpeed: 8, particleSpeedVariation: 0.8,
+        particleSize: 4, particleSizeVariation: 0.6,
+        particleColor: '#88aaff', particleColorVariation: 0.4,
+        particleOpacity: 0.8, particleOpacityOverLife: true,
+        particleSpreadAngle: 180, particleGlow: true, particleBlendMode: 'lighter',
+        particleRotationSpeed: 0.5, particleRotationVariation: 360,
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Galaxy Drift', type:'turbulence', position:{x:0,y:0,z:0}, strength:2, radius:500, affectedEmitterIds:[emId], enabled:true });
+    } else if (presetType === 'mist') {
+      name = 'Mist';
+      emProps = {
+        emissionRate: 20, particleType: 'sprites', particleSpriteImageDataUrl: softSprite('170','190','210'),
+        particleLifetime: 6.0, particleLifetimeVariation: 0.4,
+        particleSpeed: 4, particleSpeedVariation: 0.5,
+        particleSize: 28, particleSizeVariation: 0.5,
+        particleColor: '#aac0d0', particleOpacity: 0.22,
+        particleSizeOverLife: 'grow', particleOpacityOverLife: true,
+        particleSpreadAngle: 180, particleGlow: false, particleBlendMode: 'normal',
+      };
+      forces.push({ id:'f1_'+Date.now(), name:'Mist Drift', type:'wind', position:{x:0,y:0,z:0}, strength:2, radius:1000, direction:{x:1,y:0.1,z:0}, affectedEmitterIds:[emId], enabled:true });
+      forces.push({ id:'f2_'+Date.now(), name:'Mist Turbulence', type:'turbulence', position:{x:0,y:0,z:0}, strength:1.5, radius:600, affectedEmitterIds:[emId], enabled:true });
+    }
+
+    const emitter: SceneObject = {
+      id: emId, name, type: 'Emitter',
+      position:{x:0,y:0,z:0}, rotation:{x:0,y:0,z:0}, scale:{x:1,y:1,z:1}, parentId: null,
+      properties: emProps,
+    };
+    setSceneObjects(prev => [...prev, emitter]);
+    if (forces.length > 0) setPhysicsForces(prev => [...prev, ...forces]);
+    setSelectedObjectId(emId);
+    setShowScenePropertiesPanel(true);
+  }, []);
 
 
   // Timeline playback
@@ -2380,6 +3184,33 @@ export function App() {
     }
   }, [draggingForceId]);
 
+  const handleStartDragNode = useCallback((nodeId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    setDraggingNodeId(nodeId);
+    setDragCursorPos({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  const handleDropNode = useCallback((targetId: string, e: React.MouseEvent) => {
+    if (!draggingNodeId || draggingNodeId === targetId) return;
+    e.stopPropagation();
+    setPendingDrop({ sourceId: draggingNodeId, targetId, x: e.clientX, y: e.clientY });
+    setDraggingNodeId(null);
+    setDragCursorPos(null);
+  }, [draggingNodeId]);
+
+  useEffect(() => {
+    if (!draggingNodeId) return;
+    const onMove = (e: MouseEvent) => setDragCursorPos({ x: e.clientX, y: e.clientY });
+    const onUp = () => { setDraggingNodeId(null); setDragCursorPos(null); };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [draggingNodeId]);
+
   const handleSetCurrentFrame = (frameValue: number) => {
     if (Number.isNaN(frameValue)) return;
     setCurrentFrame(clampFrame(frameValue));
@@ -2536,6 +3367,15 @@ export function App() {
     setSelectedObjectId(null);
   }, [selectedObjectId, sceneObjects]);
 
+  // Track mouse position for Space hotbox
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => { mousePosRef.current = { x: e.clientX, y: e.clientY }; };
+    window.addEventListener('mousemove', onMove);
+    return () => window.removeEventListener('mousemove', onMove);
+  }, []);
+
+  // Context menu stays open until user clicks an item (onClick on items) or clicks the backdrop.
+
   // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -2613,12 +3453,30 @@ export function App() {
         return;
       }
 
-      // Space: toggle quad viewport
-      if (key === ' ') {
-        event.preventDefault();
-        setQuadViewport(prev => !prev);
+      // Escape: deselect current object / close marking menu
+      if (event.key === 'Escape') {
+        if (markingMenu) { setMarkingMenu(null); return; }
+        setSelectedObjectId(null);
         return;
       }
+
+      // Space: tap = toggle quad viewport; hold (>250 ms) = show hotbox marking menu
+      if (key === ' ' && !event.repeat) {
+        event.preventDefault();
+        // If marking menu is already open, just close it — don't start timer or toggle viewport
+        if (markingMenu) {
+          setMarkingMenu(null);
+          spaceHoldRef.current.menuShown = false;
+          return;
+        }
+        spaceHoldRef.current.timer = setTimeout(() => {
+          setMarkingMenu({ x: mousePosRef.current.x, y: mousePosRef.current.y, type: 'tool' });
+          spaceHoldRef.current.menuShown = true;
+          spaceHoldRef.current.timer = null;
+        }, 250);
+        return;
+      }
+      if (key === ' ' && event.repeat) { event.preventDefault(); return; }
 
       // Delete or Backspace: Delete selected keyframe
       if ((key === 'delete' || key === 'backspace') && selectedObjectId && selectedKeyframeFrame !== null) {
@@ -2660,19 +3518,75 @@ export function App() {
       }
     };
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleSave, handleSaveAs, handleOpen, handleUndo, handleRedo, handleDuplicateObject, handleDeleteObject, selectedObjectId, selectedKeyframeFrame, deleteKeyframeAtFrame, sceneObjects, startRenameObject]);
+    const handleKeyUp = (event: KeyboardEvent) => {
+      const tgt = event.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+      if (event.key === ' ') {
+        event.preventDefault();
+        if (spaceHoldRef.current.timer) {
+          // Tapped — cancel timer, toggle quad viewport (only if menu is NOT open)
+          clearTimeout(spaceHoldRef.current.timer);
+          spaceHoldRef.current.timer = null;
+          if (!markingMenu) setQuadViewport(prev => !prev);
+        } else if (spaceHoldRef.current.menuShown) {
+          // Released after hold — execute hovered item
+          markingMenuHoveredRef.current?.action();
+          setMarkingMenu(null);
+          spaceHoldRef.current.menuShown = false;
+        }
+      }
+    };
 
-  const hierarchyChildrenByParent = sceneObjects.reduce((acc, obj) => {
-    const validParent = obj.parentId && sceneObjects.some((candidate) => candidate.id === obj.parentId)
-      ? obj.parentId
-      : null;
-    const list = acc.get(validParent) ?? [];
-    list.push(obj);
-    acc.set(validParent, list);
-    return acc;
-  }, new Map<string | null, SceneObject[]>());
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [handleSave, handleSaveAs, handleOpen, handleUndo, handleRedo, handleDuplicateObject, handleDeleteObject, selectedObjectId, selectedKeyframeFrame, deleteKeyframeAtFrame, sceneObjects, startRenameObject, markingMenu]);
+
+  const hierarchyChildrenByParent = useMemo(() => {
+    return sceneObjects.reduce((acc, obj) => {
+      let parentCandidate = obj.parentId;
+      
+      // Visually reparent dependencies (like fx attached to curves) to show up as children
+      if (obj.properties) {
+        if (obj.properties.targetPathId && obj.properties.targetPathId !== obj.id) parentCandidate = obj.properties.targetPathId as string;
+        else if (obj.properties.curveId && obj.properties.curveId !== obj.id) parentCandidate = obj.properties.curveId as string;
+      }
+
+      let validParent = parentCandidate && sceneObjects.some((candidate) => candidate.id === parentCandidate)
+        ? parentCandidate
+        : null;
+        
+      // Prevent self-reference
+      if (validParent === obj.id) validParent = null;
+
+      // Prevent cyclic references from looping/breaking UI
+      if (validParent) {
+        let currentId = validParent;
+        const visited = new Set<string>();
+        while (currentId) {
+          if (currentId === obj.id) {
+            validParent = null; // Break cycle!
+            break;
+          }
+          if (visited.has(currentId)) break;
+          visited.add(currentId);
+          const current = sceneObjects.find(o => o.id === currentId);
+          if (!current) break;
+          currentId = (current.properties?.targetPathId as string) 
+            || (current.properties?.curveId as string) 
+            || current.parentId as string;
+        }
+      }
+
+      const list = acc.get(validParent) ?? [];
+      list.push(obj);
+      acc.set(validParent, list);
+      return acc;
+    }, new Map<string | null, SceneObject[]>());
+  }, [sceneObjects]);
 
   hierarchyChildrenByParent.forEach((items) => {
     items.sort((a, b) => a.type.localeCompare(b.type) || a.id.localeCompare(b.id));
@@ -2682,15 +3596,21 @@ export function App() {
     let current = sceneObjects.find((obj) => obj.id === nodeId);
     const visited = new Set<string>();
 
-    while (current?.parentId) {
-      if (current.parentId === potentialAncestorId) {
+    while (current) {
+      const parentCandidate = (current.properties?.targetPathId as string) 
+        || (current.properties?.curveId as string) 
+        || current.parentId;
+
+      if (!parentCandidate) break;
+
+      if (parentCandidate === potentialAncestorId) {
         return true;
       }
-      if (visited.has(current.parentId)) {
+      if (visited.has(parentCandidate)) {
         break;
       }
-      visited.add(current.parentId);
-      current = sceneObjects.find((obj) => obj.id === current?.parentId);
+      visited.add(parentCandidate);
+      current = sceneObjects.find((obj) => obj.id === parentCandidate);
     }
 
     return false;
@@ -2704,26 +3624,166 @@ export function App() {
     )));
   }, []);
 
+  const getDropOptions = (sourceId: string, targetId: string) => {
+    const source = sceneObjects.find(o => o.id === sourceId);
+    const target = sceneObjects.find(o => o.id === targetId);
+    if (!source || !target || sourceId === targetId) return [];
+    const opts: { icon: string; label: string; action: () => void }[] = [];
+
+    // Always available: simple re-parent
+    opts.push({
+      icon: '🔗',
+      label: 'Parent — child follows target',
+      action: () => { handleReparentObject(sourceId, targetId); setPendingDrop(null); },
+    });
+
+    // Any object → Emitter: become an emission shape
+    if (target.type === 'Emitter') {
+      opts.push({
+        icon: '💥',
+        label: 'Attach as emission shape',
+        action: () => {
+          setSceneObjects(prev => prev.map(o =>
+            o.id === sourceId ? { ...o, parentId: targetId, type: 'EmitterShape' as any } : o
+          ));
+          setPendingDrop(null);
+        },
+      });
+    }
+
+    // Any object → Path: follow path animation
+    if (target.type === 'Path') {
+      opts.push({
+        icon: '🛤️',
+        label: 'Follow path',
+        action: () => {
+          setSceneObjects(prev => prev.map(o =>
+            o.id === sourceId
+              ? { ...o, properties: { ...(o.properties as any), pathAnimPathId: targetId } }
+              : o
+          ));
+          setPendingDrop(null);
+        },
+      });
+      if (source.type === 'Emitter') {
+        opts.push({
+          icon: '🌊',
+          label: 'Emit along path',
+          action: () => {
+            setSceneObjects(prev => prev.map(o =>
+              o.id === sourceId
+                ? { ...o, properties: { ...(o.properties as any), pathAnimPathId: targetId, emissionMode: 'path' } }
+                : o
+            ));
+            setPendingDrop(null);
+          },
+        });
+      }
+    }
+
+    // Lightning / bezier path → Path: use path as lightning guide
+    if (source.type === 'Lightning' && target.type === 'Path') {
+      opts.push({
+        icon: '⚡',
+        label: 'Follow bezier (lightning guide)',
+        action: () => {
+          setSceneObjects(prev => prev.map(o =>
+            o.id === sourceId
+              ? { ...o, properties: { ...(o.properties as any), followBezierPathIds: [targetId] } }
+              : o
+          ));
+          setPendingDrop(null);
+        },
+      });
+    }
+
+    return opts;
+  };
+
   const renderHierarchyNode = (obj: SceneObject, depth = 0): React.ReactNode => {
+    if (hierarchyHiddenTypes.has(obj.type)) return null;
     const children = hierarchyChildrenByParent.get(obj.id) ?? [];
     const isSelected = selectedObjectId === obj.id;
     const isRenaming = renamingObjectId === obj.id;
-    const typeLabel = obj.type === 'EmitterShape' ? 'Shape' : obj.type;
+    const isCollapsed = collapsedHierarchyIds.has(obj.id);
+    const toggleCollapse = (e: React.MouseEvent) => {
+      e.stopPropagation();
+      setCollapsedHierarchyIds(prev => {
+        const next = new Set(prev);
+        if (next.has(obj.id)) next.delete(obj.id); else next.add(obj.id);
+        return next;
+      });
+    };
+    const typeLabel = obj.type === 'EmitterShape' ? 'Shape' : obj.type === 'CameraTarget' ? 'Target' : obj.type;
+    const typeColorClass = `type-${obj.type.toLowerCase()}`;
+    const typeRowClass = `type-row-${obj.type.toLowerCase()}`;
     const parentObject = obj.parentId ? sceneObjects.find((candidate) => candidate.id === obj.parentId) : undefined;
     const parentCandidates = sceneObjects.filter((candidate) => (
       candidate.id !== obj.id && !isDescendantOf(candidate.id, obj.id)
     ));
 
+    // Detect relationship kind for visual differentiation
+    const objProps = obj.properties as any;
+    let depClass = '';
+    let depConnectorChar = '↳';
+    let depConnectorColor = '#555';
+    let depBadge: React.ReactNode = null;
+    if (obj.type === 'CameraTarget') {
+      depClass = 'dep-camera-target';
+      depConnectorChar = '◎'; depConnectorColor = '#00ddff';
+      depBadge = <span className="dep-badge camera-target">TARGET</span>;
+    } else if (obj.type === 'EmitterShape') {
+      depClass = 'dep-emitter-shape';
+      depConnectorChar = '◆'; depConnectorColor = '#e8803a';
+      depBadge = <span className="dep-badge emitter-shape">SHAPE OF</span>;
+    } else if (objProps?.followBezierPathIds?.length > 0) {
+      depClass = 'dep-lightning';
+      depConnectorChar = '⚡'; depConnectorColor = '#f1c40f';
+      depBadge = <span className="dep-badge lightning">GUIDED BY</span>;
+    } else if (objProps?.pathAnimPathId && objProps?.emissionMode === 'path') {
+      depClass = 'dep-emit-along';
+      depConnectorChar = '⟿'; depConnectorColor = '#1abc9c';
+      depBadge = <span className="dep-badge emit-along">EMITS ALONG</span>;
+    } else if (objProps?.pathAnimPathId) {
+      depClass = 'dep-follow-path';
+      depConnectorChar = '⤷'; depConnectorColor = '#9b59b6';
+      depBadge = <span className="dep-badge follow-path">FOLLOWS</span>;
+    } else if (objProps?.targetPathId || objProps?.curveId) {
+      depClass = 'dep-attached-fx';
+      depConnectorChar = '✨'; depConnectorColor = '#eeb868';
+      depBadge = <span className="dep-badge attached-fx">ATTACHED TO</span>;
+    }
+    const depConnector = depth > 0
+      ? <span className="hierarchy-connector" style={{ color: depConnectorColor }}>{depConnectorChar}</span>
+      : null;
+
     return (
       <React.Fragment key={obj.id}>
         {isRenaming ? (
           <div
-            className={`hierarchy-item ${isSelected ? 'selected' : ''}`}
-            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            className={`hierarchy-item ${depClass} ${typeRowClass} ${isSelected ? 'selected' : ''}`}
+            data-depth={depth}
+            style={{ paddingLeft: '8px' }}
             title={obj.id}
           >
-            {depth > 0 && <span className="hierarchy-connector">↳</span>}
-            <span className="hierarchy-item-type">{typeLabel}</span>
+            {depConnector}
+            <input
+              type="checkbox"
+              checked={!spineExcludedObjectIds.has(obj.id)}
+              onChange={() => toggleSpineExclude(obj.id)}
+              onClick={e => e.stopPropagation()}
+              title="Include in Spine export"
+              style={{ cursor: 'pointer', marginRight: 3, accentColor: '#7ecf9e', flexShrink: 0 }}
+            />
+            {children.length > 0 && (
+              <button type="button" onClick={toggleCollapse}
+                style={{ background: 'none', border: 'none', color: '#7a8a9a', cursor: 'pointer', fontSize: '0.62rem', padding: '0 2px', lineHeight: 1, flexShrink: 0 }}
+                title={isCollapsed ? 'Expand' : 'Collapse'}>
+                {isCollapsed ? '▶' : '▼'}
+              </button>
+            )}
+            <span className={`hierarchy-item-type ${typeColorClass}`}>{typeLabel}</span>
+            {depBadge}
             <input
               className="hierarchy-rename-input"
               autoFocus
@@ -2740,15 +3800,21 @@ export function App() {
                 }
               }}
             />
-            {children.length > 0 && <span className="hierarchy-item-children">({children.length})</span>}
+            {children.length > 0 && (
+              <span className="hierarchy-item-children" style={{ cursor: 'default' }}>({children.length})</span>
+            )}
           </div>
         ) : (
           <div
             role="button"
             tabIndex={0}
-            className={`hierarchy-item ${isSelected ? 'selected' : ''}`}
-            style={{ paddingLeft: `${8 + depth * 14}px` }}
+            className={`hierarchy-item ${depClass} ${typeRowClass} ${isSelected ? 'selected' : ''}`}
+            data-depth={depth}
+            style={{ paddingLeft: '8px' }}
             onClick={() => setSelectedObjectId(obj.id)}
+            onMouseUp={(e) => handleDropNode(obj.id, e)}
+            onMouseEnter={(e) => { if (draggingNodeId && draggingNodeId !== obj.id) e.currentTarget.style.outline = '2px solid #5fc87a'; }}
+            onMouseLeave={(e) => { e.currentTarget.style.outline = ''; }}
             onDoubleClick={(event) => {
               event.preventDefault();
               startRenameObject(obj);
@@ -2761,8 +3827,29 @@ export function App() {
             }}
             title={obj.id}
           >
-            {depth > 0 && <span className="hierarchy-connector">↳</span>}
-            <span className="hierarchy-item-type">{typeLabel}</span>
+            {depConnector}
+            {children.length > 0 && (
+              <button type="button" onClick={toggleCollapse}
+                style={{ background: 'none', border: 'none', color: '#7a8a9a', cursor: 'pointer', fontSize: '0.62rem', padding: '0 2px', lineHeight: 1, flexShrink: 0 }}
+                title={isCollapsed ? 'Expand' : 'Collapse'}>
+                {isCollapsed ? '▶' : '▼'}
+              </button>
+            )}
+            <input
+              type="checkbox"
+              checked={!spineExcludedObjectIds.has(obj.id)}
+              onChange={() => toggleSpineExclude(obj.id)}
+              onClick={e => e.stopPropagation()}
+              title="Include in Spine export"
+              style={{ cursor: 'pointer', marginRight: 3, accentColor: '#7ecf9e', flexShrink: 0 }}
+            />
+            <span
+              onMouseDown={(e) => { e.stopPropagation(); handleStartDragNode(obj.id, e); }}
+              title="Drag to create relationship"
+              style={{ cursor: 'grab', color: '#4a6a8a', fontSize: 12, flexShrink: 0, userSelect: 'none', padding: '0 2px', marginRight: 1 }}
+            >⠇</span>
+            <span className={`hierarchy-item-type ${typeColorClass}`}>{typeLabel}</span>
+            {depBadge}
             <span
               className="hierarchy-item-name"
               onDoubleClick={(event) => {
@@ -2837,10 +3924,18 @@ export function App() {
                 </option>
               ))}
             </select>
-            {children.length > 0 && <span className="hierarchy-item-children">({children.length})</span>}
+            {children.length > 0 && (
+              <span className="hierarchy-item-children" style={{ cursor: 'pointer' }} onClick={toggleCollapse} title={isCollapsed ? 'Expand' : 'Collapse'}>
+                {isCollapsed ? `▶ ${children.length}` : `▼ ${children.length}`}
+              </span>
+            )}
           </div>
         )}
-        {children.map((child) => renderHierarchyNode(child, depth + 1))}
+        {!isCollapsed && children.length > 0 && (
+          <div className="hierarchy-children-block">
+            {children.map((child) => renderHierarchyNode(child, depth + 1))}
+          </div>
+        )}
       </React.Fragment>
     );
   };
@@ -3138,6 +4233,87 @@ export function App() {
             Export Cached Animation
           </button>
         </div>
+        <div className="menu-item">
+          {(() => {
+            const captureIds = sceneObjects.map(o => o.id).filter(id => !spineExcludedObjectIds.has(id));
+            const canCapture = captureIds.length > 0;
+            // Shared settings: max frameCount and fps across all included objects
+            const sharedFrameCount = (sceneObjects as any[])
+              .filter((o: any) => captureIds.includes(o.id))
+              .reduce((mx: number, o: any) => Math.max(mx, (o.properties as any)?.frameCount ?? 24), 24);
+            const sharedFps = (sceneObjects as any[])
+              .filter((o: any) => captureIds.includes(o.id))
+              .reduce((mx: number, o: any) => Math.max(mx, (o.properties as any)?.fps ?? 24), 24);
+            return (
+              <button
+                className="menu-button"
+                disabled={!canCapture}
+                style={canCapture ? { backgroundColor: '#1e3f2a', color: '#7dffaa', fontWeight: 'bold', border: '1px solid #3a9f6a', whiteSpace: 'nowrap' } : { opacity: 0.4, whiteSpace: 'nowrap' }}
+                title={canCapture ? `Capture ${captureIds.length} checked object(s) together as a ${sharedFrameCount}-frame sequence` : 'Check at least one object (green checkbox)'}
+                onClick={async () => {
+                  if (!canCapture) return;
+                  try {
+                    const frames = await scene3DRef.current?.captureSaberSequence(captureIds, sharedFrameCount, sharedFps);
+                    if (!frames?.length) return;
+                    const isElectron = !!(window as any).vertebrae?.isElectron;
+                    if (isElectron) {
+                      // Convert blobs → base64 strings for IPC transfer
+                      const b64Frames = await Promise.all(frames.map(async blob => {
+                        const ab = await blob.arrayBuffer();
+                        const bytes = new Uint8Array(ab);
+                        let binary = '';
+                        for (let j = 0; j < bytes.length; j++) binary += String.fromCharCode(bytes[j]);
+                        return btoa(binary);
+                      }));
+                      const result = await (window as any).vertebrae.saveCaptureSequence({ frames: b64Frames });
+                      if (!result?.success) {
+                        if (result?.error !== 'Cancelled') alert(`Capture failed: ` + result?.error);
+                      } else {
+                        alert(`Exported ${frames.length} frames to: ${result.dir}`);
+                      }
+                    } else {
+                      // Browser: use File System Access API
+                      let dirHandle: FileSystemDirectoryHandle | null = null;
+                      try { dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' }); }
+                      catch { return; }
+                      if (!dirHandle) return;
+                      for (let i = 0; i < frames.length; i++) {
+                        const n = String(i).padStart(4, '0');
+                        const fh = await dirHandle.getFileHandle(`sequence_${n}.png`, { create: true });
+                        const w = await fh.createWritable();
+                        await w.write(frames[i]);
+                        await w.close();
+                      }
+                      alert(`Exported ${frames.length} frames (${captureIds.length} objects).`);
+                    }
+                  } catch (err) {
+                    alert(`Capture failed: ` + (err as Error).message);
+                  }
+                }}
+                type="button"
+              >
+                🎞 Capture Sequence
+              </button>
+            );
+          })()}
+        </div>
+        <div className="snap-toolbar" style={{ gap: 6, paddingLeft: 8 }} title="Capture crop options">
+          <label style={{ display:'flex', alignItems:'center', gap:4, cursor:'pointer', fontSize:'0.78rem', color:'#ff9944', whiteSpace:'nowrap' }}>
+            <input type="checkbox" checked={showCaptureOverlay} onChange={e => {
+              const next = e.target.checked;
+              setShowCaptureOverlay(next);
+              if (next && !manualCropRect) setManualCropRect({ left: 100, top: 80, width: 400, height: 300 });
+            }} />
+            Crop
+          </label>
+          {showCaptureOverlay && (
+            <button type="button"
+              onClick={() => setManualCropRect({ left: 100, top: 80, width: 400, height: 300 })}
+              style={{ fontSize:'0.72rem', padding:'1px 7px', background:'#1e2e3e', border:'1px solid #3b4f6a', color:'#7dffaa', borderRadius:4, cursor:'pointer' }}>
+              Reset
+            </button>
+          )}
+        </div>
         <div className="snap-toolbar" title="Grid snapping options">
           <span className="snap-title">Snap</span>
           <label className="snap-axis snap-axis-x"><input type="checkbox" checked={snapSettings.snapX} onChange={(event) => setSnapSettings((prev) => ({ ...prev, snapX: event.target.checked }))} />X</label>
@@ -3154,13 +4330,24 @@ export function App() {
             <option value="lines">Lines</option>
             <option value="both">Both</option>
           </select>
+          <label className="snap-axis" title="Snap bezier points to 3D mesh surface or vertices when drawing">
+            <input type="checkbox" checked={snapSettings.snapTo3DObject ?? false}
+              onChange={e => setSnapSettings(prev => ({ ...prev, snapTo3DObject: e.target.checked }))} />
+            3D
+          </label>
+          <select value={snapSettings.snap3DTarget ?? 'face'}
+            onChange={e => setSnapSettings(prev => ({ ...prev, snap3DTarget: e.target.value as 'face' | 'vertex' }))}
+            title="3D snap mode: hit face center or nearest vertex">
+            <option value="face">Face</option>
+            <option value="vertex">Vertex</option>
+          </select>
         </div>
       </div>
 
       {/* ─── Create Shelf ─── */}
       <div className="create-shelf">
         <div className="create-shelf-tabs">
-          {(['Objects', 'Shapes', 'Modifiers', 'Presets', 'FX'] as const).map(tab => (
+          {(['Objects', '3D', '2D', 'Curves', 'Modifiers', 'Particle Systems', 'FX'] as const).map(tab => (
             <button
               key={tab}
               className={`create-shelf-tab ${activeShelfTab === tab ? 'active' : ''}`}
@@ -3168,9 +4355,11 @@ export function App() {
               type="button"
             >
               {tab === 'Objects' && '💫 '}
-              {tab === 'Shapes' && '⬡ '}
+              {tab === '3D' && '🧊 '}
+              {tab === '2D' && '⬡ '}
+              {tab === 'Curves' && '✏️ '}
               {tab === 'Modifiers' && '⚡ '}
-              {tab === 'Presets' && '✨ '}
+              {tab === 'Particle Systems' && '✨ '}
               {tab === 'FX' && '🎆 '}
               {tab}
             </button>
@@ -3182,26 +4371,27 @@ export function App() {
               <span className="create-shelf-action-icon">💫</span>
               <span>Emitter</span>
             </button>
+            <button className="create-shelf-action" onClick={() => handleCreateObject('Camera')} type="button">
+              <span className="create-shelf-action-icon">📷</span>
+              <span>Camera</span>
+            </button>
           </div>
         )}
-        {activeShelfTab === 'Shapes' && (
+        {activeShelfTab === '3D' && (
           <div className="create-shelf-actions">
-            {['Cube','Sphere','Cylinder','Cone','Plane','Torus'].map(s => (
-              <button key={s} className="create-shelf-action" onClick={() => handleCreateObject(s)} type="button">
-                <span className="create-shelf-action-icon">⬡</span>
-                <span>{s}</span>
+            {[
+              { name: 'Cube',     icon: '🧊' },
+              { name: 'Sphere',   icon: '🔵' },
+              { name: 'Cylinder', icon: '🥫' },
+              { name: 'Cone',     icon: '📐' },
+              { name: 'Plane',    icon: '▬' },
+              { name: 'Torus',    icon: '⭕' },
+            ].map(({ name, icon }) => (
+              <button key={name} className="create-shelf-action" onClick={() => handleCreateObject(name)} type="button">
+                <span className="create-shelf-action-icon">{icon}</span>
+                <span>{name}</span>
               </button>
             ))}
-            {['Circle','Rectangle','Triangle','Line','Arc','Polygon'].map(s => (
-              <button key={s} className="create-shelf-action" onClick={() => handleCreateObject(s)} type="button">
-                <span className="create-shelf-action-icon">◾</span>
-                <span>{s}</span>
-              </button>
-            ))}
-            <button className="create-shelf-action" onClick={() => { handleStartDrawBezierCurve(); }} type="button">
-              <span className="create-shelf-action-icon">✏️</span>
-              <span>Draw Bezier</span>
-            </button>
             <button className="create-shelf-action" onClick={() => importModelInputRef.current?.click()} type="button">
               <span className="create-shelf-action-icon">📦</span>
               <span>Import 3D</span>
@@ -3214,6 +4404,107 @@ export function App() {
               onChange={handleImportModelFile}
             />
           </div>
+        )}
+        {activeShelfTab === '2D' && (
+          <div className="create-shelf-actions">
+            {[
+              { name: 'Circle',    icon: '⭕' },
+              { name: 'Rectangle', icon: '▬' },
+              { name: 'Triangle',  icon: '🔺' },
+              { name: 'Line',      icon: '〰️' },
+              { name: 'Arc',       icon: '🌙' },
+              { name: 'Polygon',   icon: '⬡' },
+            ].map(({ name, icon }) => (
+              <button key={name} className="create-shelf-action" onClick={() => handleCreateObject(name)} type="button">
+                <span className="create-shelf-action-icon">{icon}</span>
+                <span>{name}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {activeShelfTab === 'Curves' && (
+          <>
+          <div className="create-shelf-actions">
+            <button className="create-shelf-action" onClick={() => { handleStartDrawBezierCurve(); }} type="button">
+              <span className="create-shelf-action-icon">✏️</span>
+              <span>Draw Bezier</span>
+            </button>
+            {([
+              { key: 'BZ Circle',    label: 'Circle',    icon: '⭕' },
+              { key: 'BZ Ellipse',   label: 'Ellipse',   icon: '🔵' },
+              { key: 'BZ Square',    label: 'Square',    icon: '⬛' },
+              { key: 'BZ Rectangle', label: 'Rectangle', icon: '▬' },
+              { key: 'BZ Triangle',  label: 'Triangle',  icon: '🔺' },
+              { key: 'BZ Diamond',   label: 'Diamond',   icon: '◆' },
+              { key: 'BZ Pentagon',  label: 'Pentagon',  icon: '⬠' },
+              { key: 'BZ Hexagon',   label: 'Hexagon',   icon: '⬡' },
+              { key: 'BZ Octagon',   label: 'Octagon',   icon: '⯃' },
+              { key: 'BZ Star',      label: 'Star 5',    icon: '⭐' },
+              { key: 'BZ Star 6',    label: 'Star 6',    icon: '✡️' },
+              { key: 'BZ Cross',     label: 'Cross',     icon: '✚' },
+              { key: 'BZ Arrow',     label: 'Arrow',     icon: '➤' },
+              { key: 'BZ Heart',     label: 'Heart',     icon: '❤️' },
+              { key: 'BZ Wave',      label: 'Wave',      icon: '〰️' },
+            ] as const).map(({ key, label, icon }) => (
+              <button key={key} className="create-shelf-action" onClick={() => handleCreateBezierShape(key)} type="button"
+                title={`Create ${label} bezier path`}>
+                <span className="create-shelf-action-icon">{icon}</span>
+                <span>{label}</span>
+              </button>
+            ))}
+            <button className="create-shelf-action" onClick={() => setSpiralDialog({ turns: 3, diameter: 160, cw: true })} type="button"
+              title="Create spiral curve (configure turns, diameter, direction)">
+              <span className="create-shelf-action-icon">🌀</span>
+              <span>Spiral</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => importCurveInputRef.current?.click()} type="button"
+              title="Import paths from SVG or Illustrator AI file">
+              <span className="create-shelf-action-icon">🎨</span>
+              <span>Import AI</span>
+            </button>
+            <input
+              ref={importCurveInputRef}
+              type="file"
+              accept=".svg,.ai"
+              style={{ display: 'none' }}
+              onChange={handleImportCurveFile}
+            />
+          </div>
+          {spiralDialog !== null && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '5px 10px', background: '#252c3e', borderTop: '1px solid #1c2030', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '0.75rem', color: '#a0b0c0', fontWeight: 600 }}>🌀 Spiral</span>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: '#ccc' }}>
+                Turns
+                <input type="number" min={0.5} max={20} step={0.5}
+                  value={spiralDialog.turns}
+                  onChange={e => setSpiralDialog(prev => prev ? { ...prev, turns: Math.max(0.5, Number(e.target.value)) } : prev)}
+                  style={{ width: '52px', background: '#1a1f2e', border: '1px solid #3b455c', color: '#e0e0e0', borderRadius: '3px', padding: '2px 4px', fontSize: '0.72rem' }} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: '#ccc' }}>
+                Diameter
+                <input type="number" min={10} max={2000} step={10}
+                  value={spiralDialog.diameter}
+                  onChange={e => setSpiralDialog(prev => prev ? { ...prev, diameter: Math.max(10, Number(e.target.value)) } : prev)}
+                  style={{ width: '62px', background: '#1a1f2e', border: '1px solid #3b455c', color: '#e0e0e0', borderRadius: '3px', padding: '2px 4px', fontSize: '0.72rem' }} />
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: '#ccc' }}>
+                <input type="checkbox" checked={spiralDialog.cw}
+                  onChange={e => setSpiralDialog(prev => prev ? { ...prev, cw: e.target.checked } : prev)} />
+                Clockwise
+              </label>
+              <button type="button"
+                onClick={() => handleCreateSpiral(spiralDialog.turns, spiralDialog.diameter, spiralDialog.cw)}
+                style={{ padding: '3px 10px', background: '#3e7de8', border: 'none', borderRadius: '4px', color: '#fff', fontSize: '0.72rem', cursor: 'pointer', fontWeight: 600 }}>
+                Create
+              </button>
+              <button type="button"
+                onClick={() => setSpiralDialog(null)}
+                style={{ padding: '3px 8px', background: '#3a3a3a', border: '1px solid #555', borderRadius: '4px', color: '#aaa', fontSize: '0.72rem', cursor: 'pointer' }}>
+                Cancel
+              </button>
+            </div>
+          )}
+          </>
         )}
         {activeShelfTab === 'Modifiers' && (
           <div className="create-shelf-actions">
@@ -3238,8 +4529,12 @@ export function App() {
             ))}
           </div>
         )}
-        {activeShelfTab === 'Presets' && (
+        {activeShelfTab === 'Particle Systems' && (
           <div className="create-shelf-actions">
+            <button className="create-shelf-action" onClick={() => handleCreateObject('Emitter')} type="button">
+              <span className="create-shelf-action-icon">⭐</span>
+              <span>Simple Emitter</span>
+            </button>
             <button className="create-shelf-action" onClick={() => handleCreateFirePreset('campfire')} type="button">
               <span className="create-shelf-action-icon">🔥</span>
               <span>Campfire</span>
@@ -3260,6 +4555,46 @@ export function App() {
               <span className="create-shelf-action-icon">💨</span>
               <span>Soft Smoke</span>
             </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('rain')} type="button">
+              <span className="create-shelf-action-icon">🌧️</span>
+              <span>Rain</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('snow')} type="button">
+              <span className="create-shelf-action-icon">❄️</span>
+              <span>Snow</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('explosion')} type="button">
+              <span className="create-shelf-action-icon">💥</span>
+              <span>Explosion</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('confetti')} type="button">
+              <span className="create-shelf-action-icon">🎊</span>
+              <span>Confetti</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('magic-dust')} type="button">
+              <span className="create-shelf-action-icon">🪄</span>
+              <span>Magic Dust</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('bubbles')} type="button">
+              <span className="create-shelf-action-icon">🫧</span>
+              <span>Bubbles</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('fireflies')} type="button">
+              <span className="create-shelf-action-icon">🌿</span>
+              <span>Fireflies</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('embers')} type="button">
+              <span className="create-shelf-action-icon">🟠</span>
+              <span>Embers</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('galaxy')} type="button">
+              <span className="create-shelf-action-icon">🌌</span>
+              <span>Galaxy</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => handleCreateParticlePreset('mist')} type="button">
+              <span className="create-shelf-action-icon">🌫️</span>
+              <span>Mist</span>
+            </button>
           </div>
         )}
         {activeShelfTab === 'FX' && (
@@ -3273,9 +4608,39 @@ export function App() {
               const lId = 'lightning_' + Date.now();
               const startId = 'lpt_start_' + Date.now();
               const endId   = 'lpt_end_'   + (Date.now() + 1);
-              const lightning: SceneObject = { id: lId, name: 'Lightning', type: 'Lightning', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: null, properties: { ...opts } };
-              const ptStart:  SceneObject = { id: startId, name: 'Start', type: 'LightningPoint', position: { x: -80, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'start' } };
-              const ptEnd:    SceneObject = { id: endId,   name: 'End',   type: 'LightningPoint', position: { x:  80, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'end'   } };
+
+              // If a Path is selected, snap start/end to its first/last PathPoints
+              // and attach the lightning as a follow-bezier-curve follower.
+              let startPos = { x: -80, y: 0, z: 0 };
+              let endPos   = { x:  80, y: 0, z: 0 };
+              let extraProps: Record<string, unknown> = {};
+              if (selectedObject && selectedObject.type === 'Path') {
+                const pathPts = (sceneObjects as SceneObject[])
+                  .filter(o => o.type === 'PathPoint' && o.parentId === selectedObject.id)
+                  .sort((a, b) => {
+                    // PathPoints are ordered by insertion; use name heuristic or just array order
+                    const ai = (sceneObjects as SceneObject[]).indexOf(a);
+                    const bi = (sceneObjects as SceneObject[]).indexOf(b);
+                    return ai - bi;
+                  });
+                if (pathPts.length >= 2) {
+                  const first = pathPts[0].position;
+                  const last  = pathPts[pathPts.length - 1].position;
+                  startPos = { x: first.x, y: first.y, z: first.z ?? 0 };
+                  endPos   = { x: last.x,  y: last.y,  z: last.z  ?? 0 };
+                } else if (pathPts.length === 1) {
+                  const p = pathPts[0].position;
+                  startPos = { x: p.x, y: p.y, z: p.z ?? 0 };
+                }
+                extraProps = {
+                  followBezierPathIds: [selectedObject.id],
+                  curveTightness: 10,
+                };
+              }
+
+              const lightning: SceneObject = { id: lId, name: 'Lightning', type: 'Lightning', position: { x: 0, y: 0, z: 0 }, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: null, properties: { ...opts, ...extraProps } };
+              const ptStart:  SceneObject = { id: startId, name: 'Start', type: 'LightningPoint', position: startPos, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'start' } };
+              const ptEnd:    SceneObject = { id: endId,   name: 'End',   type: 'LightningPoint', position: endPos,   rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'end'   } };
               setSceneObjects(prev => [...prev, lightning, ptStart, ptEnd]);
               setSelectedObjectId(lId);
               setShowScenePropertiesPanel(true);
@@ -3306,6 +4671,8 @@ export function App() {
                   density: 1.6,
                   coreBlur: 0.2,
                   glowFalloff: 1.2,
+                  glowColorTop: '#880000',
+                  coreColorTop: '#ffaa00',
                   flickerIntensity: 0.45,
                   flickerType: 'fractal',
                   usePhysicsModifiers: false,
@@ -3319,6 +4686,117 @@ export function App() {
             }} type="button">
               <span className="create-shelf-action-icon">🔥</span>
               <span>Flame</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => {
+              if (!selectedObject || selectedObject.type !== 'Path') {
+                window.alert('Please select a bezier curve first');
+                return;
+              }
+              const sId = 'saber_' + Date.now();
+              const saber = {
+                id: sId,
+                name: 'Saber',
+                type: 'Saber',
+                position: { x: 0, y: 0, z: 0 },
+                rotation: { x: 0, y: 0, z: 0 },
+                scale: { x: 1, y: 1, z: 1 },
+                parentId: null,
+                properties: {
+                  targetPathId: selectedObject.id,
+                  coreColor: '#ffffff',
+                  coreColorEnd: '#ffffff',
+                  glowColor: '#0088ff',
+                  glowColorEnd: '#ff00ff',
+                  coreWidth: 1.0,
+                  glowWidth: 6.0,
+                  startOffset: 0.0,
+                  endOffset: 1.0,
+                  phaseOffset: 0.0,
+                  offsetSpeed: 0.0,
+                  startTaper: 1.0,
+                  endTaper: 0.0,
+                  noiseIntensity: 0.5,
+                  noiseScale: 5.0,
+                  noiseAnimated: true,
+                  noiseSpeed: 1.0,
+                  smoothCurve: true,
+                  coreFalloff: 0.2,
+                  glowFalloff: 1.2,
+                  tubularSegments: 64,
+                  radiusSegments: 8,
+                }
+              };
+              setSceneObjects(prev => [...prev, saber]);
+              setSelectedObjectId(sId);
+              setShowScenePropertiesPanel(true);
+            }} type="button">
+              <span className="create-shelf-action-icon">⚔</span>
+              <span>Saber</span>
+            </button>
+            <button className="create-shelf-action" onClick={() => {
+              if (!selectedObject || selectedObject.type !== 'Path') {
+                window.alert('Please select a bezier curve first');
+                return;
+              }
+              // Saber Bolt: Lightning tightly guided along the selected curve
+              const pathPts = (sceneObjects as SceneObject[])
+                .filter(o => o.type === 'PathPoint' && o.parentId === selectedObject.id)
+                .sort((a, b) => (sceneObjects as SceneObject[]).indexOf(a) - (sceneObjects as SceneObject[]).indexOf(b));
+              let startPos = { x: -80, y: 0, z: 0 };
+              let endPos   = { x:  80, y: 0, z: 0 };
+              if (pathPts.length >= 2) {
+                const first = pathPts[0].position;
+                const last  = pathPts[pathPts.length - 1].position;
+                startPos = { x: first.x, y: first.y, z: first.z ?? 0 };
+                endPos   = { x: last.x,  y: last.y,  z: last.z  ?? 0 };
+              } else if (pathPts.length === 1) {
+                const p = pathPts[0].position;
+                startPos = { x: p.x, y: p.y, z: p.z ?? 0 };
+              }
+              const lId     = 'lightning_' + Date.now();
+              const startId = 'lpt_start_' + Date.now();
+              const endId   = 'lpt_end_'   + (Date.now() + 1);
+              const saberBolt: SceneObject = {
+                id: lId,
+                name: 'Saber Bolt',
+                type: 'Lightning',
+                position: { x: 0, y: 0, z: 0 },
+                rotation: { x: 0, y: 0, z: 0 },
+                scale: { x: 1, y: 1, z: 1 },
+                parentId: null,
+                properties: {
+                  ...defaultLightningOpts(),
+                  // Tight path following
+                  followBezierPathIds: [selectedObject.id],
+                  curveTightness: 55,
+                  // Energy blade look — thin bright core, wide tight glow, minimal branching
+                  coreColor:         '#ffffff',
+                  coreWidth:         1.5,
+                  glowColor:         '#aa44ff',
+                  glowWidth:         10,
+                  segmentDepth:      3,
+                  roughness:         0.18,
+                  turbulence:        0.12,
+                  numSegments:       6,
+                  branchProbability: 0.08,
+                  branchCount:       0,
+                  branchLevels:      1,
+                  bend:              0,
+                  density:           2.5,
+                  mode:              'loop',
+                  glowNoiseIntensity: 0.55,
+                  glowNoiseScale:     4.0,
+                  glowNoiseSpeed:     1.5,
+                },
+              };
+              const ptStart: SceneObject = { id: startId, name: 'Start', type: 'LightningPoint', position: startPos, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'start' } };
+              const ptEnd:   SceneObject = { id: endId,   name: 'End',   type: 'LightningPoint', position: endPos,   rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'end'   } };
+              setSceneObjects(prev => [...prev, saberBolt, ptStart, ptEnd]);
+              setSelectedObjectId(lId);
+              setShowScenePropertiesPanel(true);
+            }} type="button">
+              <span className="create-shelf-action-icon">⚡⚔</span>
+              <span>Saber 2</span>
             </button>
           </div>
         )}
@@ -3646,6 +5124,131 @@ export function App() {
                     </svg>
                   )}
 
+                  {/* Floating relationship picker */}
+                  {pendingDrop && (() => {
+                    const opts = getDropOptions(pendingDrop.sourceId, pendingDrop.targetId);
+                    const srcName = sceneObjects.find(o => o.id === pendingDrop.sourceId)?.name ?? '?';
+                    const tgtName = sceneObjects.find(o => o.id === pendingDrop.targetId)?.name ?? '?';
+                    return (
+                      <>
+                        {/* backdrop to close on outside click */}
+                        <div
+                          style={{ position: 'fixed', inset: 0, zIndex: 9998 }}
+                          onClick={() => setPendingDrop(null)}
+                        />
+                        <div style={{
+                          position: 'fixed',
+                          left: Math.min(pendingDrop.x, window.innerWidth - 260),
+                          top: Math.min(pendingDrop.y, window.innerHeight - 280),
+                          zIndex: 9999,
+                          background: '#1a2636',
+                          border: '1px solid #3a6a9a',
+                          borderRadius: 9,
+                          boxShadow: '0 6px 28px rgba(0,0,0,0.75)',
+                          minWidth: 248,
+                          overflow: 'hidden',
+                          fontSize: 12,
+                        }}>
+                          <div style={{ padding: '8px 12px 7px', background: '#162030', borderBottom: '1px solid #2d4055', color: '#89b4d4', fontSize: 11 }}>
+                            <span style={{ color: '#aed6f1', fontWeight: 700 }}>{srcName}</span>
+                            <span style={{ color: '#4a6a8a', margin: '0 5px' }}>→</span>
+                            <span style={{ color: '#aed6f1', fontWeight: 700 }}>{tgtName}</span>
+                          </div>
+                          {opts.length === 0 ? (
+                            <div style={{ padding: '8px 12px', color: '#4a6a8a' }}>No valid relationships</div>
+                          ) : opts.map((opt, i) => (
+                            <div
+                              key={i}
+                              role="button" tabIndex={0}
+                              onClick={opt.action}
+                              onKeyDown={e => e.key === 'Enter' && opt.action()}
+                              onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#243546'}
+                              onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}
+                              style={{ padding: '8px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 9, color: '#c8daea' }}
+                            >
+                              <span style={{ fontSize: 15 }}>{opt.icon}</span>
+                              <span>{opt.label}</span>
+                            </div>
+                          ))}
+                          <div
+                            role="button" tabIndex={0}
+                            onClick={() => setPendingDrop(null)}
+                            onKeyDown={e => e.key === 'Enter' && setPendingDrop(null)}
+                            onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = '#1e2a36'}
+                            onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = ''}
+                            style={{ padding: '6px 14px', cursor: 'pointer', color: '#4a6a8a', borderTop: '1px solid #2d4055', fontSize: 11 }}
+                          >Cancel</div>
+                        </div>
+                      </>
+                    );
+                  })()}
+
+                  {/* Hierarchy type filters */}
+                  {(() => {
+                    const allTypes = Array.from(new Set(sceneObjects.map(o => o.type))).sort();
+                    const typeIcons: Record<string, string> = {
+                      Emitter: '⭐', Flame: '🔥', Lightning: '⚡', Saber: '🔵', GlowSphere: '🔴',
+                      LightningPoint: '✦', Path: '〰️', PathPoint: '◦', EmitterShape: '◆',
+                      CameraTarget: '🎥', Bone: '🦴', Mesh: '⬡',
+                    };
+                    const typeColors: Record<string, string> = {
+                      Emitter: '#5a9fd4', Flame: '#e8803a', Lightning: '#f1c40f', Saber: '#00e5ff',
+                      GlowSphere: '#ff6bcd', LightningPoint: '#f1c40f', Path: '#5fc87a', PathPoint: '#5fc87a',
+                      EmitterShape: '#e8803a', CameraTarget: '#c084fc',
+                    };
+                    const toggleType = (t: string) => setHierarchyHiddenTypes(prev => {
+                      const next = new Set(prev);
+                      if (next.has(t)) next.delete(t); else next.add(t);
+                      return next;
+                    });
+                    if (allTypes.length === 0 && physicsForces.length === 0) return null;
+                    return (
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', padding: '0 0 8px 0', borderBottom: '1px solid #2d3a4a', marginBottom: '8px' }}>
+                        {allTypes.map(t => {
+                          const hidden = hierarchyHiddenTypes.has(t);
+                          const color = typeColors[t] ?? '#7a8a9a';
+                          return (
+                            <button
+                              key={t}
+                              type="button"
+                              onClick={() => toggleType(t)}
+                              title={hidden ? `Show ${t}` : `Hide ${t}`}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: '3px',
+                                padding: '2px 7px', borderRadius: '10px', border: `1px solid ${hidden ? '#2d3a4a' : color}`,
+                                background: hidden ? '#1a2332' : `${color}22`,
+                                color: hidden ? '#3d4d5d' : color,
+                                fontSize: '0.65rem', cursor: 'pointer', lineHeight: 1.4,
+                                opacity: hidden ? 0.5 : 1, transition: 'all 0.15s',
+                              }}
+                            >
+                              <span>{typeIcons[t] ?? '▪'}</span>
+                              <span>{t}</span>
+                            </button>
+                          );
+                        })}
+                        {physicsForces.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => toggleType('__forces__')}
+                            title={hierarchyHiddenTypes.has('__forces__') ? 'Show Forces' : 'Hide Forces'}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: '3px',
+                              padding: '2px 7px', borderRadius: '10px',
+                              border: `1px solid ${hierarchyHiddenTypes.has('__forces__') ? '#2d3a4a' : '#ff6b6b'}`,
+                              background: hierarchyHiddenTypes.has('__forces__') ? '#1a2332' : '#ff6b6b22',
+                              color: hierarchyHiddenTypes.has('__forces__') ? '#3d4d5d' : '#ff6b6b',
+                              fontSize: '0.65rem', cursor: 'pointer', lineHeight: 1.4,
+                              opacity: hierarchyHiddenTypes.has('__forces__') ? 0.5 : 1, transition: 'all 0.15s',
+                            }}
+                          >
+                            <span>⚡</span><span>Forces</span>
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })()}
+
                   <div style={{ marginBottom: '1rem' }}>
                     <div style={{ paddingBottom: '0.5rem', fontSize: '0.75rem', color: '#a9b5ca', fontWeight: 'bold' }}>
                       OBJECTS
@@ -3669,24 +5272,16 @@ export function App() {
                                 }}
                                 className={`hierarchy-row ${selectedObjectId === obj.id ? 'selected' : ''} ${draggingForceId ? 'drag-target' : ''}`}
                                 onClick={() => setSelectedObjectId(obj.id)}
-                                onMouseEnter={
-                                  draggingForceId
-                                    ? (e) => {
-                                        const target = e.currentTarget;
-                                        target.style.backgroundColor = '#5a4a3a';
-                                        target.style.borderColor = '#f39c12';
-                                      }
-                                    : undefined
-                                }
-                                onMouseLeave={
-                                  draggingForceId
-                                    ? (e) => {
-                                        const target = e.currentTarget;
-                                        target.style.backgroundColor = '';
-                                        target.style.borderColor = '';
-                                      }
-                                    : undefined
-                                }
+                                onMouseUp={(e) => handleDropNode(obj.id, e)}
+                                onMouseEnter={(e) => {
+                                  if (draggingForceId) { e.currentTarget.style.backgroundColor = '#5a4a3a'; e.currentTarget.style.borderColor = '#f39c12'; }
+                                  if (draggingNodeId && draggingNodeId !== obj.id) { e.currentTarget.style.outline = '2px solid #5fc87a'; }
+                                }}
+                                onMouseLeave={(e) => {
+                                  e.currentTarget.style.backgroundColor = '';
+                                  e.currentTarget.style.borderColor = '';
+                                  e.currentTarget.style.outline = '';
+                                }}
                                 onDrop={
                                   draggingForceId
                                     ? (e) => {
@@ -3706,6 +5301,19 @@ export function App() {
                                   borderLeft: '3px solid #5a9fd4'
                                 }}
                               >
+                                <input
+                                  type="checkbox"
+                                  checked={!spineExcludedObjectIds.has(obj.id)}
+                                  onChange={() => toggleSpineExclude(obj.id)}
+                                  onClick={e => e.stopPropagation()}
+                                  title="Include in Spine export"
+                                  style={{ cursor: 'pointer', accentColor: '#7ecf9e', flexShrink: 0 }}
+                                />
+                                <span
+                                  onMouseDown={(e) => handleStartDragNode(obj.id, e)}
+                                  title="Drag to create relationship"
+                                  style={{ cursor: 'grab', color: '#4a6a8a', fontSize: 12, flexShrink: 0, userSelect: 'none', padding: '0 2px' }}
+                                >⠇</span>
                                 <span className="hierarchy-item-type" style={{ color: '#5a9fd4' }}>
                                   EMITTER
                                 </span>
@@ -3727,8 +5335,48 @@ export function App() {
                                   }}
                                 />
                               </div>
+                              {((hierarchyChildrenByParent.get(obj.id) ?? []).length > 0 || (!hierarchyHiddenTypes.has('__forces__') && affectingForces.length > 0)) && (
+                              <div className="hierarchy-children-block">
                               {/* Child shapes/objects connected to this emitter as emission sources */}
                               {(hierarchyChildrenByParent.get(obj.id) ?? []).map(child => renderHierarchyNode(child, 1))}
+                              {/* Physics forces affecting this emitter */}
+                              {!hierarchyHiddenTypes.has('__forces__') && affectingForces.map(force => (
+                                <div
+                                  key={force.id}
+                                  ref={(el) => {
+                                    if (el) hierarchyNodeRefsRef.current.set(force.id, { element: el, type: 'force' });
+                                    else hierarchyNodeRefsRef.current.delete(force.id);
+                                  }}
+                                  className={`hierarchy-row ${selectedForceId === force.id ? 'selected' : ''}`}
+                                  onClick={(e) => { e.stopPropagation(); setSelectedForceId(force.id); }}
+                                  role="treeitem"
+                                  aria-selected={selectedForceId === force.id}
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '0.4rem',
+                                    paddingLeft: '8px',
+                                    background: selectedForceId === force.id ? '#6b2311' : '#3d2e2e',
+                                    borderLeft: '3px solid #ff6b6b',
+                                    fontSize: '0.8rem',
+                                  }}
+                                >
+                                  <span style={{ color: '#ff6b6b', fontSize: '0.7rem', flexShrink: 0 }}>⚡</span>
+                                  <span className="hierarchy-item-type" style={{ color: '#ff9090', fontSize: '0.68rem' }}>
+                                    {force.type.replace(/-/g, ' ')}
+                                  </span>
+                                  <span className="hierarchy-item-name" style={{ fontSize: '0.78rem' }}>{force.name}</span>
+                                  <button
+                                    className="hierarchy-delete-btn"
+                                    onClick={(e) => { e.stopPropagation(); handleDeletePhysicsForce(force.id); }}
+                                    type="button"
+                                    title="Delete force"
+                                    style={{ marginLeft: 'auto' }}
+                                  >🗑</button>
+                                </div>
+                              ))}
+                              </div>
+                              )}
                             </div>
                           );
                         }))
@@ -3742,38 +5390,20 @@ export function App() {
                       {(hierarchyChildrenByParent.get(null) ?? [])
                         .filter((obj) => obj.type !== 'Emitter')
                         .map((obj) => (
-                          <div key={obj.id}>
-                            <div
-                              className={`hierarchy-row ${selectedObjectId === obj.id ? 'selected' : ''}`}
-                              onClick={() => setSelectedObjectId(obj.id)}
-                              role="treeitem"
-                              aria-selected={selectedObjectId === obj.id}
-                              style={{ 
-                                display: 'flex', 
-                                alignItems: 'center', 
-                                gap: '0.5rem',
-                                background: selectedObjectId === obj.id ? '#188618' : '#3a5a3a',
-                                borderLeft: '3px solid #7dd37d'
-                              }}
-                            >
-                              <span className="hierarchy-item-type" style={{ color: '#7dd37d' }}>
-                                {obj.type}
-                              </span>
-                              <span className="hierarchy-item-name">{getObjectDisplayName(obj)}</span>
-                            </div>
-                          </div>
+                          <React.Fragment key={obj.id}>
+                            {renderHierarchyNode(obj, 0)}
+                          </React.Fragment>
                         ))}
                     </div>
                   )}
 
+                  {(() => { const unassignedForces = physicsForces.filter(f => f.affectedEmitterIds.length === 0); return (unassignedForces.length === 0 || hierarchyHiddenTypes.has('__forces__')) ? null : (
                   <div style={{ borderTop: '1px solid #3b455c', paddingTop: '0.75rem' }}>
                     <div style={{ paddingBottom: '0.5rem', fontSize: '0.75rem', color: '#a9b5ca', fontWeight: 'bold' }}>
-                      PHYSICS FORCES
+                      UNASSIGNED FORCES
                     </div>
-                    {physicsForces.length === 0 ? (
-                      <div className="hierarchy-empty">No physics forces</div>
-                    ) : (
-                      physicsForces.map((force) => (
+                    {(
+                      unassignedForces.map((force) => (
                         <div
                           key={force.id}
                           ref={(el) => {
@@ -3833,6 +5463,7 @@ export function App() {
                       ))
                     )}
                   </div>
+                  ); })()}
                 </div>
               )}
 
@@ -3995,6 +5626,36 @@ export function App() {
                               )}
                               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{att.slotName}</span>
                               <span style={{ marginLeft: 'auto', color: '#555', flexShrink: 0 }}>{att.width}×{att.height}</span>
+                              <button
+                                title="Generate bezier path from visible edge"
+                                onClick={() => {
+                                  const pts = scene3DRef.current?.getSpineEdgeOutline(att.id, 32);
+                                  if (!pts || pts.length < 2) return;
+                                  const pathId = 'spine_edge_' + att.id + '_' + Date.now();
+                                  const pathObject: SceneObject = {
+                                    id: pathId,
+                                    name: att.slotName + ' Edge',
+                                    type: 'Path',
+                                    position: { x: 0, y: 0, z: 0 },
+                                    rotation: { x: 0, y: 0, z: 0 },
+                                    scale: { x: 1, y: 1, z: 1 },
+                                    parentId: null,
+                                    properties: { closed: true },
+                                  };
+                                  const pointObjects: SceneObject[] = pts.map((pt, i) => ({
+                                    id: 'spine_edge_pt_' + Date.now() + '_' + i,
+                                    name: 'Point ' + i,
+                                    type: 'PathPoint',
+                                    position: { x: pt.x, y: pt.y, z: pt.z },
+                                    rotation: { x: 0, y: 0, z: 0 },
+                                    scale: { x: 1, y: 1, z: 1 },
+                                    parentId: pathId,
+                                    properties: {},
+                                  }));
+                                  setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
+                                }}
+                                style={{ flexShrink: 0, padding: '1px 5px', fontSize: '0.65rem', backgroundColor: '#1a3060', color: '#7db8f0', border: '1px solid #2a4a8a', borderRadius: 3, cursor: 'pointer' }}
+                              >→ Path</button>
                             </div>
                           ))}
                         </div>
@@ -4025,8 +5686,8 @@ export function App() {
           }}>
             {/* Transform tools */}
             {([
-              { mode: 'translate', icon: '✛', title: 'Move (G)' },
-              { mode: 'rotate',    icon: '↻', title: 'Rotate (R)' },
+              { mode: 'translate', icon: '✛', title: 'Move (W / G)' },
+              { mode: 'rotate',    icon: '↻', title: 'Rotate (E / R)' },
               { mode: 'scale',     icon: '⤡', title: 'Scale (S)' },
             ] as const).map(({ mode, icon, title }) => (
               <button key={mode} title={title} type="button"
@@ -4053,6 +5714,34 @@ export function App() {
                 fontSize: 15, display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>✏️</button>
 
+            {/* Draw on surface mode */}
+            {selectedObjectId && drawBezierCurveMode && (
+              <button
+                title={bezierSurfaceObjectId === selectedObjectId ? 'Exit surface draw mode' : 'Lock bezier draw to selected object surface'}
+                type="button"
+                onClick={() => setBezierSurfaceObjectId(prev => prev === selectedObjectId ? null : selectedObjectId)}
+                style={{
+                  width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
+                  background: bezierSurfaceObjectId === selectedObjectId ? '#5a3fc0' : 'rgba(255,255,255,0.07)',
+                  color: bezierSurfaceObjectId === selectedObjectId ? '#fff' : '#bbb',
+                  fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>🧲</button>
+            )}
+
+            {/* Auto-vine on surface */}
+            {selectedObjectId && (
+              <button
+                title="Generate vine path on selected object surface"
+                type="button"
+                onClick={() => setShowVinePanel(v => !v)}
+                style={{
+                  width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
+                  background: showVinePanel ? '#2e7d4f' : 'rgba(255,255,255,0.07)',
+                  color: showVinePanel ? '#fff' : '#bbb',
+                  fontSize: 14, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                }}>🌿</button>
+            )}
+
             {/* Divider */}
             <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.1)', margin: '2px 0' }} />
 
@@ -4078,7 +5767,7 @@ export function App() {
             <div style={{ width: '100%', height: 1, background: 'rgba(255,255,255,0.1)', margin: '2px 0' }} />
 
             {/* Quad viewport toggle */}
-            <button title="Quad Viewport (Space)" type="button"
+            <button title="Quad Viewport (tap Space)" type="button"
               onClick={() => setQuadViewport(prev => !prev)}
               style={{
                 width: 30, height: 30, border: 'none', borderRadius: 5, cursor: 'pointer',
@@ -4087,9 +5776,79 @@ export function App() {
                 fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}>⊞</button>
           </div>
+
+          {/* ── Vine generator panel ── */}
+          {showVinePanel && selectedObjectId && (
+            <div style={{
+              position: 'absolute', top: 10, left: 50, zIndex: 20,
+              background: 'rgba(22,34,22,0.97)', border: '1px solid rgba(60,180,80,0.35)',
+              borderRadius: 9, padding: '12px 14px', minWidth: 210,
+              boxShadow: '0 4px 24px rgba(0,0,0,0.6)', color: '#ccc',
+              fontSize: 12, display: 'flex', flexDirection: 'column', gap: 9,
+              pointerEvents: 'auto',
+            }}>
+              <div style={{ fontWeight: 700, color: '#7ecf9e', fontSize: 13, marginBottom: 2 }}>
+                🌿 Vine Generator
+              </div>
+
+              {/* Control points */}
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ color: '#aaa' }}>Control points: <strong style={{ color: '#fff' }}>{vineNumPoints}</strong></span>
+                <input type="range" min={3} max={24} step={1}
+                  value={vineNumPoints}
+                  onChange={e => setVineNumPoints(Number(e.target.value))}
+                  style={{ accentColor: '#5fc87a' }} />
+              </label>
+
+              {/* Length */}
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ color: '#aaa' }}>
+                  Length: <strong style={{ color: '#fff' }}>{vineLength}</strong>
+                  <input type="number" min={5} max={2000} step={5}
+                    value={vineLength}
+                    onChange={e => setVineLength(Number(e.target.value))}
+                    style={{
+                      marginLeft: 8, width: 62, background: 'rgba(255,255,255,0.08)',
+                      border: '1px solid rgba(255,255,255,0.15)', borderRadius: 4,
+                      color: '#fff', fontSize: 11, padding: '1px 4px',
+                    }} />
+                </span>
+                <input type="range" min={5} max={2000} step={5}
+                  value={vineLength}
+                  onChange={e => setVineLength(Number(e.target.value))}
+                  style={{ accentColor: '#5fc87a' }} />
+              </label>
+
+              {/* Curliness */}
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <span style={{ color: '#aaa' }}>Curliness: <strong style={{ color: '#fff' }}>{vineCurliness.toFixed(2)}</strong></span>
+                <input type="range" min={0} max={1} step={0.01}
+                  value={vineCurliness}
+                  onChange={e => setVineCurliness(Number(e.target.value))}
+                  style={{ accentColor: '#5fc87a' }} />
+              </label>
+
+              <div style={{ display: 'flex', gap: 6, marginTop: 2 }}>
+                <button type="button" onClick={handleGenerateVine} style={{
+                  flex: 1, padding: '5px 0', background: '#2e7d4f', border: 'none',
+                  borderRadius: 5, color: '#fff', fontWeight: 700, fontSize: 12, cursor: 'pointer',
+                }}>Generate</button>
+                <button type="button" onClick={() => { handleGenerateVine(); }} style={{
+                  padding: '5px 8px', background: 'rgba(255,255,255,0.08)', border: 'none',
+                  borderRadius: 5, color: '#aaa', fontSize: 11, cursor: 'pointer',
+                }} title="Generate new random variation">↺</button>
+                <button type="button" onClick={() => setShowVinePanel(false)} style={{
+                  padding: '5px 8px', background: 'rgba(255,255,255,0.06)', border: 'none',
+                  borderRadius: 5, color: '#888', fontSize: 11, cursor: 'pointer',
+                }}>✕</button>
+              </div>
+            </div>
+          )}
+
             <Scene3D
               drawBezierCurveMode={drawBezierCurveMode}
               onFinishDrawBezierCurve={handleFinishDrawBezierCurve}
+              bezierSurfaceObjectId={bezierSurfaceObjectId}
               ref={scene3DRef}
               onCameraChange={(s) => { console.log('CAMERA MOVED'); setParticleCameraState(s); }}
               sceneSize={sceneSize} 
@@ -4119,29 +5878,132 @@ export function App() {
             spineFrameOverrides={spineFrameOverrides}
             spineLayerSpread={spineLayerSpread}
             quadViewport={quadViewport}
+            quadPanelViews={quadPanelViews}
             manipulatorMode={manipulatorMode}
             onManipulatorModeChange={setManipulatorMode}
+            lookThroughCamera={lookThroughCamera}
+            onViewportRightClick={(sx, sy, panel) => setMarkingMenu({ x: sx, y: sy, type: 'context', panel })}
+            capturePreviewObjectIds={[]}
+            capturePreviewPadding={capturePadding}
+            manualCropRect={showCaptureOverlay ? (manualCropRect ?? undefined) : undefined}
+            onManualCropChange={setManualCropRect}
+            hiddenObjectIds={[...spineExcludedObjectIds]}
           />
-        </main>
 
-        {/* Debug: Show selection status */}
-        {process.env.NODE_ENV === 'development' && (
-          <div style={{ 
-            position: 'fixed', 
-            bottom: '120px', 
-            right: '10px', 
-            background: 'rgba(0,0,0,0.7)', 
-            color: '#fff', 
-            padding: '8px 12px', 
-            borderRadius: '4px',
-            fontSize: '11px',
-            fontFamily: 'monospace',
-            pointerEvents: 'none',
-            zIndex: 1000
-          }}>
-            Selected: {selectedObjectId ? `${selectedObject?.type} (${selectedObjectId})` : 'None'}
-          </div>
-        )}
+          {/* ─── Viewport render-frame preview ──────────────────────────────── */}
+          {(viewportSeqDialog !== null || renderFramePreview !== null) && (() => {
+            const src = viewportSeqDialog ?? renderFramePreview!;
+            const isRendering = !!(viewportSeqDialog?.rendering);
+            const isPreviewOnly = viewportSeqDialog === null;
+            return (
+              <div style={{
+                position: 'absolute', inset: 0, zIndex: 8, pointerEvents: 'none',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                <div style={{
+                  aspectRatio: `${src.width} / ${src.height}`,
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  boxShadow: '0 0 0 9999px rgba(0,0,0,0.48)',
+                  border: `2px solid ${
+                    isRendering ? 'rgba(100,200,100,0.9)'
+                    : isPreviewOnly ? 'rgba(120,180,255,0.85)'
+                    : 'rgba(255,200,50,0.9)'
+                  }`,
+                  position: 'relative',
+                  boxSizing: 'border-box',
+                  transition: 'border-color 0.25s',
+                }}>
+                  {/* inner guide rectangle */}
+                  <div style={{
+                    position: 'absolute', inset: 6,
+                    border: `1px solid ${
+                      isRendering ? 'rgba(100,200,100,0.25)'
+                      : isPreviewOnly ? 'rgba(120,180,255,0.18)'
+                      : 'rgba(255,200,50,0.25)'
+                    }`,
+                    transition: 'border-color 0.25s',
+                  }} />
+                  {/* info badge — bottom-center */}
+                  <div style={{
+                    position: 'absolute', bottom: 8, left: '50%', transform: 'translateX(-50%)',
+                    background: 'rgba(0,0,0,0.72)', padding: '3px 10px', borderRadius: 5,
+                    color: isRendering ? 'rgba(100,220,100,0.95)'
+                      : isPreviewOnly ? 'rgba(140,200,255,0.95)'
+                      : 'rgba(255,210,60,0.95)',
+                    fontSize: '0.72rem', fontWeight: 700, whiteSpace: 'nowrap',
+                    letterSpacing: '0.03em',
+                  }}>
+                    {isRendering
+                      ? `● Rendering…`
+                      : `${src.width}×${src.height} · ${src.frameCount}f @ ${src.fps} fps`
+                    }
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* ─── Marking Menu overlay ─── */}
+          {markingMenu && (() => {
+            const selectedObj = sceneObjects.find(o => o.id === selectedObjectId);
+            // Determine which viewport's current view to show as active
+            const clickedPanelView: 'perspective'|'x'|'y'|'z' = (markingMenu.panel && quadViewport)
+              ? quadPanelViews[markingMenu.panel]
+              : viewMode;
+            // Change view: in quad mode affect only the clicked panel; otherwise global viewMode
+            const changeView = (v: 'perspective'|'x'|'y'|'z') => {
+              if (markingMenu.panel && quadViewport) {
+                setQuadPanelViews(prev => ({ ...prev, [markingMenu.panel!]: v }));
+              } else {
+                setViewMode(v);
+              }
+            };
+            // Space hotbox: tools + view modes
+            const toolItems: MarkingMenuItem[] = [
+              { position: 'N',  icon: '✛', label: 'Move',       shortcut: 'W / G', active: manipulatorMode === 'translate', action: () => setManipulatorMode('translate') },
+              { position: 'E',  icon: '↻', label: 'Rotate',     shortcut: 'E / R', active: manipulatorMode === 'rotate',    action: () => setManipulatorMode('rotate') },
+              { position: 'S',  icon: '⤡', label: 'Scale',      shortcut: 'S',     active: manipulatorMode === 'scale',     action: () => setManipulatorMode('scale') },
+              { position: 'W',  icon: '⊹', label: 'Deselect',  shortcut: 'Esc',                                            action: () => setSelectedObjectId(null) },
+              { position: 'NW', icon: '◈', label: 'Persp',     shortcut: '',      active: clickedPanelView === 'perspective', action: () => changeView('perspective') },
+              { position: 'NE', icon: '▤', label: 'Top',       shortcut: '',      active: clickedPanelView === 'y',           action: () => changeView('y') },
+              { position: 'SE', icon: '▥', label: 'Front',     shortcut: '',      active: clickedPanelView === 'z',           action: () => changeView('z') },
+              { position: 'SW', icon: '▦', label: 'Side',      shortcut: '',      active: clickedPanelView === 'x',           action: () => changeView('x') },
+            ];
+            // RMB context menu: no object selected
+            const noSelContextItems: MarkingMenuItem[] = [
+              { position: 'N',  icon: '⌖', label: 'Frame All', shortcut: 'A',                                               action: () => { setMarkingMenu(null); } },
+              { position: 'NW', icon: '◈', label: 'Persp',     shortcut: '',      active: clickedPanelView === 'perspective', action: () => changeView('perspective') },
+              { position: 'NE', icon: '▤', label: 'Top',       shortcut: '',      active: clickedPanelView === 'y',           action: () => changeView('y') },
+              { position: 'E',  icon: '▥', label: 'Front',     shortcut: '',      active: clickedPanelView === 'z',           action: () => changeView('z') },
+              { position: 'SE', icon: '▦', label: 'Side',      shortcut: '',      active: clickedPanelView === 'x',           action: () => changeView('x') },
+              { position: 'S',  icon: '📷', label: 'Camera View', shortcut: '',   active: lookThroughCamera,                  action: () => setLookThroughCamera(p => !p) },
+              { position: 'SW', icon: '⊞', label: 'Quad',      shortcut: 'Space', active: quadViewport,                      action: () => setQuadViewport(p => !p) },
+            ];
+            // RMB context menu: object selected
+            const selContextItems: MarkingMenuItem[] = [
+              { position: 'N',  icon: '⊕', label: 'Duplicate', shortcut: 'Ctrl+D',                                          action: () => handleDuplicateObject() },
+              { position: 'S',  icon: '✕', label: 'Delete',    shortcut: 'Del',                                             action: () => handleDeleteObject(),   color: 'rgba(200,55,55,0.97)' },
+              { position: 'W',  icon: '⊹', label: 'Deselect',  shortcut: 'Esc',                                             action: () => setSelectedObjectId(null) },
+              { position: 'E',  icon: '⌖', label: 'Focus',     shortcut: 'F',                                               action: () => { /* F key fires via Scene3D */ } },
+              { position: 'NE', icon: '✏', label: 'Rename',    shortcut: 'F2',                                              action: () => { if (selectedObj) startRenameObject(selectedObj); } },
+              { position: 'NW', icon: '◈', label: 'Persp',     shortcut: '',      active: clickedPanelView === 'perspective', action: () => changeView('perspective') },
+              { position: 'SE', icon: '▤', label: 'Top',       shortcut: '',      active: clickedPanelView === 'y',           action: () => changeView('y') },
+              { position: 'SW', icon: '▥', label: 'Front',     shortcut: '',      active: clickedPanelView === 'z',           action: () => changeView('z') },
+            ];
+            const items = markingMenu.type === 'tool' ? toolItems
+              : selectedObjectId ? selContextItems : noSelContextItems;
+            return (
+              <MarkingMenu
+                x={markingMenu.x} y={markingMenu.y}
+                items={items}
+                title={markingMenu.type === 'tool' ? 'Hotbox' : selectedObj ? selectedObj.name : 'Viewport'}
+                onClose={() => setMarkingMenu(null)}
+                onHoverChange={item => { markingMenuHoveredRef.current = item; }}
+              />
+            );
+          })()}
+        </main>
 
         <aside className="file-panel panel-right">
           {selectedForceId && physicsForces.find((f) => f.id === selectedForceId) ? (
@@ -5398,6 +7260,34 @@ export function App() {
 <input id="particle-pivot-y" max={1} min={0} onChange={(event) => handleUpdateEmitterProperty('particlePivotY', Number.parseFloat(event.target.value))} step={0.05} type="range" value={selectedEmitterProperties.particlePivotY ?? 0.5} />
 <hr style={{ margin: '0.5rem 0', borderColor: '#3b455c' }} />
 
+                        {/* ── Drift Ghost Copies ── */}
+                        <div style={{ padding: '0.4rem 0.5rem', background: '#1a2030', borderRadius: '4px', border: '1px solid #2c3a55', marginBottom: '0.5rem' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: '#9bd4ff', fontSize: '0.78rem', cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={Boolean((selectedEmitterProperties as any).driftCopiesEnabled ?? false)}
+                              onChange={e => handleUpdateEmitterProperty('driftCopiesEnabled', e.target.checked)}
+                            />
+                            Drift Ghost Copies
+                          </label>
+                          {Boolean((selectedEmitterProperties as any).driftCopiesEnabled) && (
+                            <div style={{ marginTop: '0.4rem', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                              <label>Copies: {(selectedEmitterProperties as any).driftCopiesCount ?? 3}</label>
+                              <input type="range" min={1} max={8} step={1}
+                                value={(selectedEmitterProperties as any).driftCopiesCount ?? 3}
+                                onChange={e => handleUpdateEmitterProperty('driftCopiesCount', Number(e.target.value))} />
+                              <label>Spacing: {(selectedEmitterProperties as any).driftCopiesSpacing ?? 20}</label>
+                              <input type="range" min={4} max={120} step={2}
+                                value={(selectedEmitterProperties as any).driftCopiesSpacing ?? 20}
+                                onChange={e => handleUpdateEmitterProperty('driftCopiesSpacing', Number(e.target.value))} />
+                              <label>Drift Speed: {(selectedEmitterProperties as any).driftCopiesSpeed ?? 40}</label>
+                              <input type="range" min={5} max={200} step={5}
+                                value={(selectedEmitterProperties as any).driftCopiesSpeed ?? 40}
+                                onChange={e => handleUpdateEmitterProperty('driftCopiesSpeed', Number(e.target.value))} />
+                            </div>
+                          )}
+                        </div>
+
                         <label htmlFor="particle-opacity-over-life">
                           <input
                               id="particle-opacity-over-life"
@@ -5782,7 +7672,13 @@ export function App() {
                         <input type="range" min={0.5} max={8} step={0.5} value={lp.coreWidth ?? 1} onChange={e => upd('coreWidth', Number(e.target.value))} />
                         <label>Glow Width: {lp.glowWidth ?? 4}</label>
                         <input type="range" min={1} max={30} step={1} value={lp.glowWidth ?? 4} onChange={e => upd('glowWidth', Number(e.target.value))} />
-
+                        <label>Base Shape</label>
+                        <select value={lp.flareShape ?? 'circle'} onChange={e => upd('flareShape', e.target.value)}>
+                          <option value="circle">Circle (Soft)</option>
+                          <option value="diamond">Diamond (Sharp)</option>
+                          <option value="star">Star (Cross)</option>
+                          <option value="sharp">Hard Edge Circle</option>  {spriteLibrary && spriteLibrary.map(s => <option key={s.id} value={s.dataUrl}>Custom: {s.name}</option>)}
+</select>
                         <label>Segments: {lp.numSegments ?? 4}</label>
                         <input type="range" min={1} max={12} step={1} value={lp.numSegments ?? 4} onChange={e => upd('numSegments', Number(e.target.value))} />
                         <label>Segment Depth: {lp.segmentDepth ?? 2}</label>
@@ -5824,23 +7720,799 @@ export function App() {
                         <label>FPS: {lp.fps ?? 12}</label>
                         <input type="range" min={6} max={60} step={1} value={lp.fps ?? 12} onChange={e => upd('fps', Number(e.target.value))} />
                         <label>Export Mode</label>
-                        <select value={lp.exportMode ?? 'sequence'} onChange={e => upd('exportMode', e.target.value)}>
-                          <option value="sequence">PNG Sequence (slot cycles)</option>
-                          <option value="bone-anim">Bone Animation (static PNGs)</option>
+                        <select value={lp.exportMode ?? 'sequence'} onChange={e => { upd('exportMode', e.target.value); setRenderFramePreview(null); }}>
+                          <option value="sequence">Spine: PNG Sequence (slot cycles)</option>
+                          <option value="bone-anim">Spine: Bone Animation</option>
+                          <option value="viewport-sequence">Viewport PNG Sequence (transparent)</option>
                         </select>
+                        {(lp.exportMode ?? 'sequence') === 'viewport-sequence' && (
+                          <button
+                            type="button"
+                            onClick={() => setRenderFramePreview(prev =>
+                              prev ? null : {
+                                width:      lp.viewportExportWidth  ?? 512,
+                                height:     lp.viewportExportHeight ?? 512,
+                                frameCount: lp.frameCount ?? 10,
+                                fps:        lp.fps ?? 12,
+                              }
+                            )}
+                            style={{
+                              marginTop: '6px', width: '100%', padding: '5px 0',
+                              background: renderFramePreview ? 'rgba(100,170,255,0.15)' : 'rgba(255,255,255,0.06)',
+                              border: renderFramePreview ? '1px solid rgba(120,180,255,0.6)' : '1px solid #3a4a5e',
+                              borderRadius: '5px',
+                              color: renderFramePreview ? '#80c0ff' : '#8a93a2',
+                              fontSize: '0.78rem', cursor: 'pointer',
+                              transition: 'all 0.15s',
+                            }}
+                          >
+                            {renderFramePreview ? '📹 Hide render frame' : '📹 Preview render frame'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleExportLightningToSpine}
+                          style={{
+                            marginTop: '10px', width: '100%', padding: '7px 0',
+                            background: 'linear-gradient(135deg, #2a3a6a, #1a4a8a)',
+                            border: '1px solid #4a7aff', borderRadius: '6px',
+                            color: '#aac8ff', fontWeight: 700, fontSize: '0.8rem',
+                            cursor: 'pointer', letterSpacing: '0.03em',
+                          }}
+                        >
+                          {(lp.exportMode ?? 'sequence') === 'viewport-sequence' ? '🎞 Export PNG Sequence' : '⚡ Export to Spine'}
+                        </button>
                       </div>
                     </>
                   );
                 })()}
 
+                {selectedObject.type === 'Camera' && (() => {
+                  const cp = (selectedObject.properties ?? {}) as any;
+                  const upd = (k: string, v: any) => handleUpdateEmitterProperty(k, v);
+                  const fov = cp.fov ?? 75;
+                  const hAoV = (2 * Math.atan(Math.tan((fov * Math.PI / 180) / 2) * (16 / 9)) * 180 / Math.PI).toFixed(0);
+                  // Find the companion CameraTarget child
+                  const camTargetObj = sceneObjects.find(o => o.type === 'CameraTarget' && o.parentId === selectedObject.id);
+                  return (
+                    <>
+                      <div className="collapsible-section" style={{ display: 'flex', alignItems: 'center', marginBottom: '8px' }}>
+                        <span style={{ fontWeight: 600, color: '#88ccff' }}>📷 Camera Properties</span>
+                      </div>
+                      <div className="subpanel-content">
+                        {/* Look Through — toggle only via marking menu */}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px',
+                          padding: '6px 10px', borderRadius: '6px',
+                          background: lookThroughCamera ? 'rgba(100,180,255,0.18)' : 'rgba(255,255,255,0.05)',
+                          border: lookThroughCamera ? '1px solid #4a9eff' : '1px solid #3b455c',
+                          fontWeight: 600, color: lookThroughCamera ? '#88ccff' : '#8a93a2' }}>
+                          👁 Look Through Camera
+                          {lookThroughCamera
+                            ? <span style={{ fontSize: '0.7rem', fontWeight: 400, color: '#7acfff', marginLeft: 'auto' }}>Active — RMB to switch</span>
+                            : <span style={{ fontSize: '0.7rem', fontWeight: 400, color: '#6a7a8a', marginLeft: 'auto' }}>RMB to activate</span>}
+                        </div>
+
+                        {/* Target info */}
+                        <div style={{ fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '4px' }}>Look-at Target</div>
+                        {camTargetObj ? (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px',
+                            padding: '6px 10px', borderRadius: '6px', background: 'rgba(0,200,255,0.08)',
+                            border: '1px solid rgba(0,200,255,0.25)' }}>
+                            <span style={{ color: '#00ddff', fontSize: '1rem' }}>&#x25CE;</span>
+                            <div>
+                              <div style={{ fontWeight: 600, color: '#00ddff', fontSize: '0.8rem' }}>{camTargetObj.name || 'camera target'}</div>
+                              <div style={{ fontSize: '0.7rem', color: '#7a8a9a' }}>
+                                {camTargetObj.position.x.toFixed(0)}, {camTargetObj.position.y.toFixed(0)}, {camTargetObj.position.z.toFixed(0)}
+                              </div>
+                            </div>
+                            <button type="button" onClick={() => setSelectedObjectId(camTargetObj.id)}
+                              style={{ marginLeft: 'auto', fontSize: '0.7rem', padding: '3px 8px',
+                                borderRadius: '4px', background: 'rgba(0,200,255,0.15)',
+                                border: '1px solid rgba(0,200,255,0.4)', color: '#00ddff', cursor: 'pointer' }}>
+                              Select
+                            </button>
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: '0.72rem', color: '#7a8a9a', marginBottom: '8px' }}>
+                            No target object found. Re-create the camera to get a movable target.
+                          </div>
+                        )}
+
+                        <div style={{ fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase', marginTop: '8px', marginBottom: '4px' }}>Lens</div>
+                        <label>Field of View: {fov.toFixed(0)}° vertical · {hAoV}° horiz (16:9)</label>
+                        <input type="range" min={10} max={150} step={1}
+                          value={fov}
+                          onChange={e => upd('fov', Number(e.target.value))} />
+                        <div style={{ fontSize: '0.72rem', color: '#7a8a9a', marginTop: '4px' }}>
+                          Wide angle ≈ 90°+, telephoto ≈ 20–40°
+                        </div>
+
+                        <hr style={{ margin: '0.8rem 0', borderColor: '#3b455c' }} />
+
+                        {/* Path animation */}
+                        <div style={{ fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase', marginBottom: '6px' }}>Follow Path</div>
+                        <select
+                          value={cp.pathAnimPathId || ''}
+                          onChange={e => upd('pathAnimPathId', e.target.value)}
+                          style={{ width: '100%', marginBottom: '0.4rem' }}
+                        >
+                          <option value="">None</option>
+                          {sceneObjects
+                            .filter(o => o.type === 'Path')
+                            .map(p => (
+                              <option key={p.id} value={p.id}>{p.name || p.id}</option>
+                            ))}
+                        </select>
+                        {!!cp.pathAnimPathId && (
+                          <>
+                            <label>Speed: {(cp.pathAnimSpeed ?? 0.1).toFixed(2)}</label>
+                            <input type="range" min={0.01} max={2.0} step={0.01}
+                              value={cp.pathAnimSpeed ?? 0.1}
+                              onChange={e => upd('pathAnimSpeed', Number(e.target.value))} />
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '4px' }}>
+                              <input type="checkbox"
+                                checked={cp.pathAnimLoop !== false}
+                                onChange={e => upd('pathAnimLoop', e.target.checked)} />
+                              Loop
+                            </label>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', marginBottom: '4px' }}>
+                              <input type="checkbox"
+                                checked={!!cp.pathAnimOrient}
+                                onChange={e => upd('pathAnimOrient', e.target.checked)} />
+                              Orient camera forward along path
+                            </label>
+                            <div style={{ fontSize: '0.72rem', color: '#7a8a9a', marginTop: '2px' }}>
+                              When oriented, camera looks down the path direction; target object is ignored.
+                            </div>
+                          </>
+                        )}
+
+                        <div style={{ fontSize: '0.72rem', color: '#7a8a9a', marginTop: '8px' }}>
+                          Position and look-at target are fully keyframeable via the timeline.
+                        </div>
+                      </div>
+                    </>
+                  );
+                })()}
+
+                {selectedObject.type === 'Saber' && (() => {
+  const sp = (selectedObject.properties ?? {}) as any;
+  const upd = (key: string, val: unknown) => handleUpdateEmitterProperty(key, val as any);
+  const applyPreset = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const presetName = e.target.value;
+    let preset: any = null;
+    if (presetName === 'Fire') {
+        preset = { coreColor: '#ffffff', coreColorEnd: '#ffff00', glowColor: '#ffaa00', glowColorEnd: '#ff0000', coreWidth: 0.5, glowWidth: 12.0, noiseIntensity: 2.5, noiseScale: 6.0, noiseSpeed: 1.5, coreFalloff: 0.2, glowFalloff: 1.5 };
+    } else if (presetName === 'Neon') {
+        preset = { coreColor: '#eef5ff', coreColorEnd: '#eef5ff', glowColor: '#0066ff', glowColorEnd: '#0022ff', coreWidth: 1.2, glowWidth: 15.0, noiseIntensity: 0.0, coreFalloff: 0.1, glowFalloff: 1.0 };
+    } else if (presetName === 'Electric') {
+        preset = { coreColor: '#ffffff', coreColorEnd: '#ffffff', glowColor: '#aa00ff', glowColorEnd: '#00aaff', coreWidth: 0.3, glowWidth: 6.0, noiseIntensity: 3.5, noiseScale: 15.0, noiseSpeed: 3.5, coreFalloff: 0.1, glowFalloff: 0.8 };
+    } else if (presetName === 'Ghost') {
+        preset = { coreColor: '#ffffff', coreColorEnd: '#aaffaa', glowColor: '#00ffaa', glowColorEnd: '#0088ff', coreWidth: 1.0, glowWidth: 10.0, noiseIntensity: 1.2, noiseScale: 3.0, noiseSpeed: 0.8, coreFalloff: 0.4, glowFalloff: 1.2 };
+    } else if (presetName === 'Default') {
+        preset = { coreColor: '#ffffff', coreColorEnd: '#ffffff', glowColor: '#0088ff', glowColorEnd: '#ff00ff', coreWidth: 1.0, glowWidth: 6.0, noiseIntensity: 0.5, noiseScale: 5.0, noiseSpeed: 1.0, glowFalloff: 1.2, coreFalloff: 0.2 };
+    }
+    if (preset) {
+        setSceneObjects(prev => prev.map(obj => obj.id === selectedObject.id ? { ...obj, properties: { ...(obj.properties || {}), ...preset } } : obj));
+    }
+    // Reset select to allow choosing same preset again
+    e.target.value = "";
+  };
+  return (
+    <>
+      <div className="properties-section">
+        <h4>⚔ Saber Render</h4>
+        <div className="property-row" style={{marginBottom: '8px', paddingBottom: '8px', borderBottom: '1px solid #3c4c5c'}}>
+          <label style={{color: '#fff', fontWeight: 'bold'}}>Preset Dropdown</label>
+          <select onChange={applyPreset} defaultValue="" style={{width: '60%', padding: '4px', backgroundColor: '#1a222c', color: '#fff', border: '1px solid #3c4c5c', borderRadius: '4px'}}>
+            <option value="" disabled>Select Preset...</option>
+            <option value="Default">Restore Default</option>
+            <option value="Fire">🔥 Chaotic Fire</option>
+            <option value="Neon">⭕ Smooth Neon</option>
+            <option value="Electric">⚡ Electric Lightning</option>
+            <option value="Ghost">👻 Ghostly Plasma</option>
+          </select>
+        </div>
+        <div className="property-row">
+          <label>Core Color</label>
+          <input type="color" value={sp.coreColor ?? '#ffffff'} onChange={(e) => upd('coreColor', e.target.value)} />
+        </div>
+        <div className="property-row">
+          <label>Glow Color</label>
+          <input type="color" value={sp.glowColor ?? '#0088ff'} onChange={(e) => upd('glowColor', e.target.value)} />
+        </div>
+        <div className="property-row">
+          <label>Glow Color End</label>
+          <input type="color" value={sp.glowColorEnd ?? sp.glowColor ?? '#ff00ff'} onChange={(e) => upd('glowColorEnd', e.target.value)} />
+        </div>
+        <div className="property-row">
+          <label>Core Color End</label>
+          <input type="color" value={sp.coreColorEnd ?? sp.coreColor ?? '#ffffff'} onChange={(e) => upd('coreColorEnd', e.target.value)} />
+        </div>
+        <div className="property-row">
+          <label>Core Width</label>
+          <input type="range" min="0.1" max="20" step="0.1" value={sp.coreWidth ?? 1.0} onChange={(e) => upd('coreWidth', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Glow Width</label>
+          <input type="range" min="0.1" max="100" step="0.1" value={sp.glowWidth ?? 6.0} onChange={(e) => upd('glowWidth', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Core Falloff</label>
+          <input type="range" min="0.0" max="2.0" step="0.01" value={sp.coreFalloff ?? 0.2} onChange={(e) => upd('coreFalloff', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Glow Falloff</label>
+          <input type="range" min="0.0" max="5.0" step="0.01" value={sp.glowFalloff ?? 1.2} onChange={(e) => upd('glowFalloff', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Start Taper</label>
+          <input type="range" min="0" max="1" step="0.01" value={sp.startTaper ?? 1.0} onChange={(e) => upd('startTaper', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>End Taper</label>
+          <input type="range" min="0" max="1" step="0.01" value={sp.endTaper ?? 0.0} onChange={(e) => upd('endTaper', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Smooth Curve</label>
+          <input type="checkbox" checked={sp.smoothCurve ?? true} onChange={(e) => upd('smoothCurve', e.target.checked)} />
+        </div>
+      </div>
+      <div className="properties-section">
+        <h4>Timing & Offsets</h4>
+        <div className="property-row">
+          <label>Start Offset</label>
+          <input type="range" min="0" max="1" step="0.01" value={sp.startOffset ?? 0.0} onChange={(e) => upd('startOffset', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>End Offset</label>
+          <input type="range" min="0" max="1" step="0.01" value={sp.endOffset ?? 1.0} onChange={(e) => upd('endOffset', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Phase Offset</label>
+          <input type="range" min="-5" max="5" step="0.01" value={sp.phaseOffset ?? 0.0} onChange={(e) => upd('phaseOffset', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Offset Speed</label>
+          <input type="range" min="-5" max="5" step="0.1" value={sp.offsetSpeed ?? 0.0} onChange={(e) => upd('offsetSpeed', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Loop Mode</label>
+          <input type="checkbox" checked={sp.loopMode ?? true} onChange={(e) => upd('loopMode', e.target.checked)} />
+        </div>
+      </div>
+      <div className="properties-section">
+        <h4>Volumetric Distortion</h4>
+        <div className="property-row">
+          <label>Type</label>
+          <select value={sp.noiseType ?? 0} onChange={e => upd('noiseType', parseInt(e.target.value))} style={{width:'100%',padding:'3px 4px',backgroundColor:'#1a222c',color:'#dde',border:'1px solid #3c4c5c',borderRadius:3}}>
+            <option value={0}>FBM (smooth)</option>
+            <option value={4}>Fractal Simplex</option>
+            <option value={1}>Turbulent</option>
+            <option value={2}>Ripple</option>
+            <option value={3}>Cellular</option>
+          </select>
+        </div>
+        <div className="property-row">
+          <label>Intensity</label>
+          <input type="range" min="0" max="5" step="0.01" value={sp.noiseIntensity ?? 0.5} onChange={(e) => upd('noiseIntensity', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Scale</label>
+          <input type="range" min="0.1" max="50" step="0.1" value={sp.noiseScale ?? 5.0} onChange={(e) => upd('noiseScale', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Animated</label>
+          <input type="checkbox" checked={sp.noiseAnimated ?? true} onChange={(e) => upd('noiseAnimated', e.target.checked)} />
+        </div>
+        <div className="property-row">
+          <label>Speed</label>
+          <input type="range" min="0" max="10" step="0.1" value={sp.noiseSpeed ?? 1.0} onChange={(e) => upd('noiseSpeed', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Flow Dir: {(sp.noiseFlowAngle ?? 0).toFixed(0)}°</label>
+          <input type="range" min="0" max="360" step="1" value={sp.noiseFlowAngle ?? 0} onChange={(e) => upd('noiseFlowAngle', parseFloat(e.target.value))} />
+        </div>
+      </div>
+      <div className="properties-section">
+        <h4>Target Path</h4>
+        <div className="property-row">
+          <label>Target</label>
+          <span style={{color: '#99b', fontSize: '0.8rem', paddingLeft: 4}}>{sp.targetPathId || 'None'}</span>
+        </div>
+      </div>
+      <div className="properties-section">
+        <h4>⬇ Export</h4>
+        <button
+          style={{ width: '100%', padding: '6px 0', background: '#1e3a5f', color: '#7dc8ff', border: '1px solid #3a6a9f', borderRadius: 4, cursor: 'pointer', fontWeight: 600 }}
+          onClick={() => {
+            const pathId = sp.targetPathId || selectedObject.id;
+            const pts = sceneObjects.filter((o: any) => o.parentId === pathId && o.type === 'PathPoint');
+            if (!pts.length) {
+              alert('No PathPoint children found on the target path. Make sure this Saber has a target Path with points.');
+              return;
+            }
+            const sortedPts = [...pts].sort((a: any, b: any) => (a.order ?? a.index ?? 0) - (b.order ?? b.index ?? 0));
+            // Project 3-D world positions through the live viewport camera
+            const camera = scene3DRef.current?.getCamera?.() ?? null;
+            const rSize  = scene3DRef.current?.getRendererSize?.() ?? null;
+            const pts3D = sortedPts.map((p: any) => {
+              const wx = p.position?.x ?? 0;
+              const wy = p.position?.y ?? 0;
+              const wz = p.position?.z ?? 0;
+              if (camera && rSize) {
+                // THREE.Vector3.project() → NDC -1..1 (Y up)
+                const v = new THREE.Vector3(wx, wy, wz).project(camera);
+                // Convert NDC → Spine pixel space (Y up, origin bottom-left)
+                return {
+                  x: (v.x + 1) * 0.5 * rSize.width,
+                  y: (v.y + 1) * 0.5 * rSize.height,
+                  z: 0,
+                };
+              }
+              return { x: wx, y: wy, z: wz };
+            });
+            exportSaberToSpine(pts3D, {
+              name: (selectedObject.name ?? 'saber').replace(/\s+/g, '_'),
+              coreColor:    sp.coreColor    ?? '#ffffff',
+              glowColor:    sp.glowColor    ?? '#0088ff',
+              glowWidth:    sp.glowWidth    ?? 40,
+              glowFalloff:  sp.glowFalloff  ?? 1.2,
+              noiseAnimated: sp.noiseAnimated ?? true,
+              noiseSpeed:   sp.noiseSpeed   ?? 1.0,
+            }).then(blob => {
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${(selectedObject.name ?? 'saber').replace(/\s+/g, '_')}.zip`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }).catch(err => alert('Export failed: ' + (err as Error).message));
+          }}
+        >
+          ⚔ Export to Spine ZIP
+        </button>
+        <div className="property-row">
+          <label>Frame Count: {sp.frameCount ?? 24}</label>
+          <input type="range" min={1} max={120} step={1} value={sp.frameCount ?? 24} onChange={e => upd('frameCount', Number(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>FPS: {sp.fps ?? 24}</label>
+          <input type="range" min={1} max={60} step={1} value={sp.fps ?? 24} onChange={e => upd('fps', Number(e.target.value))} />
+        </div>
+      </div>
+    </>
+  );
+})()}
+
                 {selectedObject.type === 'Flame' && (() => {
                   const fp = (selectedObject.properties ?? {}) as any;
                   const upd = (key: string, val: unknown) => handleUpdateEmitterProperty(key, val as any);
+
+                  // tendrilDensity = tendrils per 100 world-units of path length
+                  const FLAME_PRESETS: { label: string; emoji: string; tendrilDensity: number; props: Record<string, unknown> }[] = [
+                    {
+                      label: 'Campfire', emoji: '🏕', tendrilDensity: 3.0,
+                      props: {
+                        coreColor: '#ffee88', coreColorTop: '#ffcc00',
+                        glowColor: '#ff6600', glowColorTop: '#aa2200',
+                        height: 80, width: 30, numTendrils: 7,
+                        detachRate: 0.6, turbulence: 0.6, speed: 1.3,
+                        flickerType: 'fractal', flickerIntensity: 0.5,
+                        coreWidth: 6, coreBlur: 0.22, glowWidth: 18, glowFalloff: 1.3, density: 1.7,
+                        emberFrequency: 0.30, emberSize: 0.7, emberLife: 0.9, emberOffset: 0.2, emberSpeed: 0.4,
+                      },
+                    },
+                    {
+                      label: 'Torch', emoji: '🔦', tendrilDensity: 2.0,
+                      props: {
+                        coreColor: '#ffffaa', coreColorTop: '#ffaa00',
+                        glowColor: '#ff5500', glowColorTop: '#991100',
+                        height: 120, width: 18, numTendrils: 4,
+                        detachRate: 0.75, turbulence: 0.45, speed: 1.6,
+                        flickerType: 'fractal', flickerIntensity: 0.35,
+                        coreWidth: 5, coreBlur: 0.15, glowWidth: 14, glowFalloff: 1.6, density: 1.9,
+                        emberFrequency: 0.15, emberSize: 0.5, emberLife: 0.7, emberOffset: 0.1, emberSpeed: 0.5,
+                      },
+                    },
+                    {
+                      label: 'Inferno', emoji: '🔥', tendrilDensity: 7.0,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#ffdd44',
+                        glowColor: '#ff2200', glowColorTop: '#880000',
+                        height: 200, width: 80, numTendrils: 20,
+                        detachRate: 0.85, turbulence: 1.2, speed: 2.2,
+                        flickerType: 'turbulent', flickerIntensity: 0.75,
+                        coreWidth: 8, coreBlur: 0.35, glowWidth: 40, glowFalloff: 0.8, density: 2.8,
+                        emberFrequency: 0.70, emberSize: 1.2, emberLife: 1.3, emberOffset: 0.5, emberSpeed: 0.8,
+                      },
+                    },
+                    {
+                      label: 'Spirit', emoji: '🩵', tendrilDensity: 2.5,
+                      props: {
+                        coreColor: '#eeffff', coreColorTop: '#88aaff',
+                        glowColor: '#2244ff', glowColorTop: '#000088',
+                        height: 100, width: 22, numTendrils: 5,
+                        detachRate: 0.35, turbulence: 0.3, speed: 0.9,
+                        flickerType: 'smooth', flickerIntensity: 0.3,
+                        coreWidth: 5, coreBlur: 0.4, glowWidth: 22, glowFalloff: 1.0, density: 1.2,
+                        emberFrequency: 0, emberSize: 1.0, emberLife: 1.0, emberOffset: 0.0, emberSpeed: 1.0,
+                      },
+                    },
+                    {
+                      label: 'Ember', emoji: '✨', tendrilDensity: 1.5,
+                      props: {
+                        coreColor: '#ff9944', coreColorTop: '#ff4400',
+                        glowColor: '#dd2200', glowColorTop: '#550000',
+                        height: 40, width: 14, numTendrils: 3,
+                        detachRate: 0.3, turbulence: 0.4, speed: 0.7,
+                        flickerType: 'smooth', flickerIntensity: 0.6,
+                        coreWidth: 4, coreBlur: 0.3, glowWidth: 10, glowFalloff: 1.8, density: 1.4,
+                        emberFrequency: 0.80, emberSize: 1.5, emberLife: 1.5, emberOffset: 0.6, emberSpeed: 0.3,
+                      },
+                    },
+                    {
+                      label: 'Wildfire', emoji: '🌪', tendrilDensity: 14.0,
+                      props: {
+                        coreColor: '#ffff66', coreColorTop: '#ff8800',
+                        glowColor: '#ff3300', glowColorTop: '#990000',
+                        height: 160, width: 60, numTendrils: 40,
+                        detachRate: 0.9, turbulence: 1.5, speed: 2.8,
+                        flickerType: 'turbulent', flickerIntensity: 0.9,
+                        coreWidth: 7, coreBlur: 0.45, glowWidth: 35, glowFalloff: 0.6, density: 3.5,
+                        emberFrequency: 1.0, emberSize: 1.0, emberLife: 1.5, emberOffset: 0.7, emberSpeed: 0.9,
+                      },
+                    },
+                    {
+                      label: 'Candle', emoji: '🕯', tendrilDensity: 1.0,
+                      props: {
+                        coreColor: '#ffffd0', coreColorTop: '#ffdd88',
+                        glowColor: '#ff8800', glowColorTop: '#553300',
+                        height: 30, width: 8, numTendrils: 2,
+                        detachRate: 0.25, turbulence: 0.2, speed: 0.6,
+                        flickerType: 'smooth', flickerIntensity: 0.25,
+                        coreWidth: 3, coreBlur: 0.18, glowWidth: 8, glowFalloff: 2.0, density: 1.1,
+                        emberFrequency: 0.05, emberSize: 0.3, emberLife: 0.6, emberOffset: 0.0, emberSpeed: 0.2,
+                      },
+                    },
+                    {
+                      label: 'Fel Fire', emoji: '🤢', tendrilDensity: 6.0,
+                      props: {
+                        coreColor: '#ccffaa', coreColorTop: '#66ff00',
+                        glowColor: '#22bb00', glowColorTop: '#004400',
+                        height: 140, width: 45, numTendrils: 12,
+                        detachRate: 0.8, turbulence: 0.9, speed: 1.8,
+                        flickerType: 'turbulent', flickerIntensity: 0.65,
+                        coreWidth: 6, coreBlur: 0.3, glowWidth: 25, glowFalloff: 1.1, density: 2.2,
+                        emberFrequency: 0.6, emberSize: 0.8, emberLife: 1.1, emberOffset: 0.4, emberSpeed: 0.7,
+                        oscillation: 0.5, shapeTwist: 0.2
+                      },
+                    },
+                    {
+                      label: 'Arcane', emoji: '🔮', tendrilDensity: 4.0,
+                      props: {
+                        coreColor: '#eeccff', coreColorTop: '#aa66ff',
+                        glowColor: '#6600ff', glowColorTop: '#220088',
+                        height: 100, width: 35, numTendrils: 8,
+                        detachRate: 0.5, turbulence: 0.4, speed: 1.1,
+                        flickerType: 'smooth', flickerIntensity: 0.4,
+                        coreWidth: 5, coreBlur: 0.5, glowWidth: 30, glowFalloff: 0.9, density: 1.8,
+                        emberFrequency: 0.8, emberSize: 0.5, emberLife: 1.5, emberOffset: 0.8, emberSpeed: 1.2,
+                        oscillation: 0.8, shapeTwist: 0.5
+                      },
+                    },
+                    {
+                      label: 'Abyssal', emoji: '👁‍🗨', tendrilDensity: 8.0,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#aaaaaa',
+                        glowColor: '#000000', glowColorTop: '#111122',
+                        height: 180, width: 60, numTendrils: 15,
+                        detachRate: 0.7, turbulence: 1.2, speed: 2.5,
+                        flickerType: 'fractal', flickerIntensity: 0.8,
+                        coreWidth: 3, coreBlur: 0.1, glowWidth: 15, glowFalloff: 1.5, density: 3.0,
+                        emberFrequency: 0.9, emberSize: 1.5, emberLife: 0.8, emberOffset: 0.2, emberSpeed: 1.5,
+                        oscillation: 1.2, shapeTwist: -0.4
+                      },
+                    },
+                    {
+                      label: 'Plasma', emoji: '💫', tendrilDensity: 5.0,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#ffffff',
+                        glowColor: '#00ffff', glowColorTop: '#0033ff',
+                        height: 120, width: 30, numTendrils: 6,
+                        detachRate: 0.9, turbulence: 0.2, speed: 3.0,
+                        flickerType: 'smooth', flickerIntensity: 0.2,
+                        coreWidth: 4, coreBlur: 0.1, glowWidth: 20, glowFalloff: 2.0, density: 1.5,
+                        emberFrequency: 0.5, emberSize: 0.5, emberLife: 0.5, emberOffset: 0.1, emberSpeed: 2.0,
+                        oscillation: 2.0, shapeTwist: 1.5
+                      },
+                    },
+                    {
+                      label: 'Cyberpunk', emoji: '🤖', tendrilDensity: 6.0,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#00ffff',
+                        glowColor: '#ff00ff', glowColorTop: '#8800ff',
+                        height: 140, width: 40, numTendrils: 12,
+                        detachRate: 0.85, turbulence: 1.0, speed: 2.5,
+                        flickerType: 'fractal', flickerIntensity: 0.8,
+                        coreWidth: 5, coreBlur: 0.2, glowWidth: 25, glowFalloff: 1.0, density: 2.0,
+                        emberFrequency: 0.8, emberSize: 1.0, emberLife: 1.0, emberOffset: 0.5, emberSpeed: 2.0,
+                        oscillation: 1.5, shapeTwist: 0.8
+                      },
+                    },
+                    {
+                      label: 'Reactor Core', emoji: '☢️', tendrilDensity: 7.0,
+                      props: {
+                        coreColor: '#aaffff', coreColorTop: '#55ffff',
+                        glowColor: '#0055ff', glowColorTop: '#001188',
+                        height: 160, width: 50, numTendrils: 14,
+                        detachRate: 0.6, turbulence: 0.5, speed: 1.5,
+                        flickerType: 'smooth', flickerIntensity: 0.3,
+                        coreWidth: 10, coreBlur: 0.6, glowWidth: 40, glowFalloff: 1.2, density: 2.5,
+                        emberFrequency: 0.2, emberSize: 1.5, emberLife: 2.0, emberOffset: 0.2, emberSpeed: 0.8,
+                        oscillation: 0.5, shapeTwist: 1.2
+                      },
+                    },
+                    {
+                      label: 'Thruster', emoji: '🚀', tendrilDensity: 8.0,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#aaffff',
+                        glowColor: '#00aaff', glowColorTop: '#0000ff',
+                        height: 200, width: 30, numTendrils: 16,
+                        detachRate: 0.95, turbulence: 0.2, speed: 4.0,
+                        flickerType: 'turbulent', flickerIntensity: 0.5,
+                        coreWidth: 8, coreBlur: 0.1, glowWidth: 20, glowFalloff: 0.5, density: 3.5,
+                        emberFrequency: 0.9, emberSize: 0.5, emberLife: 0.5, emberOffset: 0.8, emberSpeed: 4.0,
+                        oscillation: 0.0, shapeTwist: 0.0
+                      },
+                    },
+                    {
+                      label: 'Quantum', emoji: '⚛️', tendrilDensity: 4.5,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#ffccff',
+                        glowColor: '#aa00ff', glowColorTop: '#00bbff',
+                        height: 120, width: 60, numTendrils: 8,
+                        detachRate: 0.3, turbulence: 2.0, speed: 2.0,
+                        flickerType: 'turbulent', flickerIntensity: 0.9,
+                        coreWidth: 4, coreBlur: 0.5, glowWidth: 35, glowFalloff: 0.8, density: 1.5,
+                        emberFrequency: 1.0, emberSize: 0.8, emberLife: 1.5, emberOffset: 0.1, emberSpeed: 1.5,
+                        oscillation: 3.0, shapeTwist: -1.5
+                      },
+                    },
+                    {
+                      label: 'Necrotic', emoji: '☠', tendrilDensity: 4.5,
+                      props: {
+                        coreColor: '#d0ffd0', coreColorTop: '#aaddaa',
+                        glowColor: '#003311', glowColorTop: '#001100',
+                        height: 90, width: 40, numTendrils: 9,
+                        detachRate: 0.4, turbulence: 0.3, speed: 0.5,
+                        flickerType: 'smooth', flickerIntensity: 0.3,
+                        coreWidth: 6, coreBlur: 1.0, glowWidth: 30, glowFalloff: 1.5, density: 2.5,
+                        emberFrequency: 0.1, emberSize: 1.0, emberLife: 2.0, emberOffset: 0.5, emberSpeed: 0.2,
+                        oscillation: 0.3, shapeTwist: 0.0
+                      },
+                    },
+                    {
+                      label: 'Frostfire', emoji: '❄️', tendrilDensity: 5.0,
+                      props: {
+                        coreColor: '#ffffff', coreColorTop: '#cceeff',
+                        glowColor: '#44aaff', glowColorTop: '#004488',
+                        height: 130, width: 35, numTendrils: 10,
+                        detachRate: 0.7, turbulence: 0.8, speed: 1.2,
+                        flickerType: 'fractal', flickerIntensity: 0.5,
+                        coreWidth: 4, coreBlur: 0.15, glowWidth: 20, glowFalloff: 1.6, density: 2.0,
+                        emberFrequency: 0.4, emberSize: 0.6, emberLife: 1.2, emberOffset: 0.2, emberSpeed: 0.6,
+                        oscillation: 0.4, shapeTwist: -0.2
+                      },
+                    }
+                  ];
+
+                  const applyPreset = (preset: typeof FLAME_PRESETS[0]) => {
+                    const props = { ...preset.props };
+                    // If the flame is already attached to a path, scale numTendrils
+                    // by path length so coverage stays even regardless of path size.
+                    const pathId = fp.targetPathId as string | undefined;
+                    if (pathId) {
+                      const pts = (sceneObjects as any[])
+                        .filter((o: any) => o.type === 'PathPoint' && o.parentId === pathId)
+                        .map((o: any) => o.position as { x: number; y: number; z: number });
+                      if (pts.length >= 2) {
+                        let pathLen = 0;
+                        for (let i = 1; i < pts.length; i++) {
+                          const dx = pts[i].x - pts[i-1].x;
+                          const dy = pts[i].y - pts[i-1].y;
+                          const dz = (pts[i].z ?? 0) - (pts[i-1].z ?? 0);
+                          pathLen += Math.sqrt(dx*dx + dy*dy + dz*dz);
+                        }
+                        const scaled = Math.round(preset.tendrilDensity * pathLen / 100);
+                        props.numTendrils = Math.max(2, Math.min(200, scaled));
+                      }
+                    }
+                    Object.entries(props).forEach(([k, v]) => upd(k, v));
+                  };
+
                   return (
                     <>
                       <div style={{ fontWeight: 700, fontSize: '0.85rem', marginBottom: '6px', color: '#ff9944' }}>
                         🔥 Flame
                       </div>
+
+                      <div style={{ marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Presets</div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '8px' }}>
+                        {FLAME_PRESETS.map(preset => (
+                          <button
+                            key={preset.label}
+                            onClick={() => applyPreset(preset)}
+                            title={preset.label}
+                            style={{
+                              padding: '4px 8px',
+                              backgroundColor: '#1e2c3a',
+                              color: '#ddccaa',
+                              border: '1px solid #4a5a3a',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                              fontSize: '0.75rem',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '3px',
+                            }}
+                          >
+                            <span>{preset.emoji}</span>
+                            <span>{preset.label}</span>
+                          </button>
+                        ))}
+                        {customFlamePresets.map((preset, idx) => (
+                          <button
+                            key={'custom_'+preset.label+'_'+idx}
+                            onClick={() => applyPreset(preset)}
+                            onContextMenu={(e) => {
+                                e.preventDefault();
+                                if (confirm('Delete custom preset "' + preset.label + '"?')) {
+                                    const next = customFlamePresets.filter((_, i) => i !== idx);
+                                    setCustomFlamePresets(next);
+                                    localStorage.setItem('v_customFlamePresets', JSON.stringify(next));
+                                }
+                            }}
+                            title={preset.label + " (Right-click to delete)"}
+                            style={{
+                              padding: '4px 8px',
+                              backgroundColor: '#2a1a3a',
+                              color: '#ccaadd',
+                              border: '1px solid #5a3a5a',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                              fontSize: '0.75rem',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '3px',
+                            }}
+                          >
+                            <span>{preset.emoji}</span>
+                            <span>{preset.label}</span>
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => {
+                              const name = prompt('Enter a name for your custom flame preset:', 'My Flame');
+                              if (name) {
+                                  const emoji = prompt('Enter an emoji for this preset:', '🔥') || '🔥';
+                                  // extract current props
+                                  const p = (selectedObject.properties ?? {}) as any;
+                                  const propNames = [
+                                    'coreColor', 'coreColorTop', 'glowColor', 'glowColorTop', 'height', 'width', 'numTendrils',
+                                    'detachRate', 'turbulence', 'speed', 'flickerType', 'flickerIntensity', 'coreWidth', 'coreBlur',
+                                    'glowWidth', 'glowFalloff', 'density', 'emberFrequency', 'emberSize', 'emberLife', 'emberOffset', 'emberSpeed', 'oscillation', 'shapeTwist'
+                                  ];
+                                  const newProps: any = {};
+                                  propNames.forEach(pn => {
+                                      if (p[pn] !== undefined) newProps[pn] = p[pn];
+                                  });
+                                  
+                                  const preset = {
+                                      label: name,
+                                      emoji,
+                                      tendrilDensity: p.tendrilDensity ?? 3.0,
+                                      props: newProps
+                                  };
+                                  const next = [...customFlamePresets, preset];
+                                  setCustomFlamePresets(next);
+                                  localStorage.setItem('v_customFlamePresets', JSON.stringify(next));
+                              }
+                          }}
+                          style={{
+                              padding: '4px 8px',
+                              backgroundColor: '#1a222c',
+                              color: '#8a93a2',
+                              border: '1px dashed #3c4c5c',
+                              borderRadius: 4,
+                              cursor: 'pointer',
+                              fontSize: '0.75rem',
+                          }}
+                          title="Save current settings as a new preset"
+                        >
+                          + Save Preset
+                        </button>
+                      </div>
+
+                      <div style={{ marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Source Geometry</div>
+                      <div className="property-row">
+                        <label>Path</label>
+                        <select
+                          value={fp.targetPathId ?? ''}
+                          onChange={e => { upd('targetPathId', e.target.value || undefined); if (e.target.value) { upd('attachedShapeId', undefined); upd('attachedSpineId', undefined); } }}
+                          style={{ flex:1, width: '60%', padding:'3px 4px', backgroundColor:'#1a222c', color:'#dde', border:'1px solid #3c4c5c', borderRadius:3 }}
+                        >
+                          <option value="">(none)</option>
+                          {sceneObjects.filter((o: any) => o.type === 'Path').map((o: any) => (
+                            <option key={o.id} value={o.id}>{o.name ?? o.id}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="property-row">
+                        <label>3D Mesh</label>
+                        <select
+                          value={fp.attachedShapeId ?? ''}
+                          onChange={e => { upd('attachedShapeId', e.target.value || undefined); if (e.target.value) { upd('targetPathId', undefined); upd('attachedSpineId', undefined); } }}
+                          style={{ flex:1, width: '60%', padding:'3px 4px', backgroundColor:'#1a222c', color:'#dde', border:'1px solid #3c4c5c', borderRadius:3 }}
+                        >
+                          <option value="">(none)</option>
+                          {sceneObjects.filter((o: any) => ['3DModel', 'Cube', 'Sphere', 'Cylinder', 'Cone', 'Plane', 'Torus'].includes(o.type)).map((o: any) => (
+                            <option key={o.id} value={o.id}>{o.name ?? o.id}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div className="property-row">
+                        <label>Spine Image</label>
+                        <select
+                          value={fp.attachedSpineId ?? ''}
+                          onChange={e => { upd('attachedSpineId', e.target.value || undefined); if (e.target.value) { upd('targetPathId', undefined); upd('attachedShapeId', undefined); } }}
+                          style={{ flex:1, width: '60%', padding:'3px 4px', backgroundColor:'#1a222c', color:'#dde', border:'1px solid #3c4c5c', borderRadius:3 }}
+                        >
+                          <option value="">(none)</option>
+                          {spineAllAttachments.map(att => (
+                            <option key={att.id} value={att.id}>{att.slotName}</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {fp.attachedSpineId && (
+                          <div className="property-row">
+                            <label>Sample Mode</label>
+                            <select
+                                value={fp.attachedSpineMode ?? 'surface'}
+                                onChange={e => upd('attachedSpineMode', e.target.value)}
+                                style={{ flex:1, width: '60%', padding:'3px 4px', backgroundColor:'#1a222c', color:'#dde', border:'1px solid #3c4c5c', borderRadius:3 }}
+                            >
+                                <option value="surface">Visible Surface</option>
+                                <option value="edge">Outer Edge</option>
+                            </select>
+                          </div>
+                      )}
+
+                      {(fp.attachedSpineId || fp.attachedShapeId) && (
+                          <div className="property-row">
+                            <label>Depth Placement</label>
+                            <select
+                                value={fp.placementZ ?? 'center'}
+                                onChange={e => upd('placementZ', e.target.value)}
+                                style={{ flex:1, width: '60%', padding:'3px 4px', backgroundColor:'#1a222c', color:'#dde', border:'1px solid #3c4c5c', borderRadius:3 }}
+                            >
+                                <option value="front">In Front (+Z)</option>
+                                <option value="center">Surface (0)</option>
+                                <option value="back">Behind (-Z)</option>
+                            </select>
+                          </div>
+                      )}
+
+                      {fp.targetPathId && (
+                        <>
+                          <label>Path Speed: {(fp.pathSpeed ?? 0.05).toFixed(3)}</label>
+                          <input type="range" min={-1.5} max={1.5} step={0.01} value={fp.pathSpeed ?? 0.05} onChange={e => upd('pathSpeed', Number(e.target.value))} />
+                          <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>How fast the flame slides along the curve.</div>
+                        </>
+                      )}
 
                       <div style={{ marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Rendering</div>
                       <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', fontWeight: 400 }}>
@@ -5852,22 +8524,55 @@ export function App() {
                       <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>Off = flame always renders on top of everything.</div>
 
                       <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Colors</div>
-                      <label>Core Color</label>
+                      <label>Core Color (Base)</label>
                       <input type="color" value={fp.coreColor ?? '#ffff88'} onChange={e => upd('coreColor', e.target.value)} style={{ width: '100%', height: '30px' }} />
-                      <label>Glow Color</label>
+                      <label>Core Color (Tip)</label>
+                      <input type="color" value={fp.coreColorTop ?? fp.coreColor ?? '#ffaa00'} onChange={e => upd('coreColorTop', e.target.value)} style={{ width: '100%', height: '30px' }} />
+                      <label>Glow Color (Base)</label>
                       <input type="color" value={fp.glowColor ?? '#ff3300'} onChange={e => upd('glowColor', e.target.value)} style={{ width: '100%', height: '30px' }} />
+                      <label>Glow Color (Tip)</label>
+                      <input type="color" value={fp.glowColorTop ?? fp.glowColor ?? '#880000'} onChange={e => upd('glowColorTop', e.target.value)} style={{ width: '100%', height: '30px' }} />
 
                       <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Shape</div>
+                      <label>Base Shape</label>
+                      <select value={fp.flareShape ?? 'circle'} onChange={e => upd('flareShape', e.target.value)}>
+                        <option value="circle">Circle (Soft)</option>
+                        <option value="diamond">Diamond (Sharp)</option>
+                        <option value="star">Star (Cross)</option>
+                        <option value="sharp">Hard Edge Circle</option>
+                        {spriteLibrary && spriteLibrary.map(s => <option key={s.id} value={s.dataUrl}>Custom: {s.name}</option>)}
+                      </select>
+                      <label>Base Twist: {((fp.shapeTwist ?? 0) * 100).toFixed(0)}%</label>
+                      <input type="range" min={-2} max={2} step={0.01} value={fp.shapeTwist ?? 0} onChange={e => upd('shapeTwist', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>Visual twist along tendril.</div>
                       <label>Height: {fp.height ?? 80}</label>
                       <input type="range" min={10} max={300} step={5} value={fp.height ?? 80} onChange={e => upd('height', Number(e.target.value))} />
                       <label>Width: {fp.width ?? 30}</label>
                       <input type="range" min={4} max={120} step={2} value={fp.width ?? 30} onChange={e => upd('width', Number(e.target.value))} />
                       <label>Tendrils: {fp.numTendrils ?? 5}</label>
-                      <input type="range" min={1} max={16} step={1} value={fp.numTendrils ?? 5} onChange={e => upd('numTendrils', Number(e.target.value))} />
+                      <input type="range" min={1} max={200} step={1} value={fp.numTendrils ?? 5} onChange={e => upd('numTendrils', Number(e.target.value))} />
+                      <label>Detach Rate: {((fp.detachRate ?? 0.5) * 100).toFixed(0)}%</label>
+                      <input type="range" min={0} max={1} step={0.01} value={fp.detachRate ?? 0.5} onChange={e => upd('detachRate', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>0% = tendrils stay rooted, 100% = full fly-up behaviour.</div>
+                      <label>Ember Rate: {(fp.emberFrequency ?? 0.2) > 0 ? ((fp.emberFrequency ?? 0.2) * 40).toFixed(1) + '/sec' : 'Off'}</label>
+                      <input type="range" min={0} max={1} step={0.01} value={fp.emberFrequency ?? 0.2} onChange={e => upd('emberFrequency', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>Embers shed per second across the whole flame. 0 = none, max = 40/sec.</div>
+                      <label>Ember Size: {(fp.emberSize ?? 1.0).toFixed(2)}×</label>
+                      <input type="range" min={0.05} max={3} step={0.05} value={fp.emberSize ?? 1.0} onChange={e => upd('emberSize', Number(e.target.value))} />
+                      <label>Ember Lifetime: {(fp.emberLife ?? 1.0).toFixed(2)}×</label>
+                      <input type="range" min={0.1} max={3} step={0.05} value={fp.emberLife ?? 1.0} onChange={e => upd('emberLife', Number(e.target.value))} />
+                      <label>Ember Offset: {((fp.emberOffset ?? 0) * 100).toFixed(0)}%</label>
+                      <input type="range" min={0} max={1} step={0.01} value={fp.emberOffset ?? 0} onChange={e => upd('emberOffset', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>0% = spawn at tip only, 100% = spawn anywhere along the tendril.</div>
+                      <label>Ember Speed: {(fp.emberSpeed ?? 1.0).toFixed(2)}×</label>
+                      <input type="range" min={0.05} max={4} step={0.05} value={fp.emberSpeed ?? 1.0} onChange={e => upd('emberSpeed', Number(e.target.value))} />
 
                       <div style={{ marginTop: '6px', marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Motion</div>
                       <label>Turbulence: {(fp.turbulence ?? 0.55).toFixed(2)}</label>
                       <input type="range" min={0} max={2} step={0.05} value={fp.turbulence ?? 0.55} onChange={e => upd('turbulence', Number(e.target.value))} />
+                      <label>Buoyancy: {(fp.buoyancy ?? 1.0).toFixed(2)}</label>
+                      <input type="range" min={0} max={10} step={0.1} value={fp.buoyancy ?? 1.0} onChange={e => upd('buoyancy', Number(e.target.value))} />
+                      <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>Amplifies height/draft when tendrils cluster. 0 = independent tendrils.</div>
                       <label>Speed: {(fp.speed ?? 1.4).toFixed(2)}</label>
                       <input type="range" min={0.1} max={5} step={0.1} value={fp.speed ?? 1.4} onChange={e => upd('speed', Number(e.target.value))} />
 
@@ -5918,6 +8623,16 @@ export function App() {
                 })()}
 
                 <hr className="form-divider" />
+
+                {selectedObject.type === 'Path' && !!(selectedObject.properties as any)?.spiralShape && (
+                  <SpiralPropertiesPanel
+                    objectId={selectedObject.id}
+                    initialTurns={(selectedObject.properties as any).spiralTurns ?? 3}
+                    initialDiameter={(selectedObject.properties as any).spiralDiameter ?? 160}
+                    initialCW={(selectedObject.properties as any).spiralCW ?? true}
+                    onRegenerate={handleRegenerateSpiral}
+                  />
+                )}
 
                 <label htmlFor="handle-scale">Handle Size: {handleScale.toFixed(1)}x</label>
                 <input
@@ -6128,6 +8843,180 @@ export function App() {
           onClose={() => setShowParticleCreator(false)}
           particleCameraState={particleCameraState}
         />
+
+        {/* ── Viewport PNG Sequence render settings dialog ─────────────────── */}
+        {viewportSeqDialog !== null && (() => {
+          const dlg = viewportSeqDialog;
+          const setW = (v: number) => setViewportSeqDialog(p => p ? { ...p, width:  Math.max(16, v) } : p);
+          const setH = (v: number) => setViewportSeqDialog(p => p ? { ...p, height: Math.max(16, v) } : p);
+          const PRESETS = [
+            { label: '256 × 256',  w: 256,  h: 256  },
+            { label: '512 × 512',  w: 512,  h: 512  },
+            { label: '1024 × 512', w: 1024, h: 512  },
+            { label: '1024 × 1024',w: 1024, h: 1024 },
+            { label: '1280 × 720', w: 1280, h: 720  },
+            { label: '1920 × 1080',w: 1920, h: 1080 },
+            { label: 'Custom',     w: -1,   h: -1   },
+          ];
+          const activePreset = PRESETS.find(p => p.w === dlg.width && p.h === dlg.height) ?? PRESETS[PRESETS.length - 1];
+          const inputStyle: React.CSSProperties = {
+            width: '70px', background: '#1a1f2e', border: '1px solid #3b455c',
+            color: '#e0e0e0', borderRadius: '4px', padding: '3px 6px', fontSize: '0.8rem',
+          };
+          const rowStyle: React.CSSProperties = {
+            display: 'flex', alignItems: 'center', gap: '10px',
+            marginBottom: '8px', fontSize: '0.8rem', color: '#b0bec9',
+          };
+          const labelW: React.CSSProperties = { minWidth: '90px', color: '#8a93a2' };
+          return (
+            <>
+              {/* backdrop */}
+              <div
+                style={{ position: 'fixed', inset: 0, zIndex: 9000, background: 'rgba(0,0,0,0.55)' }}
+                onClick={() => !dlg.rendering && setViewportSeqDialog(null)}
+              />
+              {/* dialog */}
+              <div style={{
+                position: 'fixed',
+                left: '50%', top: '50%',
+                transform: 'translate(-50%, -50%)',
+                zIndex: 9001,
+                background: '#1a2030',
+                border: '1px solid #3a5070',
+                borderRadius: '10px',
+                boxShadow: '0 8px 40px rgba(0,0,0,0.8)',
+                minWidth: '360px',
+                maxWidth: '420px',
+                overflow: 'hidden',
+                fontFamily: 'inherit',
+              }}>
+                {/* header */}
+                <div style={{
+                  padding: '10px 16px', background: '#131a28',
+                  borderBottom: '1px solid #2a3848',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <span style={{ fontWeight: 700, fontSize: '0.85rem', color: '#8ac4ff', letterSpacing: '0.04em' }}>🎞 Viewport PNG Sequence</span>
+                  {!dlg.rendering && (
+                    <button type="button" onClick={() => setViewportSeqDialog(null)}
+                      style={{ background: 'none', border: 'none', color: '#6a8aaa', cursor: 'pointer', fontSize: '1rem', lineHeight: 1, padding: '0 2px' }}>✕</button>
+                  )}
+                </div>
+
+                <div style={{ padding: '14px 16px' }}>
+                  {/* Resolution preset */}
+                  <div style={{ ...rowStyle, marginBottom: '12px' }}>
+                    <span style={labelW}>Resolution</span>
+                    <select
+                      value={activePreset.label}
+                      disabled={dlg.rendering}
+                      onChange={e => {
+                        const p = PRESETS.find(x => x.label === e.target.value);
+                        if (p && p.w !== -1) { setW(p.w); setH(p.h); }
+                      }}
+                      style={{ flex: 1, background: '#1a1f2e', border: '1px solid #3b455c', color: '#e0e0e0', borderRadius: '4px', padding: '3px 6px', fontSize: '0.8rem' }}
+                    >
+                      {PRESETS.map(p => <option key={p.label} value={p.label}>{p.label}</option>)}
+                    </select>
+                  </div>
+
+                  {/* W × H */}
+                  <div style={{ ...rowStyle, marginBottom: '12px' }}>
+                    <span style={labelW}>Width × Height</span>
+                    <input type="number" min={16} max={4096} step={1} value={dlg.width}  disabled={dlg.rendering}
+                      onChange={e => setW(Number(e.target.value))} style={inputStyle} />
+                    <span style={{ color: '#4a6a8a' }}>×</span>
+                    <input type="number" min={16} max={4096} step={1} value={dlg.height} disabled={dlg.rendering}
+                      onChange={e => setH(Number(e.target.value))} style={inputStyle} />
+                  </div>
+
+                  {/* Frame count */}
+                  <div style={rowStyle}>
+                    <span style={labelW}>Frames</span>
+                    <input type="number" min={1} max={240} step={1}
+                      value={dlg.frameCount} disabled={dlg.rendering}
+                      onChange={e => setViewportSeqDialog(p => p ? { ...p, frameCount: Math.max(1, Number(e.target.value)) } : p)}
+                      style={inputStyle} />
+                  </div>
+
+                  {/* FPS */}
+                  <div style={rowStyle}>
+                    <span style={labelW}>FPS</span>
+                    <input type="number" min={1} max={120} step={1}
+                      value={dlg.fps} disabled={dlg.rendering}
+                      onChange={e => setViewportSeqDialog(p => p ? { ...p, fps: Math.max(1, Number(e.target.value)) } : p)}
+                      style={inputStyle} />
+                  </div>
+
+                  {/* Mode */}
+                  <div style={{ ...rowStyle, marginBottom: '14px' }}>
+                    <span style={labelW}>Mode</span>
+                    <select
+                      value={dlg.mode} disabled={dlg.rendering}
+                      onChange={e => setViewportSeqDialog(p => p ? { ...p, mode: e.target.value } : p)}
+                      style={{ flex: 1, background: '#1a1f2e', border: '1px solid #3b455c', color: '#e0e0e0', borderRadius: '4px', padding: '3px 6px', fontSize: '0.8rem' }}
+                    >
+                      <option value="loop">Loop (jitter)</option>
+                      <option value="strike">Strike (grow)</option>
+                      <option value="loop-strike">Loop-Strike (auto cycle)</option>
+                    </select>
+                  </div>
+
+                  <div style={{ fontSize: '0.72rem', color: '#4a6a8a', marginBottom: '14px', lineHeight: 1.4 }}>
+                    The golden frame in the viewport shows exactly what will be rendered. Position your view, then click Render &amp; Export.
+                  </div>
+
+                  {/* Buttons */}
+                  <div style={{ display: 'flex', gap: '8px', alignItems: 'center', justifyContent: 'space-between' }}>
+                    {/* Left: frame helper */}
+                    <button
+                      type="button"
+                      disabled={dlg.rendering}
+                      title="Move viewport camera to frame the lightning bolt"
+                      onClick={() => scene3DRef.current?.frameLightningInViewport(dlg.lightningId)}
+                      style={{
+                        padding: '6px 12px', background: '#1e2d1e',
+                        border: '1px solid rgba(80,200,80,0.4)', borderRadius: '6px',
+                        color: dlg.rendering ? '#4a6a4a' : '#80d080',
+                        fontSize: '0.78rem', cursor: dlg.rendering ? 'default' : 'pointer',
+                      }}
+                    >
+                      🎯 Frame lightning
+                    </button>
+
+                    {/* Right: Cancel + Render */}
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                    {!dlg.rendering && (
+                      <button type="button" onClick={() => setViewportSeqDialog(null)}
+                        style={{ padding: '6px 16px', background: '#252c3e', border: '1px solid #3a4a5e', borderRadius: '6px', color: '#8a93a2', fontSize: '0.8rem', cursor: 'pointer' }}>
+                        Cancel
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={dlg.rendering}
+                      onClick={() => doViewportSeqExport(dlg.lightningId, dlg.name, dlg.width, dlg.height, dlg.frameCount, dlg.fps, dlg.mode)}
+                      style={{
+                        padding: '6px 20px',
+                        background: dlg.rendering ? '#1a3a5a' : 'linear-gradient(135deg, #2a3a6a, #1a4a8a)',
+                        border: '1px solid #4a7aff', borderRadius: '6px',
+                        color: dlg.rendering ? '#6a8aaa' : '#aac8ff',
+                        fontWeight: 700, fontSize: '0.8rem',
+                        cursor: dlg.rendering ? 'default' : 'pointer',
+                      }}
+                    >
+                      {dlg.rendering
+                        ? `Rendering… (${dlg.frameCount} frames)`
+                        : `🎞 Render & Export (${dlg.width}×${dlg.height}, ${dlg.frameCount}f)`
+                      }
+                    </button>
+                    </div>{/* end right buttons */}
+                  </div>{/* end buttons row */}
+                </div>
+              </div>
+            </>
+          );
+        })()}
     </div>
   );
 }

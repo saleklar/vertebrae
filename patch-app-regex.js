@@ -1,23 +1,7 @@
 const fs = require('fs');
+let c = fs.readFileSync('src/App.tsx', 'utf8');
 
-const file = 'src/App.tsx';
-let code = fs.readFileSync(file, 'utf8');
+c = c.replace(/<option value=\"sharp\">Hard Edge Circle<\/option>(\s*)<\/select>/g, '<option value=\"sharp\">Hard Edge Circle</option>  {spriteLibrary && spriteLibrary.map(s => <option key={s.id} value={s.dataUrl}>Custom: {s.name}</option>)}\n</select>');
 
-const regex1 = /properties:\s*\{\s*emitterType:\s*'curve'\s*\}\s*};\s*const\s*emitterId\s*=\s*'emitter_'\s*\+\s*Date\.now\(\);\s*const\s*newEmitter:\s*SceneObject\s*=\s*\{[\s\S]*?shape_emitterType:\s*'curve'\s*\}\s*};\s*pathObject\.parentId\s*=\s*emitterId;\s*const\s*pointObjects/g;
-
-code = code.replace(regex1, `properties: { }
-        };
-
-        const pointObjects`);
-
-const regex2 = /setSceneObjects\(prev\s*=>\s*\[\.\.\.prev,\s*newEmitter,\s*pathObject,\s*\.\.\.pointObjects\]\);\s*setSelectedObjectId\(newEmitter\.id\);/g;
-
-code = code.replace(regex2, `setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);
-      setSelectedObjectId(pathObject.id);`);
-      
-// Fix the hook for drawing bezier curves where `setSelectedObjectId` might not exist or might need manual replacement.
-const regex3 = /setSceneObjects\(prev\s*=>\s*\[\.\.\.prev,\s*newEmitter,\s*pathObject,\s*\.\.\.pointObjects\]\);/g;
-code = code.replace(regex3, `setSceneObjects(prev => [...prev, pathObject, ...pointObjects]);`);
-
-fs.writeFileSync(file, code, 'utf8');
-console.log("Regex patch applied to App.tsx!");
+fs.writeFileSync('src/App.tsx', c);
+console.log('App regex patched');

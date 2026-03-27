@@ -24,7 +24,7 @@ export type CustomParticlePainterProps = {
   /** Render inline inside a parent panel (no modal backdrop/header) */
   embedded?: boolean;
   /** Called with a function that returns the current canvas dataUrl */
-  onReady?: (getDataUrl: () => string) => void;
+  onReady?: (getDataUrl: () => string, loadImage: (url: string) => void) => void;
 };
 
 const CANVAS_SIZE = 512;
@@ -396,9 +396,23 @@ export const CustomParticlePainter: React.FC<CustomParticlePainterProps> = ({
     });
   }, []);
 
-  // Expose canvas dataUrl getter to parent (used in embedded mode)
+  // Expose canvas dataUrl getter + image loader to parent (used in embedded mode)
   useEffect(() => {
-    onReady?.(() => canvasRef.current?.toDataURL('image/png') ?? '');
+    onReady?.(
+      () => canvasRef.current?.toDataURL('image/png') ?? '',
+      (url: string) => {
+        const cv = canvasRef.current;
+        if (!cv) return;
+        const ctx = cv.getContext('2d');
+        if (!ctx) return;
+        const img = new Image();
+        img.onload = () => {
+          ctx.clearRect(0, 0, cv.width, cv.height);
+          ctx.drawImage(img, 0, 0, cv.width, cv.height);
+        };
+        img.src = url;
+      },
+    );
   }, [onReady]);
 
   // ── preview thumbnails ──────────────────────────────────────────────────────

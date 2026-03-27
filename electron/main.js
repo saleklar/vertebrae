@@ -303,6 +303,25 @@ app.on('ready', () => {
     }
   });
 
+  ipcMain.handle('save-capture-sequence', async (_event, { frames }) => {
+    const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Capture Output Directory',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (canceled || filePaths.length === 0) return { success: false, error: 'Cancelled' };
+    const outDir = filePaths[0];
+    try {
+      for (let i = 0; i < frames.length; i++) {
+        const n = String(i).padStart(4, '0');
+        await fs.writeFile(path.join(outDir, `sequence_${n}.png`), Buffer.from(frames[i], 'base64'));
+      }
+      return { success: true, dir: outDir, count: frames.length };
+    } catch (err) {
+      console.error('save-capture-sequence error:', err);
+      return { success: false, error: err.message };
+    }
+  });
+
   createWindow();
 });
 

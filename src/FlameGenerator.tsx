@@ -107,6 +107,7 @@ export interface FlameGeneratorProps {
   onExportToParticleSystem?: (urls: string[], fps: number) => void;
   onAttachToEmitter?: (urls: string[]) => void;
   onSendToShape?: (url: string) => void;
+  onSendSequenceToShape?: (urls: string[], fps: number) => void;
   onSendToPaint?: (url: string) => void;
 }
 
@@ -131,31 +132,57 @@ interface FP {
   flickerType:      'smooth' | 'fractal' | 'turbulent';
   emberCount:       number;
   emberSize:        number;
+  deformType:       'sinusoidal' | 'water' | 'fractal' | 'displacement';
+  deformStrength:   number; // 0..3, multiplier on spatial deformation
+  deformScale:      number; // 0.2..4, spatial frequency (lower = coarser, larger features)
+  deformOctaves:    number; // 1..6, detail layers stacked on top of each other
+  opacityThreshold: number;
+  baselineWidth:    number;
+  baseGlow:         number;
+  bodyOpacity:      number;
+  tendrilBaseWidth: number;
+  tendrilTipWidth:  number;
+  tendrilLife:      number;
+  detachPoint:      number;
+  coreOpacity:      number; // 0..1 global multiplier on the bright core chain
 }
 
 interface Preset { name: string; fp: FP; }
 
 const DEFAULT_FP: FP = {
-  coreColor:        '#ffff88',
-  coreColorTop:     '#ffaa00',
-  glowColor:        '#ff3300',
-  glowColorTop:     '#880000',
-  height:           80,
-  width:            30,
-  numTendrils:      5,
-  turbulence:       0.55,
-  speed:            1.4,
-  thermalDraft:     0.45,
-  coreWidth:        6,
-  coreBlur:         0.2,
-  coreWidthNoise:   0.45,
-  glowWidth:        16,
-  density:          1.6,
-  glowFalloff:      1.2,
-  flickerIntensity: 0.45,
+  coreColor:        '#ffff55',
+  coreColorTop:     '#ff8800',
+  glowColor:        '#ff4400',
+  glowColorTop:     '#aa1500',
+  height:           90,
+  width:            34,
+  numTendrils:      12,
+  turbulence:       0.60,
+  speed:            1.3,
+  thermalDraft:     0.50,
+  coreWidth:        9,
+  coreBlur:         0.25,
+  coreWidthNoise:   0.50,
+  glowWidth:        22,
+  density:          2.2,
+  glowFalloff:      0.85,
+  flickerIntensity: 0.35,
   flickerType:      'fractal',
-  emberCount:       20,
+  emberCount:       22,
   emberSize:        4,
+  deformType:       'water',
+  deformStrength:   0.65,
+  deformScale:      1.0,
+  deformOctaves:    3,
+  opacityThreshold: 0.02,
+  baselineWidth:    70,
+  baseGlow:         0.55,
+  bodyOpacity:      0.55,
+  tendrilBaseWidth: 1.6,
+  tendrilTipWidth:  0.08,
+  tendrilLife:      1.8,
+  detachPoint:      0.82,
+  coreOpacity:      1.0,
 };
 
 const LS_KEY = 'flameGeneratorPresets';
@@ -168,7 +195,7 @@ function savePresets(p: Preset[]) {
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToParticleSystem, onAttachToEmitter, onSendToShape, onSendToPaint }) => {
+export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToParticleSystem, onAttachToEmitter, onSendToShape, onSendSequenceToShape, onSendToPaint }) => {
   const [fp, setFp] = useState<FP>(DEFAULT_FP);
   const fpRef = useRef<FP>(fp);
   useEffect(() => { fpRef.current = fp; }, [fp]);
@@ -370,6 +397,8 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
   const groupRef     = useRef<THREE.Group | null>(null);
   const animFrameRef = useRef<number>(0);
   const loopActiveRef = useRef(true);
+  const deformPreviewRef = useRef<HTMLCanvasElement>(null);
+  const deformPreviewAnimRef = useRef<number>(0);
 
   // ── Three.js scene init ──────────────────────────────────────────────────
   useEffect(() => {
@@ -448,8 +477,74 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
     const densityF      = Math.max(0.5, Math.min(4, f.density));
     const flickerIntensF = Math.max(0, Math.min(1, f.flickerIntensity));
     const flickerTypeF  = f.flickerType;
+    const deformTypeF   = f.deformType    ?? 'sinusoidal';
+    const deformStrF    = Math.max(0, f.deformStrength ?? 1.0);
+    const deformScaleF   = Math.max(0.1, f.deformScale   ?? 1.0);
+    const deformOctavesF = Math.max(1, Math.round(f.deformOctaves ?? 3));
+    const baselineW     = Math.max(0, f.baselineWidth  ?? 0);
+    const baseGlowOpa   = Math.max(0, Math.min(1, f.baseGlow ?? 0.55));
+    const bodyOpa       = Math.max(0, Math.min(1, f.bodyOpacity ?? 0.0));
     const coreBlurF     = Math.max(0, Math.min(1, f.coreBlur));
     const glowFalloffF  = Math.max(0, f.glowFalloff);
+
+    // ── Deformation helpers ───────────────────────────────────────────────
+    // Returns [dx, dz] displacement for a tendril point.
+    // `noiseT` is the animated noise phase, `widthEnv` is the local width envelope.
+    const calcDeform = (noiseT: number, widthEnv: number, seed: number, deformMul: number): [number, number] => {
+      const str  = deformStrF * deformMul;
+      const sc   = deformScaleF;
+      const oct  = deformOctavesF;
+      const PERS = 0.55; // amplitude persistence per octave
+      let dx = 0, dz = 0, norm = 0;
+      if (deformTypeF === 'water') {
+        // Each octave doubles frequency, halves amplitude — more octaves = finer ripples
+        for (let o = 0; o < oct; o++) {
+          const ff = sc * Math.pow(2.0, o), amp = Math.pow(PERS, o);
+          dx += (Math.sin(noiseT * ff * 1.1 + seed)        * 1.0
+               + Math.sin(noiseT * ff * 2.3 + seed * 1.5)  * 0.45
+               + Math.sin(noiseT * ff * 0.57 + seed * 0.7) * 0.25) * amp;
+          dz += (Math.cos(noiseT * ff * 1.3 + seed * 1.2)  * 1.0
+               + Math.cos(noiseT * ff * 1.9 + seed * 2.1)  * 0.35) * amp;
+          norm += amp;
+        }
+      } else if (deformTypeF === 'fractal') {
+        // Ridged abs sines — higher octaves add sharp micro-ridges on top
+        for (let o = 0; o < oct; o++) {
+          const ff = sc * Math.pow(1.85, o), amp = Math.pow(PERS, o);
+          const s1 = Math.abs(Math.sin(noiseT * ff * 1.3 + seed));
+          const s2 = Math.abs(Math.sin(noiseT * ff * 2.7 + seed * 1.7)) * 0.5;
+          const s3 = Math.abs(Math.sin(noiseT * ff * 5.1 + seed * 0.9)) * 0.25;
+          const c1 = Math.abs(Math.cos(noiseT * ff * 0.9 + seed * 2.3));
+          const c2 = Math.abs(Math.cos(noiseT * ff * 1.8 + seed * 1.1)) * 0.5;
+          dx += ((s1 + s2 + s3) * 2.0 - 1.75) * amp;
+          dz += ((c1 + c2)       * 2.0 - 1.5)  * amp;
+          norm += amp;
+        }
+      } else if (deformTypeF === 'displacement') {
+        // Domain-warp at each octave frequency — more octaves = increasingly chaotic warp
+        for (let o = 0; o < oct; o++) {
+          const ff = sc * Math.pow(2.0, o), amp = Math.pow(PERS, o);
+          const warp = Math.sin(noiseT * ff * 0.7 + seed * 1.3) * 2.1 + Math.cos(noiseT * ff * 1.1 + seed) * 1.3;
+          dx += (Math.sin(noiseT * ff * 1.3 + seed + warp)              * 1.0
+               + Math.cos(noiseT * ff * 2.1 + seed * 1.7)               * 0.4
+               + Math.sin(noiseT * ff * 4.1 + seed * 0.5 + warp * 0.5) * 0.2) * amp;
+          dz += (Math.cos(noiseT * ff * 0.9 + seed * 2.3 + warp * 0.7) * 0.9
+               + Math.sin(noiseT * ff * 1.7 + seed * 1.4)               * 0.3) * amp;
+          norm += amp;
+        }
+      } else {
+        // Sinusoidal — stacked harmonic bands
+        for (let o = 0; o < oct; o++) {
+          const ff = sc * Math.pow(2.0, o), amp = Math.pow(PERS, o);
+          dx += (Math.sin(noiseT * ff * 1.3 + seed)       * 1.0
+               + Math.cos(noiseT * ff * 2.1 + seed * 1.7) * 0.4) * amp;
+          dz +=  Math.cos(noiseT * ff * 0.9 + seed * 2.3)         * amp;
+          norm += amp;
+        }
+      }
+      const n = norm || 1;
+      return [dx / n * str * widthEnv, dz / n * str * widthEnv * 0.6];
+    };
     const thermalDraft  = Math.max(0, Math.min(1, f.thermalDraft));
     const emberCount    = Math.max(0, Math.round(f.emberCount));
     const emberSize     = Math.max(1, f.emberSize);
@@ -487,28 +582,35 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       zOff:      number,
       noiseSeed: number,
       growFront: number,
-      sizeNoiseMul = 0.45,
+      sizeNoiseMul = 0.65,
     ) => {
       const spacing = Math.max(0.2, (sprSz * 0.35) / densityF);
       const samples = fgSample(pts, spacing);
       const N       = samples.length;
       const baseOpa = opacity / Math.sqrt(densityF);
 
+      const opaThresh  = Math.max(0, f.opacityThreshold ?? 0.04);
+      const tBaseW     = Math.max(0.01, f.tendrilBaseWidth ?? 1.0);
+      const tTipW      = Math.max(0.01, f.tendrilTipWidth  ?? 0.08);
       samples.forEach((pt, i) => {
         const t         = N > 1 ? i / (N - 1) : 0;
         const growMask  = Math.max(0, Math.min(1, (growFront - t) / 0.14 + 1));
-        const taperStart = 0.5;
-        const taper     = t <= taperStart
-          ? 1.0
-          : Math.sqrt(Math.max(0, 1.0 - (t - taperStart) / (1.0 - taperStart + 1e-9))) * 0.96 + 0.04;
+        // Width envelope: lerp from user base width → user tip width
+        const taper     = tBaseW * (1 - t) + tTipW * t;
 
         const flicker   = (1.0 - flickerIntensF) + flickerIntensF * fbm(noiseSeed + t * 5.1 - fAnimT * speed * 2.3);
-        const sizeScale = 1.0 + turbulence * (fbm(noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9, 3) * 2.0 - 1.0) * sizeNoiseMul;
+        // Turbulence widens/narrows sprites much more strongly toward the tip
+        // (base stays anchored; tip flares with chaos). t² gives a smooth ramp.
+        const turbulenceRamp = 1.0 + t * t * 4.0 * turbulence;
+        const sizeScale = 1.0 + turbulence * (fbm(noiseSeed * 1.3 + t * 4.7 - fAnimT * speed * 1.9, 3) * 2.0 - 1.0) * sizeNoiseMul * turbulenceRamp;
         const vertGrad  = glowFalloffF > 0 ? Math.pow(Math.max(0, 1.0 - t), glowFalloffF) : 1.0;
+
+        const opa = baseOpa * taper * flicker * growMask * vertGrad;
+        if (opa < opaThresh) return; // cull invisible sprites
 
         const mat = new THREE.SpriteMaterial({
           map: shapeTex, transparent: true,
-          opacity:  Math.max(0, baseOpa * taper * flicker * growMask * vertGrad),
+          opacity:  opa,
           blending: THREE.AdditiveBlending,
           depthTest: false, depthWrite: false,
         });
@@ -520,32 +622,136 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       });
     };
 
+    // ── Smooth cubic-Hermite path interpolation ───────────────────────────
+    // Instead of evaluating noise independently at each point (which creates
+    // angular kinks), we sample at N_CTRL sparse control heights and then
+    // smoothly interpolate.  Low Y-frequency noise = gentle flowing curves.
+    const N_CTRL = 5;  // sparse control points along the tendril
+    const smoothPath = (
+      baseX: number, baseZ: number,
+      height: number, seed: number,
+      widthScale: number, dMul: number,
+      nPts: number
+    ): { x: number; y: number; z: number }[] => {
+      // 1. Compute sparse control-point displacements
+      const ctrlDx = new Float32Array(N_CTRL + 1);
+      const ctrlDz = new Float32Array(N_CTRL + 1);
+      for (let ci = 0; ci <= N_CTRL; ci++) {
+        const cy = ci / N_CTRL;
+        // Width envelope at this control height
+        const wEnv = Math.pow(cy, 0.65) * flameWidth * 0.5 * widthScale;
+        // Use LOW frequency along Y (0.8 instead of 3.0) → one smooth bend, not zigzag
+        const nT = seed + cy * 0.8 - fAnimT * speed;
+        const [cdx, cdz] = calcDeform(nT, wEnv, seed, dMul);
+        ctrlDx[ci] = cdx;
+        ctrlDz[ci] = cdz;
+      }
+      // 2. Build dense point array by smooth-stepping between control points
+      const pts: { x: number; y: number; z: number }[] = [];
+      for (let pi = 0; pi < nPts; pi++) {
+        const yNorm     = pi / (nPts - 1);
+        const cf        = yNorm * N_CTRL;
+        const ci0       = Math.min(N_CTRL - 1, Math.floor(cf));
+        const ci1       = ci0 + 1;
+        const t01       = cf - ci0;
+        // Cubic smoothstep: 3t²-2t³
+        const ts        = t01 * t01 * (3 - 2 * t01);
+        const dx        = ctrlDx[ci0] * (1 - ts) + ctrlDx[ci1] * ts;
+        const dz        = ctrlDz[ci0] * (1 - ts) + ctrlDz[ci1] * ts;
+        const y         = yNorm * height;
+        // baseSpread mirrors original: (1-yNorm)*widthScale so base is anchored, tip drifts free
+        const baseSpread = (1.0 - yNorm) * widthScale;
+        pts.push({ x: baseX * baseSpread + dx, y, z: baseZ * baseSpread + dz });
+      }
+      // 3. Extra smoothing pass: average each point with its neighbours
+      for (let pi = 1; pi < pts.length - 1; pi++) {
+        pts[pi].x = pts[pi-1].x * 0.25 + pts[pi].x * 0.5 + pts[pi+1].x * 0.25;
+        pts[pi].z = pts[pi-1].z * 0.25 + pts[pi].z * 0.5 + pts[pi+1].z * 0.25;
+      }
+      return pts;
+    };
+
+    // ── Volumetric body layer ─────────────────────────────────────────────
+    // Large, soft, slowly-breathing sprites that represent the glowing gas
+    // mass interior.  More opaque at base, fading out as height increases.
+    // They overlap and blend additively so brighter patches appear where the
+    // surface folds — matching how real fire looks.
+    if (bodyOpa > 0.001) {
+      const N_BODY = Math.max(4, Math.round(numTendrils * 0.6));
+      const bodyC1 = n2c(h2n(f.coreColor));
+      const bodyC2 = n2c(h2n(f.glowColor));
+      const bodyC3 = n2c(h2n(f.glowColorTop));
+      const spread = baselineW > 0 ? baselineW * 0.5 : flameWidth * 0.55;
+
+      for (let bi = 0; bi < N_BODY; bi++) {
+        const bSeed  = bi * 3.133;
+        // Each body column traces a smooth upward path with very slow drift
+        const bBaseX = (baselineW > 0)
+          ? ((bi / (N_BODY - 1 || 1)) - 0.5) * baselineW * 0.85
+          : Math.cos(bSeed) * spread * 0.5;
+        const bBaseZ = Math.sin(bSeed * 2.1) * flameWidth * 0.18;
+
+        const N_SLICES = 10;
+        for (let si = 0; si < N_SLICES; si++) {
+          const yNorm  = si / (N_SLICES - 1);
+          const y      = yNorm * flameHeight;
+          // Slow drift in X
+          const drift  = Math.sin(bSeed + yNorm * 1.2 - fAnimT * speed * 0.4) * flameWidth * 0.28 * deformStrF;
+          const bx     = bBaseX + drift;
+          // Size: wide at base, taper toward crown
+          const sizeMul = Math.pow(1.0 - yNorm * 0.65, 0.7);
+          const bSzBase = glowW * 2.2 * sizeMul;
+          // Vertical opacity: heavy at base, exponential falloff
+          const topFade  = Math.pow(Math.max(0, 1.0 - yNorm), 1.1);
+          const flicker  = 0.7 + 0.3 * Math.sin(bSeed * 1.7 + yNorm * 2.3 - fAnimT * speed * 1.5);
+          const sliceOpa = bodyOpa * 0.20 * topFade * flicker;
+          if (sliceOpa < 0.005) continue;
+
+          const bMat = new THREE.SpriteMaterial({
+            map: shapeTex, transparent: true,
+            opacity: sliceOpa,
+            blending: THREE.AdditiveBlending,
+            depthTest: false, depthWrite: false,
+          });
+          // Color gradient: warm core at base → glow colour → dim tip
+          const tc = new THREE.Color();
+          if (yNorm < 0.4) tc.lerpColors(bodyC1, bodyC2, yNorm / 0.4);
+          else              tc.lerpColors(bodyC2, bodyC3, (yNorm - 0.4) / 0.6);
+          bMat.color.copy(tc);
+          const sp = new THREE.Sprite(bMat);
+          sp.position.set(bx, y, bBaseZ - 0.15); // behind surface tendrils
+          sp.scale.set(bSzBase, bSzBase * 1.05, 1);
+          g.add(sp);
+        }
+      }
+    }
+
     // Collect tendril base positions so embers can spawn from each one
     const tendrilBaseX: number[] = [];
     const tendrilBaseZ: number[] = [];
 
-    const FLAME_PTS = 10;
     for (let ti = 0; ti < numTendrils; ti++) {
       const slotSeed    = ti * 2.399963;
-      const minLife     = 1.2 / Math.max(0.1, speed);
-      const maxLife     = 3.8 / Math.max(0.1, speed);
+      const lifeMul     = Math.max(0.1, f.tendrilLife ?? 1.0);
+      const minLife     = 1.2 / Math.max(0.1, speed) * lifeMul;
+      const maxLife     = 3.8 / Math.max(0.1, speed) * lifeMul;
       const pr1         = Math.abs(Math.sin(slotSeed * 13.7 + 0.5));
       const lifespan    = minLife + pr1 * (maxLife - minLife);
       const birthOffset = Math.abs(Math.sin(slotSeed * 7.3 + 1.1)) * lifespan;
       const age01       = ((fAnimT + birthOffset) % lifespan) / lifespan;
 
-      const FADE_IN = 0.30;
+      const FADE_IN = 0.15;
       let lifeFade: number, growFront: number;
       if (age01 < FADE_IN) {
         growFront = age01 / FADE_IN; lifeFade = 1.0;
-      } else if (age01 < 0.75) {
+      } else if (age01 < 0.88) {
         growFront = 1.0; lifeFade = 1.0;
       } else {
-        growFront = 1.0; lifeFade = 1.0 - (age01 - 0.75) / 0.25;
+        growFront = 1.0; lifeFade = 1.0 - (age01 - 0.88) / 0.12;
       }
       lifeFade = Math.max(0, lifeFade);
 
-      const DETACH_START  = 0.65;
+      const DETACH_START  = Math.max(0.3, Math.min(0.99, f.detachPoint ?? 0.82));
       const detachT       = age01 < DETACH_START ? 0 : (age01 - DETACH_START) / (1.0 - DETACH_START);
       const riseOffset    = Math.pow(detachT, 1.3) * flameHeight * 0.55;
       const ageScale      = 1.0 - detachT * 0.70;
@@ -563,26 +769,33 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       const hNoise        = fbm(slotSeed * 4.1 - fAnimT * speed * 0.25);
       const heightMul     = thermalMul * (1.0 + turbulence * (hNoise * 2.0 - 1.0) * 0.35);
       const activeHeight  = flameHeight * ageScale * (0.75 + 0.25 * lifeFade) * heightMul;
-      // Outer ring radius, thermal centre tendrils sit closer to axis
-      const baseR         = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0)
-                          * (1.0 - thermalDraft * axisProx * 0.5);
-      const baseOffX      = Math.cos(spreadAngle + slotSeed) * baseR;
-      const baseOffZ      = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
+      // Base position: linear (baseline) or radial (legacy circle)
+      let baseOffX: number, baseOffZ: number;
+      if (baselineW > 0) {
+        // Evenly spaced along X with slight jitter, slight Z depth for layering
+        const linT   = numTendrils > 1 ? ti / (numTendrils - 1) : 0.5;
+        const jitter = (Math.sin(slotSeed * 7.3) * 0.5 + Math.cos(slotSeed * 3.1) * 0.3) * (baselineW / numTendrils) * 0.4;
+        baseOffX     = (linT - 0.5) * baselineW + jitter;
+        baseOffZ     = Math.sin(slotSeed * 5.7) * flameWidth * 0.2; // slight depth variation
+      } else {
+        const baseR  = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0)
+                     * (1.0 - thermalDraft * axisProx * 0.5);
+        baseOffX     = Math.cos(spreadAngle + slotSeed) * baseR;
+        baseOffZ     = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
+      }
+      const FLAME_PTS = 22; // more points → smoother sampled chain
       tendrilBaseX.push(baseOffX);
       tendrilBaseZ.push(baseOffZ);
 
-      const pts: { x: number; y: number; z: number }[] = [];
-      for (let pi = 0; pi < FLAME_PTS; pi++) {
-        const yNorm      = pi / (FLAME_PTS - 1);
-        const y          = riseOffset + yNorm * activeHeight;
-        const widthEnv   = Math.pow(yNorm, 0.65) * flameWidth * 0.5 * ageScale * baseWidthMul;
-        const baseSpread = (1.0 - yNorm) * baseWidthMul;
-        const noiseT     = tendrilSeed + yNorm * 3.0 - fAnimT * speed;
-        const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)      * 1.0
-                  + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7) * 0.4) * turbulence * widthEnv * deformMul;
-        const dz = Math.cos(noiseT * 0.9 + tendrilSeed * 2.3) * turbulence * widthEnv * 0.6 * deformMul;
-        pts.push({ x: baseOffX * baseSpread + dx, y, z: baseOffZ * baseSpread + dz });
-      }
+      // Build smooth path using interpolated control points
+      const pts = smoothPath(
+        baseOffX, baseOffZ,
+        activeHeight, tendrilSeed,
+        baseWidthMul * ageScale, deformMul,
+        FLAME_PTS
+      );
+      // Shift all Y values up by riseOffset (path is 0-based)
+      for (const p of pts) p.y += riseOffset;
 
       const haloD           = glowW * 4.0 * ageScale;
       const glowD           = glowW * 2.0 * ageScale;
@@ -592,7 +805,41 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
       const coreWidthNoiseF = Math.max(0, f.coreWidthNoise);
       addChain(pts, glowColorA, glowColorB, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
       addChain(pts, glowColorA, glowColorB, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
-      addChain(pts, coreColorA, coreColorB, coreD, 0.60 * lifeFade * coreBlurOpaMul, 0.1, tendrilSeed + 2.2, growFront, coreWidthNoiseF);
+      addChain(pts, coreColorA, coreColorB, coreD, 0.60 * lifeFade * coreBlurOpaMul * Math.max(0, f.coreOpacity ?? 1.0), 0.1, tendrilSeed + 2.2, growFront, coreWidthNoiseF);
+    }
+
+    // ── Base glow strip ────────────────────────────────────────────────────
+    if (baseGlowOpa > 0.001) {
+      const baseSpread  = baselineW > 0 ? baselineW : flameWidth;
+      const nBaseSprites = Math.max(4, Math.round(baseSpread / (glowW * 1.2)) + 2);
+      const baseC1 = n2c(h2n(f.coreColor));        // bright core colour at base
+      const baseC2 = n2c(h2n(f.glowColor));         // outer glow colour
+      for (let bi = 0; bi < nBaseSprites; bi++) {
+        const bx       = ((bi / (nBaseSprites - 1)) - 0.5) * baseSpread * 1.1;
+        const bNoise   = Math.sin(bi * 2.399 + fAnimT * speed * 0.7) * 0.5 + 0.5; // 0..1
+        const bY       = flameHeight * (0.04 + bNoise * 0.06);
+        const bSzOuter = glowW * (2.8 + bNoise * 1.4);
+        const bSzInner = glowW * (1.1 + bNoise * 0.5);
+        const bOpaVar  = 0.7 + bNoise * 0.3;
+        // Outer halo
+        const mOuter = new THREE.SpriteMaterial({ map: shapeTex, transparent: true,
+          opacity: baseGlowOpa * 0.35 * bOpaVar, blending: THREE.AdditiveBlending,
+          depthTest: false, depthWrite: false });
+        mOuter.color.copy(baseC2);
+        const sOuter = new THREE.Sprite(mOuter);
+        sOuter.position.set(bx, bY * 0.6, -0.2);
+        sOuter.scale.set(bSzOuter, bSzOuter * 0.55, 1);
+        g.add(sOuter);
+        // Bright inner core
+        const mInner = new THREE.SpriteMaterial({ map: shapeTex, transparent: true,
+          opacity: baseGlowOpa * 0.70 * bOpaVar, blending: THREE.AdditiveBlending,
+          depthTest: false, depthWrite: false });
+        mInner.color.copy(baseC1);
+        const sInner = new THREE.Sprite(mInner);
+        sInner.position.set(bx, bY * 0.5, 0.05);
+        sInner.scale.set(bSzInner, bSzInner * 0.45, 1);
+        g.add(sInner);
+      }
     }
 
     // ── Embers ──────────────────────────────────────────────────────────────
@@ -649,7 +896,101 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
     };
   }, [buildSprites]);
 
-  // ── Render N frames to data-URL array (front-facing ortho camera) ─────────
+  // ── Deformation map live preview (80×80, ~15 fps) ─────────────────────────
+  useEffect(() => {
+    let active = true;
+    const SIZE = 80;
+    const INTERVAL = 66; // ~15 fps
+    let lastDraw = 0;
+
+    // Tiny hash-based value noise — cheap, no trig
+    const h = (n: number) => { let x = Math.sin(n) * 43758.5453; return x - Math.floor(x); };
+    const vn = (x: number, y: number) => {
+      const ix = Math.floor(x), iy = Math.floor(y);
+      const fx = x-ix, fy = y-iy;
+      const ux = fx*fx*(3-2*fx), uy = fy*fy*(3-2*fy);
+      return h(ix+iy*127)*(1-ux)*(1-uy) + h(ix+1+iy*127)*ux*(1-uy)
+           + h(ix+(iy+1)*127)*(1-ux)*uy  + h(ix+1+(iy+1)*127)*ux*uy;
+    };
+    // 3-octave fBm using vn
+    const fbm2 = (x: number, y: number, octs = 3) => {
+      let v = 0, a = 0.5, f = 1.0;
+      for (let o = 0; o < octs; o++) { v += vn(x*f+o*31.7, y*f+o*17.3)*a; a *= 0.5; f *= 2.0; }
+      return v; // 0..~1
+    };
+
+    const draw = (ts: number) => {
+      if (!active) return;
+      deformPreviewAnimRef.current = requestAnimationFrame(draw);
+      if (ts - lastDraw < INTERVAL) return;
+      lastDraw = ts;
+      const cv = deformPreviewRef.current;
+      if (!cv) return;
+      const ctx = cv.getContext('2d');
+      if (!ctx) return;
+      const f   = fpRef.current;
+      const t   = Date.now() / 1000.0;
+      const typ = f.deformType ?? 'sinusoidal';
+      const spd = Math.max(0.1, f.speed);
+      const sc  = Math.max(0.1, f.deformScale  ?? 1.0);
+      const oct = Math.max(1, Math.round(f.deformOctaves ?? 3));
+      const img = ctx.createImageData(SIZE, SIZE);
+      const d   = img.data;
+      const PERS = 0.55;
+
+      for (let py = 0; py < SIZE; py++) {
+        for (let px = 0; px < SIZE; px++) {
+          const nx = px / SIZE;
+          const ny = py / SIZE;
+          let val = 0, norm = 0;
+
+          if (typ === 'sinusoidal') {
+            for (let o = 0; o < oct; o++) {
+              const ff = sc * Math.pow(2.0, o), amp = Math.pow(PERS, o);
+              val += (0.5 + 0.5 * Math.sin((nx * ff * 3.0 + ny * ff * 5.0) * Math.PI * 2 - t * spd * 3.0)) * amp;
+              norm += amp;
+            }
+          } else if (typ === 'water') {
+            const cx1 = 0.3, cy1 = 0.5, cx2 = 0.7, cy2 = 0.3, cx3 = 0.55, cy3 = 0.75;
+            const r1 = Math.sqrt((nx-cx1)**2 + (ny-cy1)**2);
+            const r2 = Math.sqrt((nx-cx2)**2 + (ny-cy2)**2);
+            const r3 = Math.sqrt((nx-cx3)**2 + (ny-cy3)**2);
+            for (let o = 0; o < oct; o++) {
+              const ff = sc * Math.pow(2.0, o), amp = Math.pow(PERS, o);
+              val += amp * (0.5 + 0.22 * Math.sin(r1 * ff * 18 - t * spd * 3.5)
+                               + 0.17 * Math.sin(r2 * ff * 14 - t * spd * 2.8)
+                               + 0.11 * Math.sin(r3 * ff * 22 - t * spd * 4.0));
+              norm += amp;
+            }
+          } else if (typ === 'fractal') {
+            for (let o = 0; o < oct; o++) {
+              const ff = sc * Math.pow(1.85, o), amp = Math.pow(PERS, o);
+              const raw = fbm2(nx * 4 * ff + t * spd * 0.3, ny * 4 * ff + t * spd * 0.2);
+              val += (1.0 - Math.abs(raw * 2 - 1)) * amp;
+              norm += amp;
+            }
+          } else {
+            const wx = fbm2(nx * 3 * sc + t * spd * 0.25,       ny * 3 * sc + t * spd * 0.20, oct);
+            const wy = fbm2(nx * 3 * sc + 5.2 + t * spd * 0.20, ny * 3 * sc + 1.7 + t * spd * 0.25, oct);
+            val  = fbm2(nx * 3 * sc + wx * 2.5, ny * 3 * sc + wy * 2.5, oct);
+            norm = 1;
+          }
+
+          const bright = Math.round(Math.max(0, Math.min(1, val / (norm || 1))) * 255);
+          const i = (py * SIZE + px) * 4;
+          d[i] = bright; d[i+1] = bright; d[i+2] = bright; d[i+3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+    };
+    deformPreviewAnimRef.current = requestAnimationFrame(draw);
+    return () => {
+      active = false;
+      cancelAnimationFrame(deformPreviewAnimRef.current);
+    };
+  }, [fp.deformType, fp.speed, fp.deformScale, fp.deformOctaves]);
+
+
   const renderFrames = useCallback(async (
     numFrames: number,
     res: number,
@@ -823,6 +1164,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                      borderRadius: '4px', padding: '3px 6px', fontSize: '0.72rem' }}
           />
           <button type="button" onClick={handleSavePreset} style={S.btn('#4f6ef7')}>Save</button>
+          <button type="button" onClick={() => setFp({ ...DEFAULT_FP })} style={S.btn('#3a4a6a')} title="Reset all parameters to default">↺</button>
         </div>
         {presets.length > 0 && (
           <div style={{ marginBottom: '8px' }}>
@@ -878,13 +1220,56 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         <div style={S.sec}>Shape</div>
         <div style={S.row}>{lbl('Height', fp.height)}<input type="range" style={S.input} min={10} max={200} step={1}  value={fp.height}      onChange={e => upd('height',      Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Width', fp.width)}<input  type="range" style={S.input} min={4}  max={120} step={1}  value={fp.width}       onChange={e => upd('width',       Number(e.target.value))} /></div>
-        <div style={S.row}>{lbl('Tendrils', fp.numTendrils)}<input type="range" style={S.input} min={1} max={20} step={1} value={fp.numTendrils} onChange={e => upd('numTendrils', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Tendrils', fp.numTendrils)}<input type="range" style={S.input} min={1} max={24} step={1} value={fp.numTendrils} onChange={e => upd('numTendrils', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Baseline Width', fp.baselineWidth ?? 0)}<input type="range" style={S.input} min={0} max={300} step={2} value={fp.baselineWidth ?? 0} onChange={e => upd('baselineWidth', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Base Glow', `${((fp.baseGlow ?? 0) * 100).toFixed(0)}%`)}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.baseGlow ?? 0} onChange={e => upd('baseGlow', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Body Volume', `${((fp.bodyOpacity ?? 0) * 100).toFixed(0)}%`)}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.bodyOpacity ?? 0} onChange={e => upd('bodyOpacity', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Tendril Base W', (fp.tendrilBaseWidth ?? 1).toFixed(2))}<input type="range" style={S.input} min={0.05} max={4} step={0.05} value={fp.tendrilBaseWidth ?? 1} onChange={e => upd('tendrilBaseWidth', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Tendril Tip W', (fp.tendrilTipWidth ?? 0.08).toFixed(2))}<input type="range" style={S.input} min={0.01} max={2} step={0.01} value={fp.tendrilTipWidth ?? 0.08} onChange={e => upd('tendrilTipWidth', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Tendril Life', (fp.tendrilLife ?? 1).toFixed(2)+'×')}<input type="range" style={S.input} min={0.2} max={6} step={0.1} value={fp.tendrilLife ?? 1} onChange={e => upd('tendrilLife', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Detach Point', `${((fp.detachPoint ?? 0.82)*100).toFixed(0)}%`)}<input type="range" style={S.input} min={0.3} max={0.99} step={0.01} value={fp.detachPoint ?? 0.82} onChange={e => upd('detachPoint', Number(e.target.value))} /></div>
 
         {/* Motion */}
         <div style={S.sec}>Motion</div>
         <div style={S.row}>{lbl('Speed', fp.speed.toFixed(2))}<input type="range" style={S.input} min={0.1} max={5} step={0.05} value={fp.speed}      onChange={e => upd('speed',      Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Turbulence', fp.turbulence.toFixed(2))}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.turbulence} onChange={e => upd('turbulence', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Thermal Draft', fp.thermalDraft.toFixed(2))}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.thermalDraft} onChange={e => upd('thermalDraft', Number(e.target.value))} /></div>
+
+        {/* Deformation */}
+        <div style={S.sec}>Deformation</div>
+        <div style={S.row}>
+          <label style={S.label}>Type</label>
+          <select value={fp.deformType ?? 'sinusoidal'} onChange={e => upd('deformType', e.target.value as FP['deformType'])}
+            style={{ width: '100%', background: '#1e2840', border: '1px solid #3b455c', color: '#c8d0e0', borderRadius: '4px', padding: '3px 6px', fontSize: '0.74rem' }}>
+            <option value="sinusoidal">Sinusoidal</option>
+            <option value="water">Water Turbulence</option>
+            <option value="fractal">Fractal / Ridged</option>
+            <option value="displacement">Displacement (domain warp)</option>
+          </select>
+        </div>
+        <div style={S.row}>{lbl('Strength', (fp.deformStrength ?? 1).toFixed(2))}<input type="range" style={S.input} min={0} max={3} step={0.05} value={fp.deformStrength ?? 1} onChange={e => upd('deformStrength', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Scale', (fp.deformScale ?? 1).toFixed(2))}<input type="range" style={S.input} min={0.2} max={4} step={0.05} value={fp.deformScale ?? 1} onChange={e => upd('deformScale', Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Octaves', String(Math.round(fp.deformOctaves ?? 3)))}<input type="range" style={S.input} min={1} max={6} step={1} value={fp.deformOctaves ?? 3} onChange={e => upd('deformOctaves', Number(e.target.value))} /></div>
+
+        {/* Deformation map preview */}
+        <div style={{ marginBottom: '8px' }}>
+          <label style={{ ...S.label, marginBottom: '4px' }}>Deformation Map</label>
+          <canvas
+            ref={deformPreviewRef}
+            width={80}
+            height={80}
+            style={{
+              width: '100%',
+              aspectRatio: '1',
+              display: 'block',
+              borderRadius: '4px',
+              border: '1px solid #2a3450',
+              imageRendering: 'pixelated',
+            }}
+          />
+        </div>
+
+        <div style={S.row}>{lbl('Opacity Threshold', `${((fp.opacityThreshold ?? 0.04) * 100).toFixed(1)}%`)}<input type="range" style={S.input} min={0} max={0.4} step={0.005} value={fp.opacityThreshold ?? 0.04} onChange={e => upd('opacityThreshold', Number(e.target.value))} /></div>
 
         {/* Flicker */}
         <div style={S.sec}>Flicker</div>
@@ -902,6 +1287,7 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
         {/* Glow */}
         <div style={S.sec}>Glow</div>
         <div style={S.row}>{lbl('Core Width', fp.coreWidth)}<input  type="range" style={S.input} min={1}  max={30} step={0.5}  value={fp.coreWidth}   onChange={e => upd('coreWidth',   Number(e.target.value))} /></div>
+        <div style={S.row}>{lbl('Core Opacity', `${((fp.coreOpacity ?? 1) * 100).toFixed(0)}%`)}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.coreOpacity ?? 1} onChange={e => upd('coreOpacity', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Core Blur', `${(fp.coreBlur * 100).toFixed(0)}%`)}<input type="range" style={S.input} min={0} max={1} step={0.01} value={fp.coreBlur} onChange={e => upd('coreBlur', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Core Width Noise', fp.coreWidthNoise.toFixed(2))}<input type="range" style={S.input} min={0} max={3} step={0.05} value={fp.coreWidthNoise} onChange={e => upd('coreWidthNoise', Number(e.target.value))} /></div>
         <div style={S.row}>{lbl('Glow Width', fp.glowWidth)}<input  type="range" style={S.input} min={2}  max={60} step={1}    value={fp.glowWidth}   onChange={e => upd('glowWidth',   Number(e.target.value))} /></div>
@@ -957,6 +1343,24 @@ export const FlameGenerator: React.FC<FlameGeneratorProps> = ({ onExportToPartic
                   if (url) onSendToShape(url);
                 }} style={{ ...S.btn('#5a3fc0'), opacity: isExporting ? 0.5 : 1 }}>
                   ✨ Add to Shape tab
+                </button>
+              )}
+              {onSendSequenceToShape && (
+                <button type="button" disabled={isExporting} onClick={async () => {
+                  setIsExporting(true);
+                  const rawUrls = await renderFrames(exportFrames, exportRes, p => setExportProg(p));
+                  const processed = await Promise.all(rawUrls.map(async u => {
+                    let r = await deriveAlphaFromLuma(u);
+                    if (r) r = await applyMatteChoke(r, flameMatteChoke);
+                    if (r) r = await applyEdgeEnhance(r, flameEdgeEnhance);
+                    if (r) r = await applyFractalDistort(r, flameFractalDistort);
+                    return r;
+                  }));
+                  const valid = processed.filter(Boolean) as string[];
+                  setIsExporting(false);
+                  if (valid.length) onSendSequenceToShape(valid, exportFps);
+                }} style={{ ...S.btn('#5a3fc0'), opacity: isExporting ? 0.5 : 1 }}>
+                  🎞 Send Loop to Shape
                 </button>
               )}
               {onSendToPaint && (

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { CustomParticlePainter } from './CustomParticlePainter';
 import { FireGenerator } from './FireGenerator';
 import { FlameGenerator } from './FlameGenerator';
+import { GlowSphereGenerator } from './GlowSphereGenerator';
 import * as THREE from 'three';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -19,6 +20,7 @@ export type ParticleLayer = {
   id: string;
   type: ShapeType;
   customImageDataUrl?: string; // For raster image shapes from paint mode
+  sequenceUrls?: string[];     // Multi-frame image sequences (from Flame/Sphere export)
   // Fill
   fillMode: FillMode;
   color1: string;
@@ -591,7 +593,13 @@ function renderLayerToOffscreen(size: number, layer: ParticleLayer, frameT: numb
       case 'image': {
         // Sync render of a pre-loaded image from cache
         const cache = (window as any).__paintedImageCache;
-        const img = cache?.[eff.id];
+        // For sequence layers, pick the correct frame by frameT
+        let cacheKey = eff.id;
+        if (eff.sequenceUrls && eff.sequenceUrls.length > 1) {
+          const fi = Math.min(Math.floor(frameT * eff.sequenceUrls.length), eff.sequenceUrls.length - 1);
+          cacheKey = `${eff.id}_${fi}`;
+        }
+        const img = cache?.[cacheKey];
         if (img) {
           ctx.save();
           ctx.translate(cx + (eff.offsetX / 100) * size, cx + (eff.offsetY / 100) * size);
@@ -1154,7 +1162,13 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
   const [anim,         setAnim        ] = useState<AnimConfig>(defaultAnim);
   const [previewFrame, setPreviewFrame] = useState(0);
   const [playing,      setPlaying     ] = useState(false);
-  const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint' | 'fire' | 'flame'>('shape');
+  const [creatorMode,  setCreatorMode ] = useState<'shape' | 'paint' | 'fire' | 'flame' | 'sphere'>('shape');
+  // Track which panels have ever been visited so they stay mounted (lazy-mount pattern)
+  const [mountedModes, setMountedModes] = useState<Set<string>>(() => new Set(['shape']));
+  const goToMode = useCallback((m: 'shape' | 'paint' | 'fire' | 'flame' | 'sphere') => {
+    setCreatorMode(m);
+    setMountedModes(prev => { if (prev.has(m)) return prev; const n = new Set(prev); n.add(m); return n; });
+  }, []);
   const painterGetUrlRef  = useRef<(() => string) | null>(null);
   const painterLoadImgRef = useRef<((url: string) => void) | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1191,6 +1205,22 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
   const updateLayer = useCallback((id: string, patch: Partial<ParticleLayer>) => {
     setLayers(prev => prev.map(l => l.id === id ? { ...l, ...patch } : l));
   }, []);
+  const addSequenceLayer = useCallback((urls: string[], fps: number) => {
+    if (!urls.length) return;
+    const nl = defaultLayer('image');
+    nl.sequenceUrls = urls;
+    nl.size = 100;
+    if (!(window as any).__paintedImageCache) (window as any).__paintedImageCache = {};
+    urls.forEach((u, i) => {
+      const img = new Image();
+      img.src = u;
+      (window as any).__paintedImageCache[`${nl.id}_${i}`] = img;
+    });
+    setLayers(prev => [...prev, nl]);
+    setSelectedId(nl.id);
+    setAnim(prev => ({ ...prev, type: 'none', frames: urls.length, fps }));
+  }, []);
+
   const addLayer = useCallback((type: ShapeType, optUrl?: string) => {
     const nl = defaultLayer(type);
 
@@ -1409,10 +1439,10 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
 
           {/* Mode tabs */}
           <div style={{ display: 'flex', flexShrink: 0, borderBottom: '1px solid #3b455c' }}>
-            {(['shape', 'paint', 'fire', 'flame'] as const).map(m => (
-              <button key={m} type="button" onClick={() => setCreatorMode(m)}
+            {(['shape', 'paint', 'fire', 'flame', 'sphere'] as const).map(m => (
+              <button key={m} type="button" onClick={() => goToMode(m)}
                 style={{ flex: 1, background: creatorMode === m ? '#252f45' : 'transparent', border: 'none', borderBottom: creatorMode === m ? '2px solid #4f6ef7' : '2px solid transparent', color: creatorMode === m ? '#c8d0e0' : '#5a6a82', padding: '6px 0', cursor: 'pointer', fontSize: '0.75rem', textTransform: 'uppercase' }}>
-                {m === 'shape' ? '✨ Shape' : m === 'paint' ? '🎨 Paint' : m === 'fire' ? '🔥 Fire' : '🕯 Flame'}
+                {m === 'shape' ? '✨ Shape' : m === 'paint' ? '🎨 Paint' : m === 'fire' ? '🔥 Fire' : m === 'flame' ? '🕯 Flame' : '🔵 Sphere'}
               </button>
             ))}
           </div>
@@ -1420,7 +1450,7 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
           {creatorMode === 'paint' && (
              <div style={{ padding: '8px 14px', background: '#1a4a6a', borderBottom: '1px solid #3b455c', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                <div style={{ fontSize: '0.72rem', color: '#a9d4ff' }}>Draw a shape below, then use it as a layer.</div>
-               <button type="button" onClick={() => { addLayer('custom-paint'); setCreatorMode('shape'); }} style={{ background: '#3a7fd4', border: 'none', borderRadius: '4px', color: '#fff', padding: '4px 8px', fontSize: '0.7rem', cursor: 'pointer', fontWeight: 'bold' }}>Add to Designer ↗</button>
+               <button type="button" onClick={() => { addLayer('custom-paint'); goToMode('shape'); }} style={{ background: '#3a7fd4', border: 'none', borderRadius: '4px', color: '#fff', padding: '4px 8px', fontSize: '0.7rem', cursor: 'pointer', fontWeight: 'bold' }}>Add to Designer ↗</button>
              </div>
           )}
 
@@ -1759,54 +1789,77 @@ export const ParticleCreator: React.FC<Props> = ({ onExport, onExportSequence, o
             </div>
           )}
 
-          {creatorMode === 'paint' && (
+          {mountedModes.has('paint') && <div style={{ display: creatorMode === 'paint' ? undefined : 'none' }}>
             <CustomParticlePainter
               embedded
-              visible={true}
+              visible={creatorMode === 'paint'}
               emitters={[]}
               onInjectToEmitter={() => {}}
               onClose={() => {}}
               onReady={(getFn, loadFn) => { painterGetUrlRef.current = getFn; painterLoadImgRef.current = loadFn; }}
             />
-          )}
+          </div>}
 
-          {creatorMode === 'fire' && (
-            <div style={{ flex: 1, overflow: 'auto', minHeight: '300px' }}>
-              <FireGenerator
-                particleCameraState={particleCameraState}
-                embeddedUI
-                autoRenderOnChange
-                onAttachToEmitter={(urls) => {
-                  onExportSequence(urls, 'fire', 24);
-                }}
-                onExportToParticleSystem={(urls, fps) => {
-                  onExportSequence(urls, 'fire', fps);
-                }}
-              />
-            </div>
-          )}
+          {mountedModes.has('fire') && <div style={{ flex: 1, overflow: 'auto', minHeight: '300px', display: creatorMode === 'fire' ? undefined : 'none' }}>
+            <FireGenerator
+              particleCameraState={particleCameraState}
+              embeddedUI
+              autoRenderOnChange
+              onAttachToEmitter={(urls) => {
+                onExportSequence(urls, 'fire', 24);
+              }}
+              onExportToParticleSystem={(urls, fps) => {
+                onExportSequence(urls, 'fire', fps);
+              }}
+            />
+          </div>}
 
-          {creatorMode === 'flame' && (
-            <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: '300px' }}>
-              <FlameGenerator
-                onAttachToEmitter={(urls) => {
-                  onExportSequence(urls, 'flame', 24);
-                }}
-                onExportToParticleSystem={(urls, fps) => {
-                  onExportSequence(urls, 'flame', fps);
-                }}
-                onSendToShape={(url) => {
-                  addLayer('image', url);
-                  setCreatorMode('shape');
-                }}
-                onSendToPaint={(url) => {
-                  setCreatorMode('paint');
-                  // Give the paint tab a tick to mount before loading
-                  setTimeout(() => painterLoadImgRef.current?.(url), 80);
-                }}
-              />
-            </div>
-          )}
+          {mountedModes.has('sphere') && <div style={{ display: creatorMode === 'sphere' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minHeight: '300px' }}>
+            <GlowSphereGenerator
+              onSendToShape={(url) => {
+                addLayer('image', url);
+                goToMode('shape');
+              }}
+              onSendSequenceToShape={(urls, fps) => {
+                addSequenceLayer(urls, fps);
+                goToMode('shape');
+              }}
+              onSendToPaint={(url) => {
+                goToMode('paint');
+                setTimeout(() => painterLoadImgRef.current?.(url), 80);
+              }}
+              onAttachToEmitter={(urls) => {
+                onExportSequence(urls, 'sphere', 24);
+              }}
+              onExportToParticleSystem={(urls, fps) => {
+                onExportSequence(urls, 'sphere', fps);
+              }}
+            />
+          </div>}
+
+          {mountedModes.has('flame') && <div style={{ display: creatorMode === 'flame' ? 'flex' : 'none', flex: 1, overflow: 'hidden', minHeight: '300px' }}>
+            <FlameGenerator
+              onAttachToEmitter={(urls) => {
+                onExportSequence(urls, 'flame', 24);
+              }}
+              onExportToParticleSystem={(urls, fps) => {
+                onExportSequence(urls, 'flame', fps);
+              }}
+              onSendToShape={(url) => {
+                addLayer('image', url);
+                goToMode('shape');
+              }}
+              onSendSequenceToShape={(urls, fps) => {
+                addSequenceLayer(urls, fps);
+                goToMode('shape');
+              }}
+              onSendToPaint={(url) => {
+                goToMode('paint');
+                // Give the paint tab a tick to mount before loading
+                setTimeout(() => painterLoadImgRef.current?.(url), 80);
+              }}
+            />
+          </div>}
         </div>
       </div>
       <input ref={fileInputRef} type="file" accept="image/png, image/jpeg, image/webp" style={{ display: 'none' }} onChange={handleImageLoad} />

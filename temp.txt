@@ -1,11 +1,15 @@
-  const [hardness,      setHardness  ] = useState(55);
-  const [smooth,        setSmooth    ] = useState(true);
-  const [activeStamp,   setActiveStamp] = useState<ShapeType | null>(null);    const [sizeJitter,    setSizeJitter] = useState(0);
-    const [angleJitter,   setAngleJitter] = useState(0);
-    const [opacityJitter, setOpacityJitter] = useState(0);
-    const [density,       setDensity   ] = useState(15);  const [presets,       setPresets   ] = useState<PainterPreset[]>(loadPresets);
-  const [presetName,    setPresetName] = useState('');
-  const [showInject,    setShowInject] = useState(false);
-  const [stampTab,       setStampTab  ] = useState<'shapes' | 'brushes'>('shapes');
-  const [abrBrushes,     setAbrBrushes] = useState<AbrBrush[]>([]);
-  const [activeBrush,    setActiveBrush] = useState<AbrBrush | null>(null);
+            let tendrilBaseX = fBase.x, tendrilBaseY = fBase.y, tendrilBaseZ = fBase.z;
+            let pathFade = 1.0;
+            let pathFade = 1.0;
+            if (pathCurveF) {
+              const pathT = ( (numTendrils > 1 ? ti / (numTendrils - 1) : 0) + (fAnimT * Math.max(0.1, speed) * (fp.pathSpeed ?? 0.05)) ) % 1.0;
+              const pathPt = pathCurveF.getPointAt(Math.min(0.9999, pathT));
+              tendrilBaseX = pathPt.x; tendrilBaseY = pathPt.y; tendrilBaseZ = pathPt.z;
+              pathFade = Math.min(pathT * 20.0, (1.0 - pathT) * 20.0, 1.0); // fade in/out
+              pathFade = Math.min(pathT * 20.0, (1.0 - pathT) * 20.0, 1.0); // fade in/out
+            }
+
+            // Base spread angle shifts each new life
+            const spreadAngle  = (numTendrils > 1 ? (ti / (numTendrils - 1)) : 0.5) * Math.PI * 2
+                               + Math.floor((fAnimT + birthOffset) / lifespan) * 0.97;
+            const baseR        = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0);

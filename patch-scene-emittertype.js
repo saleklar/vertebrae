@@ -1,23 +1,23 @@
 const fs = require('fs');
-const file = 'src/Scene3D.tsx';
-let code = fs.readFileSync(file, 'utf8');
+let c = fs.readFileSync('src/Scene3D.tsx', 'utf8');
 
-const oldStr = `                  const sourceProps = (sourceNode.properties ?? {}) as Record<string, any>;
-                  const emitterType = sourceProps.emitterType ?? 'point';
-                  const emissionMode = sourceProps.emissionMode ?? emitterProps.emissionMode ?? 'volume';`;
+c = c.replace(
+  'if (_flameShapeTexCache.has(shape)) return _flameShapeTexCache.get(shape)!;\n  const S = 128, H = S / 2;',
+  'if (_flameShapeTexCache.has(shape)) return _flameShapeTexCache.get(shape)!;\n  if (shape.startsWith("data:image")) {\n    const tex = new THREE.TextureLoader().load(shape);\n    _flameShapeTexCache.set(shape, tex);\n    return tex;\n  }\n  const S = 128, H = S / 2;'
+);
+c = c.replace(
+  'if (_flameShapeTexCache.has(shape)) return _flameShapeTexCache.get(shape)!;\r\n  const S = 128, H = S / 2;',
+  'if (_flameShapeTexCache.has(shape)) return _flameShapeTexCache.get(shape)!;\n  if (shape.startsWith("data:image")) {\n    const tex = new THREE.TextureLoader().load(shape);\n    _flameShapeTexCache.set(shape, tex);\n    return tex;\n  }\n  const S = 128, H = S / 2;'
+);
 
-const newStr = `                  const sourceProps = (sourceNode.properties ?? {}) as Record<string, any>;
-                  let emitterType = sourceProps.emitterType ?? 'point';
-                  if (sourceNode.type === 'Path') emitterType = 'curve';
-                  else if (sourceNode.type === 'Box') emitterType = 'cube';
-                  else if (sourceNode.type === 'Sphere') emitterType = 'ball';
-                  else if (sourceNode.type === 'Mesh') emitterType = 'mesh_bounds';
-                  const emissionMode = sourceProps.emissionMode ?? emitterProps.emissionMode ?? 'volume';`;
+c = c.replace(
+  'if (_lightningTexCache.has(key)) return _lightningTexCache.get(key)!;\n  const S = 128, H = S / 2;',
+  'if (_lightningTexCache.has(key)) return _lightningTexCache.get(key)!;\n  if (shape.startsWith("data:image")) {\n    const tex = new THREE.TextureLoader().load(shape);\n    _lightningTexCache.set(key, tex);\n    return tex;\n  }\n  const S = 128, H = S / 2;'
+);
+c = c.replace(
+  'if (_lightningTexCache.has(key)) return _lightningTexCache.get(key)!;\r\n  const S = 128, H = S / 2;',
+  'if (_lightningTexCache.has(key)) return _lightningTexCache.get(key)!;\n  if (shape.startsWith("data:image")) {\n    const tex = new THREE.TextureLoader().load(shape);\n    _lightningTexCache.set(key, tex);\n    return tex;\n  }\n  const S = 128, H = S / 2;'
+);
 
-if(code.includes(oldStr)) {
-    code = code.replace(oldStr, newStr);
-    fs.writeFileSync(file, code, 'utf8');
-    console.log("Successfully patched emitterType logic in Scene3D.tsx");
-} else {
-    console.log("Failed to find emitterType block in Scene3D.tsx");
-}
+fs.writeFileSync('src/Scene3D.tsx', c);
+console.log('Done types');

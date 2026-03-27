@@ -47,42 +47,102 @@ function _tintRgba(s: TintStop): { r: number; g: number; b: number; a: number } 
 // producing a seamless glowing tube that looks like real plasma / electricity.
 
 /** Cache: key = "glowHex_coreHex" → CanvasTexture */
-const _lightningTexCache = new Map<string, THREE.CanvasTexture>();
+const _lightningTexCache = new Map<string, THREE.Texture>();
 
 /**
  * Builds (and caches) a 128×128 radial-gradient canvas texture:
  *   centre → bright white → coreColor → glowColor → fully transparent edge
  */
-function buildLightningGlowTex(glowHex: number, coreHex: number): THREE.CanvasTexture {
-  const key = `${glowHex}_${coreHex}`;
+function buildLightningGlowTex(glowHex: number, coreHex: number, shape: string = 'circle'): THREE.Texture {
+  const key = `${glowHex}_${coreHex}_${shape}`;
   if (_lightningTexCache.has(key)) return _lightningTexCache.get(key)!;
+  if (shape.startsWith("data:image")) {
+    const tex = new THREE.TextureLoader().load(shape);
+    _lightningTexCache.set(key, tex);
+    return tex;
+  }
   const S = 128, H = S / 2;
   const cv = document.createElement('canvas');
   cv.width = S; cv.height = S;
   const ctx = cv.getContext('2d')!;
   const rgb = (hex: number) => `${(hex>>16)&0xff},${(hex>>8)&0xff},${hex&0xff}`;
-  const gr  = ctx.createRadialGradient(H, H, 0, H, H, H);
-  gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
-  gr.addColorStop(0.10, `rgba(${rgb(0xffffff)},0.95)`);
-  gr.addColorStop(0.22, `rgba(${rgb(coreHex)},0.90)`);
-  gr.addColorStop(0.42, `rgba(${rgb(glowHex)},0.80)`);
-  gr.addColorStop(0.65, `rgba(${rgb(glowHex)},0.35)`);
-  gr.addColorStop(0.85, `rgba(${rgb(glowHex)},0.08)`);
-  gr.addColorStop(1.00, `rgba(${rgb(glowHex)},0.00)`);
-  ctx.fillStyle = gr;
-  ctx.fillRect(0, 0, S, S);
+  
+  if (shape === 'diamond') {
+    const imgData = ctx.createImageData(S, S);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const dx = Math.abs(x - H) / H;
+        const dy = Math.abs(y - H) / H;
+        const d = dx + dy;
+        const a = d < 1.0 ? Math.pow(1.0 - d, 2.0) : 0;
+        
+        let r, g, b;
+        if (d < 0.10) { r=255; g=255; b=255; }
+        else if (d < 0.22) { r=(coreHex>>16)&0xff; g=(coreHex>>8)&0xff; b=coreHex&0xff; }
+        else { r=(glowHex>>16)&0xff; g=(glowHex>>8)&0xff; b=glowHex&0xff; }
+        
+        const idx = (y * S + x) * 4;
+        imgData.data[idx] = r; imgData.data[idx+1] = g; imgData.data[idx+2] = b;
+        imgData.data[idx+3] = a * 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else if (shape === 'star') {
+    const imgData = ctx.createImageData(S, S);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const dx = Math.abs(x - H) / H;
+        const dy = Math.abs(y - H) / H;
+        const d = Math.sqrt(dx) + Math.sqrt(dy);
+        const a = d < 1.0 ? Math.pow(1.0 - d, 2.5) : 0;
+        
+        let r, g, b;
+        if (d < 0.2) { r=255; g=255; b=255; }
+        else if (d < 0.3) { r=(coreHex>>16)&0xff; g=(coreHex>>8)&0xff; b=coreHex&0xff; }
+        else { r=(glowHex>>16)&0xff; g=(glowHex>>8)&0xff; b=glowHex&0xff; }
+        
+        const idx = (y * S + x) * 4;
+        imgData.data[idx] = r; imgData.data[idx+1] = g; imgData.data[idx+2] = b;
+        imgData.data[idx+3] = a * 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else if (shape === 'sharp') {
+    const gr  = ctx.createRadialGradient(H, H, 0, H, H, H);
+    gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+    gr.addColorStop(0.02, `rgba(${rgb(0xffffff)},0.95)`);
+    gr.addColorStop(0.06, `rgba(${rgb(coreHex)},0.90)`);
+    gr.addColorStop(0.12, `rgba(${rgb(glowHex)},0.60)`);
+    gr.addColorStop(0.25, `rgba(${rgb(glowHex)},0.15)`);
+    gr.addColorStop(1.00, `rgba(${rgb(glowHex)},0.00)`);
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, S, S);
+  } else {
+    // circle
+    const gr  = ctx.createRadialGradient(H, H, 0, H, H, H);
+    gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+    gr.addColorStop(0.10, `rgba(${rgb(0xffffff)},0.95)`);
+    gr.addColorStop(0.22, `rgba(${rgb(coreHex)},0.90)`);
+    gr.addColorStop(0.42, `rgba(${rgb(glowHex)},0.80)`);
+    gr.addColorStop(0.65, `rgba(${rgb(glowHex)},0.35)`);
+    gr.addColorStop(0.85, `rgba(${rgb(glowHex)},0.08)`);
+    gr.addColorStop(1.00, `rgba(${rgb(glowHex)},0.00)`);
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, S, S);
+  }
+  
   const tex = new THREE.CanvasTexture(cv);
   _lightningTexCache.set(key, tex);
   return tex;
 }
 
-const _flameTexCache = new Map<string, THREE.CanvasTexture>();
+const _flameTexCache = new Map<string, THREE.Texture>();
 
 /**
  * Flame-specific radial texture: no forced white — brightened innerHex at centre,
  * fading through innerHex → outerHex → transparent edge.
  */
-function buildFlameTex(innerHex: number, outerHex: number): THREE.CanvasTexture {
+function buildFlameTex(innerHex: number, outerHex: number): THREE.Texture {
   const key = `flame_${innerHex}_${outerHex}`;
   if (_flameTexCache.has(key)) return _flameTexCache.get(key)!;
   const S = 128, H = S / 2;
@@ -104,6 +164,78 @@ function buildFlameTex(innerHex: number, outerHex: number): THREE.CanvasTexture 
   ctx.fillRect(0, 0, S, S);
   const tex = new THREE.CanvasTexture(cv);
   _flameTexCache.set(key, tex);
+  return tex;
+}
+
+/**
+ * Colour-neutral flame shape texture — white radial gradient (luminance/alpha only).
+ * Used when per-sprite colour tinting is applied via SpriteMaterial.color.
+ */
+let _flameShapeTexCache = new Map<string, THREE.Texture>();
+function buildFlameTexShape(shape: string = 'circle'): THREE.Texture {
+  if (_flameShapeTexCache.has(shape)) return _flameShapeTexCache.get(shape)!;
+  if (shape.startsWith("data:image")) {
+    const tex = new THREE.TextureLoader().load(shape);
+    _flameShapeTexCache.set(shape, tex);
+    return tex;
+  }
+  const S = 128, H = S / 2;
+  const cv = document.createElement('canvas');
+  cv.width = S; cv.height = S;
+  const ctx = cv.getContext('2d')!;
+
+  if (shape === 'diamond') {
+    const imgData = ctx.createImageData(S, S);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const dx = Math.abs(x - H) / H;
+        const dy = Math.abs(y - H) / H;
+        const d = dx + dy;
+        const a = d < 1.0 ? Math.pow(1.0 - d, 1.5) : 0;
+        const idx = (y * S + x) * 4;
+        imgData.data[idx] = 255; imgData.data[idx+1] = 255; imgData.data[idx+2] = 255;
+        imgData.data[idx+3] = a * 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else if (shape === 'star') {
+    const imgData = ctx.createImageData(S, S);
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const dx = Math.abs(x - H) / H;
+        const dy = Math.abs(y - H) / H;
+        const d = Math.sqrt(dx) + Math.sqrt(dy);
+        const a = d < 1.0 ? Math.pow(1.0 - d, 2.0) : 0;
+        const idx = (y * S + x) * 4;
+        imgData.data[idx] = 255; imgData.data[idx+1] = 255; imgData.data[idx+2] = 255;
+        imgData.data[idx+3] = a * 255;
+      }
+    }
+    ctx.putImageData(imgData, 0, 0);
+  } else if (shape === 'sharp') {
+    const gr = ctx.createRadialGradient(H, H, 0, H, H, H);
+    gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+    gr.addColorStop(0.05, 'rgba(255,255,255,0.90)');
+    gr.addColorStop(0.12, 'rgba(255,255,255,0.20)');
+    gr.addColorStop(0.25, 'rgba(255,255,255,0.00)');
+    gr.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, S, S);
+  } else {
+    // circle
+    const gr = ctx.createRadialGradient(H, H, 0, H, H, H);
+    gr.addColorStop(0.00, 'rgba(255,255,255,1.00)');
+    gr.addColorStop(0.15, 'rgba(255,255,255,0.94)');
+    gr.addColorStop(0.38, 'rgba(255,255,255,0.78)');
+    gr.addColorStop(0.62, 'rgba(255,255,255,0.32)');
+    gr.addColorStop(0.84, 'rgba(255,255,255,0.07)');
+    gr.addColorStop(1.00, 'rgba(255,255,255,0.00)');
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, 0, S, S);
+  }
+  
+  const tex = new THREE.CanvasTexture(cv);
+  _flameShapeTexCache.set(shape, tex);
   return tex;
 }
 
@@ -222,6 +354,8 @@ type SceneSettings = {
   showParticles?: boolean;
   showSpineImages?: boolean;
   showBones?: boolean;
+  showPathPoints?: boolean;
+  showFX?: boolean;
 };
 
 const DEFAULT_THETA = Math.PI / 4;
@@ -283,6 +417,7 @@ type Scene3DProps = {
   onCameraChange?: (cameraState: { position: THREE.Vector3, quaternion: THREE.Quaternion }) => void;
   drawBezierCurveMode?: boolean;
   onFinishDrawBezierCurve?: (points?: {x:number, y:number, z:number}[]) => void;
+  bezierSurfaceObjectId?: string | null;
   spineAttachments?: SpineAttachmentInfo[];
   spineFrameOverrides?: SpineFrameOverrides;
   spineLayerSpread?: number;
@@ -290,6 +425,22 @@ type Scene3DProps = {
   onQuadPanelClick?: (panel: 'top' | 'front' | 'side' | 'perspective') => void;
   manipulatorMode?: 'translate' | 'rotate' | 'scale';
   onManipulatorModeChange?: (mode: 'translate' | 'rotate' | 'scale') => void;
+  /** When true the viewport renders from the Camera scene object instead of free orbit */
+  lookThroughCamera?: boolean;
+  /** Called when the user right-clicks in the viewport without Alt (for context marking menu) */
+  onViewportRightClick?: (screenX: number, screenY: number, panel?: 'top' | 'front' | 'side' | 'perspective') => void;
+  /** Per-panel view overrides for quad viewport */
+  quadPanelViews?: { top: 'perspective'|'x'|'y'|'z'; front: 'perspective'|'x'|'y'|'z'; side: 'perspective'|'x'|'y'|'z'; perspective: 'perspective'|'x'|'y'|'z' };
+  /** When set, a live dashed crop-preview box is drawn over the viewport showing exactly what will be captured. */
+  capturePreviewObjectIds?: string[];
+  /** Fraction of glowWidth added as padding around the Box3 crop (0 = tight, 1 = full glow radius). Default 0.3. */
+  capturePreviewPadding?: number;
+  /** Object IDs that are hidden in the viewport (unchecked green checkbox in hierarchy). */
+  hiddenObjectIds?: string[];
+  /** When set, renders a manually draggable/resizable crop-preview overlay. */
+  manualCropRect?: { left: number; top: number; width: number; height: number };
+  /** Called whenever the user drags or resizes the manual crop rect. */
+  onManualCropChange?: (r: { left: number; top: number; width: number; height: number }) => void;
 };
 
 type CachedParticleState = {
@@ -322,7 +473,45 @@ export interface Scene3DRef {
   }) => Promise<string[]>;
   /** Reset all physics-driven objects back to their positions at the last play-start */
   resetRigidBodies: () => void;
+  /** Re-frame the viewport camera to fit the lightning bolt (start→end) while keeping the current orbit angle. */
+  frameLightningInViewport: (lightningId: string) => void;
   focusSelectedObject: () => void;
+  /**
+   * Procedurally grow a vine-like bezier path on the surface of a scene object.
+   * @param objectId  - id of the target mesh
+   * @param numPoints - number of control points (3–24)
+   * @param totalLength - arc-length of the path in world units
+   * @param curliness  - 0=straight, 1=very curly vine
+   * @returns array of world-space positions or [] on failure
+   */
+  generateVineOnSurface: (
+    objectId: string,
+    numPoints: number,
+    totalLength: number,
+    curliness: number,
+  ) => { x: number; y: number; z: number }[];
+  /** Returns the current active camera (perspective or ortho). */
+  getCamera: () => THREE.Camera | null;
+  /** Returns the renderer's current pixel dimensions. */
+  getRendererSize: () => { width: number; height: number } | null;
+  /**
+   * Renders only the specified object (by scene-object id) to a transparent
+   * PNG, auto-cropped to the bounding box of non-transparent pixels.
+   */
+  captureSaberPNG: (objectId: string) => Promise<Blob>;
+  /**
+   * Renders N animation frames of the specified objects (all shown simultaneously)
+   * to transparent PNGs. All frames share the same crop rectangle (union bbox
+   * across all objects and all frames). Returns one Blob per frame in order.
+   */
+  captureSaberSequence: (objectIds: string[], frameCount?: number, fps?: number) => Promise<Blob[]>;
+  /**
+   * Trace the visible edge of a Spine attachment and return world-space points
+   * suitable for use as bezier path control points.
+   * @param attachmentId - the id of the SpineAttachmentInfo
+   * @param numPoints    - number of contour control points (default 16)
+   */
+  getSpineEdgeOutline: (attachmentId: string, numPoints?: number) => { x: number; y: number; z: number }[];
 }
 
 
@@ -553,26 +742,86 @@ function lightningLoopNoise(pos: number, time: number, scale: number): number {
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawComplete, sceneSize, sceneSettings, onCameraChange, snapSettings, viewMode, onViewModeChange, sceneObjects, currentFrame, isPlaying, isCaching, timelineIn, timelineOut, physicsForces, selectedObjectId, selectedObjectIds, selectedForceId, onObjectSelect, onMultiObjectSelect, onForceSelect, onObjectTransform, onForceTransform, handleScale = 1.0, onCacheFrameCountChange, cacheResetToken = 0, onUpdateSceneSettings, drawBezierCurveMode = false, onFinishDrawBezierCurve, spineAttachments = [], spineFrameOverrides, spineLayerSpread = 0, quadViewport = false, onQuadPanelClick, manipulatorMode: manipulatorModeProp, onManipulatorModeChange }, ref) => {
+export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawComplete, sceneSize, sceneSettings, onCameraChange, snapSettings, viewMode, onViewModeChange, sceneObjects, currentFrame, isPlaying, isCaching, timelineIn, timelineOut, physicsForces, selectedObjectId, selectedObjectIds, selectedForceId, onObjectSelect, onMultiObjectSelect, onForceSelect, onObjectTransform, onForceTransform, handleScale = 1.0, onCacheFrameCountChange, cacheResetToken = 0, onUpdateSceneSettings, drawBezierCurveMode = false, onFinishDrawBezierCurve, bezierSurfaceObjectId = null, spineAttachments = [], spineFrameOverrides, spineLayerSpread = 0, quadViewport = false, onQuadPanelClick, manipulatorMode: manipulatorModeProp, onManipulatorModeChange, lookThroughCamera = false, onViewportRightClick, quadPanelViews, capturePreviewObjectIds = [], capturePreviewPadding = 0.3, hiddenObjectIds = [], manualCropRect, onManualCropChange }, ref) => {
     // State for Bezier curve drawing
     const [bezierCurvePoints, setBezierCurvePoints] = useState<{x: number, y: number, z: number}[]>([]);
     const bezierCurveMeshRef = useRef<THREE.Line | null>(null);
+    const bezierHoverDotRef = useRef<THREE.Mesh | null>(null);
+    const bezierSurfaceObjectIdRef = useRef<string | null>(bezierSurfaceObjectId);
+    useEffect(() => { bezierSurfaceObjectIdRef.current = bezierSurfaceObjectId; }, [bezierSurfaceObjectId]);
 
-    // Helper: convert screen (client) coordinates to 3D world position on XZ plane (y=0)
-    function screenToWorld(x: number, y: number): THREE.Vector3 | null {
+    // Resolve a click/hover to a 3D world position, supporting mesh face/vertex snap
+    const resolve3DPosition = (clientX: number, clientY: number): THREE.Vector3 | null => {
       if (!rendererRef.current || !currentCameraRef.current) return null;
       const rect = rendererRef.current.domElement.getBoundingClientRect();
-      const ndcX = ((x - rect.left) / rect.width) * 2 - 1;
-      const ndcY = -((y - rect.top) / rect.height) * 2 + 1;
-      const ndc = new THREE.Vector3(ndcX, ndcY, 0.5);
-      ndc.unproject(currentCameraRef.current);
-      // Project onto y=0 plane
-      const camera = currentCameraRef.current;
-      const camPos = camera.position.clone();
-      const dir = ndc.clone().sub(camPos).normalize();
-      const t = -camPos.y / dir.y;
-      if (!isFinite(t)) return null;
-      return camPos.clone().add(dir.multiplyScalar(t));
+      const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
+      const ndc2 = new THREE.Vector2(ndcX, ndcY);
+      const ray = new THREE.Raycaster();
+      ray.setFromCamera(ndc2, currentCameraRef.current);
+
+      const surfObjId = bezierSurfaceObjectIdRef.current;
+      const snap = snapSettingsRef.current;
+
+      // Surface locked mode: only raycast against the designated surface object
+      if (surfObjId) {
+        const surfMesh = sceneObjectMeshesRef.current.get(surfObjId);
+        if (surfMesh) {
+          const hits = ray.intersectObject(surfMesh, true);
+          if (hits.length > 0) {
+            const hit = hits[0];
+            if (snap.snap3DTarget === 'vertex' && hit.object.type === 'Mesh') {
+              return closestVertexWorld(hit.object as THREE.Mesh, hit.point);
+            }
+            // Face: offset slightly above surface normal
+            const norm = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize() : new THREE.Vector3(0, 1, 0);
+            return hit.point.clone().addScaledVector(norm, 0.5);
+          }
+        }
+        return null; // surface mode but missed — don't place a point
+      }
+
+      // Snap-to-3D mode: raycast all meshes
+      if (snap.snapTo3DObject) {
+        const candidates: THREE.Object3D[] = [];
+        sceneObjectMeshesRef.current.forEach(m => candidates.push(m));
+        const hits = ray.intersectObjects(candidates, true);
+        if (hits.length > 0) {
+          const hit = hits[0];
+          if (snap.snap3DTarget === 'vertex' && hit.object.type === 'Mesh') {
+            return closestVertexWorld(hit.object as THREE.Mesh, hit.point);
+          }
+          const norm = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize() : new THREE.Vector3(0, 1, 0);
+          return hit.point.clone().addScaledVector(norm, 0.5);
+        }
+        // Fall through to plane if missed
+      }
+
+      // Default: project onto Y=0 ground plane
+      const cam = currentCameraRef.current;
+      const camPos2 = cam.position.clone();
+      const ndcV = new THREE.Vector3(ndcX, ndcY, 0.5).unproject(cam);
+      const dir2 = ndcV.sub(camPos2).normalize();
+      const tPlane = dir2.y !== 0 ? -camPos2.y / dir2.y : null;
+      if (!tPlane || !isFinite(tPlane)) return null;
+      return camPos2.clone().add(dir2.multiplyScalar(tPlane));
+    };
+
+    // Closest world-space vertex on a mesh to a given world point
+    function closestVertexWorld(mesh: THREE.Mesh, worldPoint: THREE.Vector3): THREE.Vector3 {
+      const geom = mesh.geometry as THREE.BufferGeometry;
+      const posAttr = geom.attributes.position;
+      if (!posAttr) return worldPoint.clone();
+      const localPt = mesh.worldToLocal(worldPoint.clone());
+      let minDist = Infinity;
+      const best = new THREE.Vector3();
+      const tmp = new THREE.Vector3();
+      for (let i = 0; i < posAttr.count; i++) {
+        tmp.fromBufferAttribute(posAttr, i);
+        const d = tmp.distanceToSquared(localPt);
+        if (d < minDist) { minDist = d; best.copy(tmp); }
+      }
+      return mesh.localToWorld(best);
     }
 
     // Mouse click handler for Bezier curve drawing
@@ -581,7 +830,7 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
       const handleClick = (event: MouseEvent) => {
         if (event.button !== 0) return; // Only LMB
         if (!rendererRef.current) return;
-        const pos = screenToWorld(event.clientX, event.clientY);
+        const pos = resolve3DPosition(event.clientX, event.clientY);
         if (pos) {
           setBezierCurvePoints(prev => [...prev, { x: pos.x, y: pos.y, z: pos.z }]);
         }
@@ -589,6 +838,38 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
       window.addEventListener('mousedown', handleClick);
       return () => window.removeEventListener('mousedown', handleClick);
     }, [drawBezierCurveMode]);
+
+    // Hover preview dot — follows snapped position while in bezier draw mode
+    useEffect(() => {
+      if (!drawBezierCurveMode || !sceneRef.current) {
+        if (bezierHoverDotRef.current && sceneRef.current) {
+          sceneRef.current.remove(bezierHoverDotRef.current);
+          (bezierHoverDotRef.current.geometry as THREE.BufferGeometry).dispose();
+          bezierHoverDotRef.current = null;
+        }
+        return;
+      }
+      const dotGeo = new THREE.SphereGeometry(3, 8, 8);
+      const dotMat = new THREE.MeshBasicMaterial({ color: bezierSurfaceObjectId ? 0xaa66ff : 0x00ffcc, depthTest: false });
+      const dot = new THREE.Mesh(dotGeo, dotMat);
+      dot.renderOrder = 9999;
+      sceneRef.current.add(dot);
+      bezierHoverDotRef.current = dot;
+      const onMove = (e: MouseEvent) => {
+        const pos = resolve3DPosition(e.clientX, e.clientY);
+        if (bezierHoverDotRef.current) {
+          bezierHoverDotRef.current.visible = !!pos;
+          if (pos) bezierHoverDotRef.current.position.copy(pos);
+        }
+      };
+      window.addEventListener('mousemove', onMove);
+      return () => {
+        window.removeEventListener('mousemove', onMove);
+        if (sceneRef.current && dot.parent) sceneRef.current.remove(dot);
+        dotGeo.dispose();
+        bezierHoverDotRef.current = null;
+      };
+    }, [drawBezierCurveMode, bezierSurfaceObjectId]);
 
     // Render/update the Bezier curve as points are added
     useEffect(() => {
@@ -632,6 +913,7 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   const sceneRef = useRef<THREE.Scene | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const gridHelpersRef = useRef<THREE.GridHelper[]>([]);
+  const axisLinesRef   = useRef<THREE.Line[]>([]);
   const perspectiveCameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const currentCameraRef = useRef<THREE.PerspectiveCamera | THREE.OrthographicCamera | null>(null);
 
@@ -671,11 +953,108 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   const gizmoRendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const gizmoAxisObjectsRef = useRef<{ x: THREE.Object3D; y: THREE.Object3D; z: THREE.Object3D } | null>(null);
   const transformControlsRef = useRef<TransformControls | null>(null);
-  
+  const drawBezierCurveModeRef = useRef(false);
+
   // Scene objects tracking
   const focusSelectedObjectRef = useRef<() => void>();
   const sceneObjectMeshesRef = useRef<Map<string, THREE.Object3D>>(new Map());
-  const selectionOutlineHelpersRef = useRef<Map<string, THREE.BoxHelper>>(new Map());
+
+  // ── Capture-preview overlay ───────────────────────────────────────────────
+  // rAF loop projects the union of all checked objects' 3-D Box3s onto screen.
+  const [capturePreviewRect, setCapturePreviewRect] = useState<{top:number;left:number;width:number;height:number}|null>(null);
+  const capturePreviewIdsRef     = useRef<string[]>([]);
+  const capturePreviewRafRef     = useRef<number>(0);
+  const capturePreviewPaddingRef = useRef<number>(capturePreviewPadding);
+  capturePreviewIdsRef.current     = capturePreviewObjectIds ?? [];
+  capturePreviewPaddingRef.current = capturePreviewPadding;
+  const manualCropRectRef = useRef<{left:number;top:number;width:number;height:number}|null>(null);
+  manualCropRectRef.current = manualCropRect ?? null;
+
+  // ── Manual crop-rect drag ──────────────────────────────────────────────────
+  const cropDragRef = useRef<{
+    type: 'move'|'n'|'s'|'e'|'w'|'ne'|'nw'|'se'|'sw';
+    startX: number; startY: number;
+    origRect: { left: number; top: number; width: number; height: number };
+  }|null>(null);
+  const onManualCropChangeRef = useRef(onManualCropChange);
+  onManualCropChangeRef.current = onManualCropChange;
+  useEffect(() => {
+    const MIN = 20;
+    const onMove = (e: MouseEvent) => {
+      if (!cropDragRef.current || !onManualCropChangeRef.current) return;
+      const { type, startX, startY, origRect } = cropDragRef.current;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      let { left, top, width, height } = origRect;
+      if (type === 'move') { left += dx; top += dy; }
+      if (type === 'e' || type === 'ne' || type === 'se') { width = Math.max(MIN, width + dx); }
+      if (type === 'w' || type === 'nw' || type === 'sw') { const d = Math.min(dx, width - MIN); left += d; width -= d; }
+      if (type === 's' || type === 'se' || type === 'sw') { height = Math.max(MIN, height + dy); }
+      if (type === 'n' || type === 'ne' || type === 'nw') { const d = Math.min(dy, height - MIN); top += d; height -= d; }
+      onManualCropChangeRef.current({ left, top, width, height });
+    };
+    const onUp = () => { cropDragRef.current = null; };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+    return () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+  }, []);
+
+  useEffect(() => {
+    cancelAnimationFrame(capturePreviewRafRef.current);
+    if (!capturePreviewObjectIds?.length) { setCapturePreviewRect(null); return; }
+
+    const CORNERS = [
+      [0,0,0],[1,0,0],[0,1,0],[1,1,0],
+      [0,0,1],[1,0,1],[0,1,1],[1,1,1],
+    ] as const;
+    const _v = new THREE.Vector3();
+
+    const tick = () => {
+      capturePreviewRafRef.current = requestAnimationFrame(tick);
+      const camera   = currentCameraRef.current;
+      const renderer = rendererRef.current;
+      const ids      = capturePreviewIdsRef.current;
+      if (!camera || !renderer || !ids.length) return;
+
+      const el   = renderer.domElement;
+      const cssW = el.clientWidth  || el.offsetWidth  || 1;
+      const cssH = el.clientHeight || el.offsetHeight || 1;
+
+      let unionMnX = Infinity, unionMxX = -Infinity, unionMnY = Infinity, unionMxY = -Infinity;
+      let anyHit = false;
+      for (const id of ids) {
+        const targetGroup = sceneObjectMeshesRef.current.get(id);
+        if (!targetGroup) continue;
+        const _boxTarget = targetGroup.getObjectByName('SaberMesh') ?? targetGroup;
+        const box = new THREE.Box3().setFromObject(_boxTarget);
+        if (box.isEmpty()) continue;
+        const sObj  = sceneObjectsRef.current.find(o => o.id === id);
+        const glowW = (sObj?.properties as any)?.glowWidth ?? 6;
+        box.expandByScalar(glowW * capturePreviewPaddingRef.current);
+        for (const [fx, fy, fz] of CORNERS) {
+          _v.set(
+            fx ? box.max.x : box.min.x,
+            fy ? box.max.y : box.min.y,
+            fz ? box.max.z : box.min.z,
+          ).project(camera);
+          const sx = ( _v.x + 1) * 0.5 * cssW;
+          const sy = (-_v.y + 1) * 0.5 * cssH;
+          if (sx < unionMnX) unionMnX = sx; if (sx > unionMxX) unionMxX = sx;
+          if (sy < unionMnY) unionMnY = sy; if (sy > unionMxY) unionMxY = sy;
+        }
+        anyHit = true;
+      }
+      if (!anyHit) { setCapturePreviewRect(null); return; }
+      const MARGIN = 1;
+      unionMnX = Math.max(0,    unionMnX - MARGIN); unionMnY = Math.max(0,    unionMnY - MARGIN);
+      unionMxX = Math.min(cssW, unionMxX + MARGIN); unionMxY = Math.min(cssH, unionMxY + MARGIN);
+      setCapturePreviewRect({ left: unionMnX, top: unionMnY, width: unionMxX - unionMnX, height: unionMxY - unionMnY });
+    };
+    tick();
+    return () => cancelAnimationFrame(capturePreviewRafRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [(capturePreviewObjectIds ?? []).join(',')]);
+  const selectionOutlineHelpersRef = useRef<Map<string, THREE.Group>>(new Map());
   const spineAttachmentMeshesRef = useRef<Map<string, THREE.Mesh>>(new Map());
   const spineLayerSpreadRef = useRef(0);
   // Geometry caches: rebuilt only when the mesh world-matrix changes, never per-render-frame
@@ -683,6 +1062,7 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   const endAnchorVertsCacheRef = useRef<Map<string, { verts: THREE.Vector3[]; key: string }>>(new Map());
   const spineAttachPixelDataRef = useRef<Map<string, SpineAttachmentMaskData | null>>(new Map());
   const quadViewportRef = useRef(false);
+  const lookThroughCameraRef = useRef(false);
   const quadCamerasRef = useRef<{ front: THREE.OrthographicCamera; top: THREE.OrthographicCamera; side: THREE.OrthographicCamera } | null>(null);
   type QuadPanel = 'top' | 'front' | 'side' | 'perspective';
   const [focusedQuadPanel, setFocusedQuadPanel] = useState<QuadPanel | null>(null);
@@ -718,6 +1098,7 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
       tintGradient?: TintStop[];
       sizeOverLife?: string;
       positionHistory?: THREE.Vector3[];
+      driftCopyMeshes?: THREE.Sprite[];
     }>;
     lastEmit: number;
   }>>(new Map());
@@ -731,6 +1112,15 @@ export const Scene3D = forwardRef<Scene3DRef, Scene3DProps>(({ drawMode, onDrawC
   const timelineInRef = useRef(timelineIn);
 const timelineOutRef = useRef(timelineOut);
   const physicsForceRef = useRef<PhysicsForce[]>(physicsForces);
+  // When non-null, flame/ember loops use this value instead of Date.now() so capture can drive time
+  const captureAnimTimeRef = useRef<number | null>(null);
+  const captureSequenceRef = useRef<{ frameCount: number, fps: number, frameIndex: number } | null>(null);
+  // Persistent ember particles per flame object id — survive across rAF ticks
+  const flameEmbersRef = useRef<Map<string, {
+    embers: { x0:number;y0:number;z0:number;vx:number;vy:number;vz:number;born:number;life:number }[];
+    lastSpawn: number[];
+    nextSpawn: number[];
+  }>>(new Map());
   // Rigid-body simulation state: velocity per scene-object id
   const rigidBodyStateRef = useRef<Map<string, { velocity: THREE.Vector3 }>>(new Map());
   // Snapshot of initial world positions captured the moment playback starts — used by resetRigidBodies
@@ -751,6 +1141,10 @@ const timelineOutRef = useRef(timelineOut);
   const selectedForceIdRef = useRef<string | null>(selectedForceId ?? null);
   const onManipulatorModeChangeRef = useRef(onManipulatorModeChange);
   useEffect(() => { onManipulatorModeChangeRef.current = onManipulatorModeChange; }, [onManipulatorModeChange]);
+  const onViewportRightClickRef = useRef(onViewportRightClick);
+  useEffect(() => { onViewportRightClickRef.current = onViewportRightClick; }, [onViewportRightClick]);
+  const quadPanelViewsRef = useRef(quadPanelViews);
+  useEffect(() => { quadPanelViewsRef.current = quadPanelViews; }, [quadPanelViews]);
   const isDraggingTransformRef = useRef(false);
     const isDrawingRef = useRef(false);
   // Tracks last-seen sprite key per emitter to detect changes and flush stale particles
@@ -972,6 +1366,24 @@ const timelineOutRef = useRef(timelineOut);
     selectedObjectIdRef.current = selectedObjectId;
   }, [selectedObjectId]);
 
+  // Keep ref in sync so event-handler closures can read current value
+  useEffect(() => {
+    drawBezierCurveModeRef.current = drawBezierCurveMode;
+  }, [drawBezierCurveMode]);
+
+  // Recolour selection outlines: green while in bezier draw mode, normal otherwise
+  useEffect(() => {
+    selectionOutlineHelpersRef.current.forEach((group) => {
+      group.traverse((child) => {
+        if ((child as any).material) {
+          const mat = (child as any).material as THREE.LineBasicMaterial;
+          mat.color.setHex(drawBezierCurveMode ? 0x44ff88 : 0xffcc33);
+          mat.needsUpdate = true;
+        }
+      });
+    });
+  }, [drawBezierCurveMode]);
+
   const getViewportSelectedIds = () => {
     const ids = new Set<string>();
     if (selectedObjectIds && selectedObjectIds.length > 0) {
@@ -984,24 +1396,38 @@ const timelineOutRef = useRef(timelineOut);
 
   const clearSelectionOutlines = () => {
     const scene = sceneRef.current;
-    selectionOutlineHelpersRef.current.forEach((helper) => {
-      if (scene) scene.remove(helper);
-      helper.geometry.dispose();
-      const material = helper.material;
-      if (Array.isArray(material)) material.forEach((m) => m.dispose());
-      else material.dispose();
+    selectionOutlineHelpersRef.current.forEach((group) => {
+      if (scene) scene.remove(group);
+      group.traverse((child) => {
+        if ((child as any).geometry) (child as any).geometry.dispose();
+        if ((child as any).material) {
+          const m = (child as any).material;
+          if (Array.isArray(m)) m.forEach((x: THREE.Material) => x.dispose()); else m.dispose();
+        }
+      });
     });
     selectionOutlineHelpersRef.current.clear();
   };
 
   const refreshSelectionOutlines = () => {
-    selectionOutlineHelpersRef.current.forEach((helper) => helper.update());
+    // Sync the highlight group's world transform to follow the mesh as it moves
+    selectionOutlineHelpersRef.current.forEach((group, id) => {
+      const mesh = sceneObjectMeshesRef.current.get(id);
+      if (!mesh) return;
+      mesh.updateWorldMatrix(true, false);
+      const pos = new THREE.Vector3();
+      const quat = new THREE.Quaternion();
+      const scl = new THREE.Vector3();
+      mesh.matrixWorld.decompose(pos, quat, scl);
+      group.position.copy(pos);
+      group.quaternion.copy(quat);
+      group.scale.copy(scl);
+    });
   };
 
   const rebuildSelectionOutlines = () => {
     const scene = sceneRef.current;
     if (!scene) return;
-
     clearSelectionOutlines();
 
     const ids = getViewportSelectedIds();
@@ -1009,18 +1435,70 @@ const timelineOutRef = useRef(timelineOut);
       const mesh = sceneObjectMeshesRef.current.get(id);
       if (!mesh) return;
 
-      const helper = new THREE.BoxHelper(mesh, index === 0 ? 0xffcc33 : 0x66b3ff);
-      helper.name = index === 0 ? 'selection-outline' : `selection-outline-${id}`;
-      helper.renderOrder = 999;
-      const material = helper.material as THREE.LineBasicMaterial;
-      material.depthTest = false;
-      material.transparent = true;
-      material.opacity = index === 0 ? 0.95 : 0.75;
-      material.toneMapped = false;
-      helper.visible = mesh.visible;
-      helper.update();
-      scene.add(helper);
-      selectionOutlineHelpersRef.current.set(id, helper);
+      const color = drawBezierCurveModeRef.current ? 0x44ff88 : (index === 0 ? 0xffcc33 : 0x66b3ff);
+      const makeMat = () => new THREE.LineBasicMaterial({
+        color,
+        depthTest: false,
+        transparent: true,
+        opacity: index === 0 ? 1.0 : 0.80,
+        toneMapped: false,
+      });
+
+      const group = new THREE.Group();
+      group.renderOrder = 999;
+
+      // Decompose the root mesh's world matrix so the group sits exactly on it.
+      // Children are added in the root's LOCAL space, so we only need root's world transform.
+      mesh.updateWorldMatrix(true, true);
+      const rootPos = new THREE.Vector3();
+      const rootQuat = new THREE.Quaternion();
+      const rootScl = new THREE.Vector3();
+      mesh.matrixWorld.decompose(rootPos, rootQuat, rootScl);
+      group.position.copy(rootPos);
+      group.quaternion.copy(rootQuat);
+      group.scale.copy(rootScl);
+
+      let hasMesh = false;
+
+      mesh.traverse((child) => {
+        if (child === mesh) return; // skip root itself
+
+        // Build a matrix that expresses the child's transform relative to root (in root-local space)
+        const relMatrix = new THREE.Matrix4()
+          .copy(mesh.matrixWorld).invert()
+          .multiply(child.matrixWorld);
+
+        if (child instanceof THREE.Mesh && child.geometry) {
+          hasMesh = true;
+          const edges = new THREE.EdgesGeometry(child.geometry, 15);
+          const lines = new THREE.LineSegments(edges, makeMat());
+          lines.applyMatrix4(relMatrix);
+          lines.renderOrder = 999;
+          group.add(lines);
+        }
+      });
+
+      if (!hasMesh) {
+        // Object is already wireframe-style (LineSegments/Line gizmos) — clone and recolour
+        mesh.traverse((child) => {
+          if (child === mesh) return;
+          if ((child instanceof THREE.LineSegments || child instanceof THREE.Line) && child.geometry) {
+            const relMatrix = new THREE.Matrix4()
+              .copy(mesh.matrixWorld).invert()
+              .multiply(child.matrixWorld);
+            const lines = new THREE.LineSegments(child.geometry, makeMat());
+            lines.applyMatrix4(relMatrix);
+            lines.renderOrder = 999;
+            group.add(lines);
+          }
+        });
+      }
+
+      // Safety fallback: if still empty (e.g. empty group), skip
+      if (group.children.length === 0) return;
+
+      scene.add(group);
+      selectionOutlineHelpersRef.current.set(id, group);
     });
   };
 
@@ -1129,7 +1607,7 @@ const timelineOutRef = useRef(timelineOut);
       statsDisplay.style.pointerEvents = 'none';
       statsDisplay.style.zIndex = '1000';
       statsDisplay.style.textShadow = '1px 1px 1px #000, -1px -1px 1px #000, 1px -1px 1px #000, -1px 1px 1px #000';
-      statsDisplay.innerText = 'Particles: 0 | Emitters: 0';
+      statsDisplay.innerText = 'Particles: 0 | Emitters: 0 | Sel: None';
       containerRef.current.appendChild(statsDisplay);
 
     // Transform controls setup
@@ -1264,6 +1742,7 @@ const timelineOutRef = useRef(timelineOut);
     ));
     const zLine = new THREE.Line(zGeometry, new THREE.LineBasicMaterial({ color: 0x0000ff, linewidth: 3 }));
     scene.add(zLine);
+    axisLinesRef.current = [xLine, yLine, zLine];
 
     // Create raycaster for handle detection
     const raycasterHandles = new THREE.Raycaster();
@@ -1415,7 +1894,8 @@ const timelineOutRef = useRef(timelineOut);
         }
         
         // Check if clicking on any object to select and start drag
-        if (!event.altKey && event.button === 0) {
+        // Blocked while bezier draw mode is active (prevents moving the surface mesh)
+        if (!event.altKey && event.button === 0 && !drawBezierCurveModeRef.current) {
           const rect = renderer.domElement.getBoundingClientRect();
           mouseNdcHandles.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
           mouseNdcHandles.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1627,6 +2107,13 @@ const timelineOutRef = useRef(timelineOut);
           marqueeRef.current.style.width = '0px';
           marqueeRef.current.style.height = '0px';
         }
+      }
+
+      // Bare RMB (no alt) → context / marking menu
+      if (!event.altKey && event.button === 2) {
+        event.preventDefault();
+        onViewportRightClickRef.current?.(event.clientX, event.clientY, focusedQuadPanelRef.current ?? undefined);
+        return;
       }
 
       const isRotateStart = event.altKey && event.button === 0;
@@ -1920,8 +2407,42 @@ const timelineOutRef = useRef(timelineOut);
       const sensitivity = 0.01;
 
       if (mouseStateRef.current.altKey && mouseStateRef.current.button === 0) {
-        // Rotate with alt+lmb (only in perspective mode)
-        if (!isOrthoRef.current) {
+        // Rotate with alt+lmb
+        if (lookThroughCameraRef.current) {
+          // In camera mode: orbit the Camera scene object around its target
+          const camObj = sceneObjectsRef.current.find(o => o.type === 'Camera');
+          if (camObj) {
+            const targetObj = sceneObjectsRef.current.find(o => o.type === 'CameraTarget' && o.parentId === camObj.id);
+            const targetMesh = targetObj ? sceneObjectMeshesRef.current.get(targetObj.id) : null;
+            const targetPos = new THREE.Vector3();
+            if (targetMesh) {
+              targetMesh.getWorldPosition(targetPos);
+            } else {
+              const cp2 = (camObj.properties as any) ?? {};
+              targetPos.set(cp2.targetX ?? 0, cp2.targetY ?? 0, cp2.targetZ ?? 0);
+            }
+            // Compute current spherical coords of camera around target
+            const camPos = new THREE.Vector3(camObj.position.x, camObj.position.y, camObj.position.z);
+            const offset = camPos.clone().sub(targetPos);
+            const r = Math.max(10, offset.length());
+            let theta = Math.atan2(offset.x, offset.z);
+            let phi = Math.acos(Math.max(-1, Math.min(1, offset.y / r)));
+            theta -= deltaX * sensitivity;
+            phi -= deltaY * sensitivity;
+            phi = Math.max(0.05, Math.min(Math.PI - 0.05, phi));
+            const newOffset = new THREE.Vector3(
+              r * Math.sin(phi) * Math.sin(theta),
+              r * Math.cos(phi),
+              r * Math.sin(phi) * Math.cos(theta)
+            );
+            const newPos = targetPos.clone().add(newOffset);
+            camObj.position.x = newPos.x; camObj.position.y = newPos.y; camObj.position.z = newPos.z;
+            const camMesh = sceneObjectMeshesRef.current.get(camObj.id);
+            if (camMesh) camMesh.position.copy(newPos);
+            onObjectTransformRef.current?.(camObj.id, { x: newPos.x, y: newPos.y, z: newPos.z }, camObj.rotation, camObj.scale);
+          }
+        } else if (!isOrthoRef.current) {
+          // Normal perspective orbit
           cameraState.isAnimating = false;
           cameraState.theta -= deltaX * sensitivity;
           cameraState.phi -= deltaY * sensitivity;
@@ -1931,19 +2452,40 @@ const timelineOutRef = useRef(timelineOut);
         }
       } else if (mouseStateRef.current.altKey && mouseStateRef.current.button === 2) {
         // Pan with alt+rmb
-        const panSpeed = Math.max(0.01, cameraState.radius * 0.002);
-
-        camera.updateMatrixWorld();
-        panRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
-        panUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
-        panDelta
-          .copy(panRight)
-          .multiplyScalar(-deltaX * panSpeed)
-          .addScaledVector(panUp, deltaY * panSpeed);
-
-        cameraState.viewOffsetX += panDelta.x;
-        cameraState.viewOffsetY += panDelta.y;
-        cameraState.viewOffsetZ += panDelta.z;
+        if (lookThroughCameraRef.current) {
+          // In camera mode: truck the Camera scene object so the gizmo moves
+          const camObj = sceneObjectsRef.current.find(o => o.type === 'Camera');
+          if (camObj) {
+            const panSpeed = Math.max(0.01, cameraStateRef.current.radius * 0.002);
+            camera.updateMatrixWorld();
+            panRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+            panUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+            panDelta
+              .copy(panRight).multiplyScalar(-deltaX * panSpeed)
+              .addScaledVector(panUp, deltaY * panSpeed);
+            const newPos = {
+              x: camObj.position.x + panDelta.x,
+              y: camObj.position.y + panDelta.y,
+              z: camObj.position.z + panDelta.z,
+            };
+            camObj.position.x = newPos.x; camObj.position.y = newPos.y; camObj.position.z = newPos.z;
+            const camMesh = sceneObjectMeshesRef.current.get(camObj.id);
+            if (camMesh) camMesh.position.set(newPos.x, newPos.y, newPos.z);
+            onObjectTransformRef.current?.(camObj.id, newPos, camObj.rotation, camObj.scale);
+          }
+        } else {
+          const panSpeed = Math.max(0.01, cameraState.radius * 0.002);
+          camera.updateMatrixWorld();
+          panRight.setFromMatrixColumn(camera.matrixWorld, 0).normalize();
+          panUp.setFromMatrixColumn(camera.matrixWorld, 1).normalize();
+          panDelta
+            .copy(panRight)
+            .multiplyScalar(-deltaX * panSpeed)
+            .addScaledVector(panUp, deltaY * panSpeed);
+          cameraState.viewOffsetX += panDelta.x;
+          cameraState.viewOffsetY += panDelta.y;
+          cameraState.viewOffsetZ += panDelta.z;
+        }
       }
 
       mouseStateRef.current.x = event.clientX;
@@ -2063,7 +2605,7 @@ const timelineOutRef = useRef(timelineOut);
       const isModifierAction = mouseStateRef.current.altKey || mouseStateRef.current.shiftKey;
 
       // Only handle selection if it was a click, not during transform dragging, and no modifiers
-      if (wasClick && !isModifierAction && !isDraggingTransformRef.current && containerRef.current) {
+      if (wasClick && !isModifierAction && !isDraggingTransformRef.current && !drawBezierCurveModeRef.current && containerRef.current) {
         const rect = renderer.domElement.getBoundingClientRect();
         mouseNdc.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         mouseNdc.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -2104,6 +2646,36 @@ const timelineOutRef = useRef(timelineOut);
 
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
+
+      if (lookThroughCameraRef.current) {
+        // Dolly the Camera scene object along the eye→target axis
+        const camObj = sceneObjectsRef.current.find(o => o.type === 'Camera');
+        if (camObj) {
+          const targetObj = sceneObjectsRef.current.find(o => o.type === 'CameraTarget' && o.parentId === camObj.id);
+          const targetMesh = targetObj ? sceneObjectMeshesRef.current.get(targetObj.id) : null;
+          const targetPos = new THREE.Vector3();
+          if (targetMesh) {
+            targetMesh.getWorldPosition(targetPos);
+          } else {
+            const cp2 = (camObj.properties as any) ?? {};
+            targetPos.set(cp2.targetX ?? 0, cp2.targetY ?? 0, cp2.targetZ ?? 0);
+          }
+          const camPos = new THREE.Vector3(camObj.position.x, camObj.position.y, camObj.position.z);
+          const dir = camPos.clone().sub(targetPos);
+          const dist = Math.max(0.01, dir.length());
+          dir.normalize();
+          const dolly = event.deltaY * sceneSettingsRef.current.zoomSpeed / 100;
+          // Clamp: camera can't pass through the target
+          const newDist = Math.max(10, dist + dolly);
+          const newPos = targetPos.clone().addScaledVector(dir, newDist);
+          camObj.position.x = newPos.x; camObj.position.y = newPos.y; camObj.position.z = newPos.z;
+          const camMesh = sceneObjectMeshesRef.current.get(camObj.id);
+          if (camMesh) camMesh.position.copy(newPos);
+          onObjectTransformRef.current?.(camObj.id, { x: newPos.x, y: newPos.y, z: newPos.z }, camObj.rotation, camObj.scale);
+          return;
+        }
+      }
+
       cameraStateRef.current.radius += event.deltaY * sceneSettingsRef.current.zoomSpeed / 100;
       cameraStateRef.current.radius = Math.max(10, Math.min(sceneExtent * 10, cameraStateRef.current.radius));
     };
@@ -2141,46 +2713,55 @@ const timelineOutRef = useRef(timelineOut);
     
     focusSelectedObjectRef.current = applyFocusSelectedObject;
 
+    const setManipMode = (mode: 'translate' | 'rotate' | 'scale') => {
+      if (transformControlsRef.current) transformControlsRef.current.setMode(mode);
+      manipulatorModeRef.current = mode;
+      setManipulatorMode(mode);
+      onManipulatorModeChangeRef.current?.(mode);
+    };
+
     const onKeyUp = (event: KeyboardEvent) => {
-      const isAKey = event.code === 'KeyA' || event.key.toLowerCase() === 'a';
-      const isFKey = event.code === 'KeyF' || event.key.toLowerCase() === 'f';
-      const isWKey = event.code === 'KeyW' || event.key.toLowerCase() === 'w';
-      const isEKey = event.code === 'KeyE' || event.key.toLowerCase() === 'e';
-      const isRKey = event.code === 'KeyR' || event.key.toLowerCase() === 'r';
+      // Don't fire when typing in an input
+      const tgt = event.target as HTMLElement | null;
+      if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
 
-      if (isAKey) {
+      const k = event.key.toLowerCase();
+      const code = event.code;
+
+      // A — frame scene center
+      if (code === 'KeyA' || k === 'a') { event.preventDefault(); applyFocusSceneCenter(); return; }
+      // F — frame selected
+      if (code === 'KeyF' || k === 'f') { event.preventDefault(); applyFocusSelectedObject(); return; }
+
+      // Q — select mode (deselect / reset)
+      if (code === 'KeyQ' || k === 'q') {
         event.preventDefault();
-        applyFocusSceneCenter();
+        onObjectSelect(null);
+        selectedObjectIdRef.current = null;
+        selectedObjectRef.current = null;
         return;
       }
 
-      if (isFKey) {
-        event.preventDefault();
-        applyFocusSelectedObject();
+      // Escape — deselect
+      if (k === 'escape') {
+        onObjectSelect(null);
+        selectedObjectIdRef.current = null;
+        selectedObjectRef.current = null;
         return;
       }
 
-      // Transform controls mode switching
-      if (transformControlsRef.current) {
-        if (isWKey) {
-          event.preventDefault();
-          transformControlsRef.current.setMode('translate');
-          manipulatorModeRef.current = 'translate';
-          setManipulatorMode('translate');
-          onManipulatorModeChangeRef.current?.('translate');
-        } else if (isEKey) {
-          event.preventDefault();
-          transformControlsRef.current.setMode('rotate');
-          manipulatorModeRef.current = 'rotate';
-          setManipulatorMode('rotate');
-          onManipulatorModeChangeRef.current?.('rotate');
-        } else if (isRKey) {
-          event.preventDefault();
-          transformControlsRef.current.setMode('scale');
-          manipulatorModeRef.current = 'scale';
-          setManipulatorMode('scale');
-          onManipulatorModeChangeRef.current?.('scale');
-        }
+      // Tool mode keys — work with OR without transform-controls gizmo
+      // W / G  → Move / Translate
+      if (code === 'KeyW' || code === 'KeyG' || k === 'w' || k === 'g') {
+        event.preventDefault(); setManipMode('translate'); return;
+      }
+      // E / R  → Rotate  (R matches the UI tooltip label)
+      if (code === 'KeyE' || code === 'KeyR' || k === 'e' || k === 'r') {
+        event.preventDefault(); setManipMode('rotate'); return;
+      }
+      // S / T  → Scale
+      if (code === 'KeyS' || code === 'KeyT' || k === 's' || k === 't') {
+        event.preventDefault(); setManipMode('scale'); return;
       }
     };
 
@@ -2235,8 +2816,104 @@ const timelineOutRef = useRef(timelineOut);
         }
       }
 
-      // Update camera position based on type
-      if (activeCamera instanceof THREE.PerspectiveCamera) {
+      // Always orient every Camera gizmo toward its target (runs regardless of lookThrough mode)
+      const allCamObjs = sceneObjectsRef.current.filter(o => o.type === 'Camera');
+      for (const camObj of allCamObjs) {
+        const camGizmo = sceneObjectMeshesRef.current.get(camObj.id);
+        if (!camGizmo) continue;
+        const camProps = (camObj.properties as any) ?? {};
+        const orientToPath = !!camProps.pathAnimOrient && !!camProps.pathAnimPathId;
+
+        // Resolve target world position from CameraTarget child (or fallback)
+        const camTargetObj = sceneObjectsRef.current.find(
+          o => o.type === 'CameraTarget' && o.parentId === camObj.id
+        );
+        const camTargetMesh = camTargetObj ? sceneObjectMeshesRef.current.get(camTargetObj.id) : null;
+        const targetWorldPos = new THREE.Vector3();
+        if (camTargetMesh) {
+          camTargetMesh.getWorldPosition(targetWorldPos);
+        } else {
+          targetWorldPos.set(camProps.targetX ?? 0, camProps.targetY ?? 0, camProps.targetZ ?? 0);
+        }
+
+        if (!camProps.pathAnimPathId && !(isDraggingTransformRef.current && selectedObjectIdRef.current === camObj.id)) {
+          // Static camera — sync gizmo position from SceneObject (skip while user is dragging it)
+          const cp = camObj.position;
+          camGizmo.position.set(cp.x, cp.y, cp.z);
+        }
+        // Always orient gizmo toward target unless path-orient overrides it
+        if (!orientToPath) {
+          const gizmoWorldPos = new THREE.Vector3();
+          camGizmo.getWorldPosition(gizmoWorldPos);
+          // Only lookAt if target is not at the same position (avoids degenerate quaternion)
+          if (gizmoWorldPos.distanceToSquared(targetWorldPos) > 0.01) {
+            camGizmo.lookAt(targetWorldPos);
+          }
+        }
+        // Update target line endpoint
+        if ((camGizmo as any).isCameraObjectRender) {
+          const tLine = camGizmo.children.find((c: any) => c.isCameraTargetLine) as THREE.Line | undefined;
+          if (tLine) {
+            const localEnd = camGizmo.worldToLocal(targetWorldPos.clone());
+            const arr = tLine.geometry.attributes.position.array as Float32Array;
+            arr[3] = localEnd.x; arr[4] = localEnd.y; arr[5] = localEnd.z;
+            tLine.geometry.attributes.position.needsUpdate = true;
+          }
+        }
+      }
+
+      // If "Look Through Camera" is enabled, drive the perspective camera from the Camera scene object
+      const activeCamObj = lookThroughCameraRef.current
+        ? sceneObjectsRef.current.find(o => o.type === 'Camera')
+        : undefined;
+      if (activeCamObj && activeCamera instanceof THREE.PerspectiveCamera) {
+        const camProps = (activeCamObj.properties as any) ?? {};
+        const newFov = camProps.fov ?? 75;
+        if (Math.abs(activeCamera.fov - newFov) > 0.01) {
+          activeCamera.fov = newFov;
+          activeCamera.updateProjectionMatrix();
+        }
+
+        const camTargetObj = sceneObjectsRef.current.find(
+          o => o.type === 'CameraTarget' && o.parentId === activeCamObj.id
+        );
+        const camTargetMesh = camTargetObj ? sceneObjectMeshesRef.current.get(camTargetObj.id) : null;
+        const targetWorldPos = new THREE.Vector3();
+        if (camTargetMesh) {
+          camTargetMesh.getWorldPosition(targetWorldPos);
+        } else {
+          targetWorldPos.set(camProps.targetX ?? 0, camProps.targetY ?? 0, camProps.targetZ ?? 0);
+        }
+
+        const camGizmo = sceneObjectMeshesRef.current.get(activeCamObj.id);
+        const hasPath = !!camProps.pathAnimPathId;
+        const orientToPath = !!camProps.pathAnimOrient;
+
+        if (hasPath && camGizmo) {
+          const worldPos = new THREE.Vector3();
+          camGizmo.getWorldPosition(worldPos);
+          activeCamera.position.copy(worldPos);
+          if (orientToPath) {
+            const worldQuat = new THREE.Quaternion();
+            camGizmo.getWorldQuaternion(worldQuat);
+            activeCamera.quaternion.copy(worldQuat);
+          } else {
+            activeCamera.lookAt(targetWorldPos);
+          }
+        } else {
+          // Use gizmo mesh position as source of truth (reflects live drag; falls back to state)
+          if (camGizmo) {
+            activeCamera.position.copy(camGizmo.position);
+          } else {
+            const cp = activeCamObj.position;
+            activeCamera.position.set(cp.x, cp.y, cp.z);
+          }
+          activeCamera.lookAt(targetWorldPos);
+        }
+      }
+
+      // Update camera position based on type (only when NOT in look-through-camera mode)
+      if (!activeCamObj && activeCamera instanceof THREE.PerspectiveCamera) {
         // Update perspective camera position based on spherical coordinates
         const sin_phi = Math.sin(cameraState.phi);
         const cos_phi = Math.cos(cameraState.phi);
@@ -2259,7 +2936,8 @@ const timelineOutRef = useRef(timelineOut);
         activeCamera.position.z = orbitTarget.z + cameraState.radius * sin_phi * cos_theta;
 
         activeCamera.lookAt(orbitTarget.x, orbitTarget.y, orbitTarget.z);
-      } else if (activeCamera instanceof THREE.OrthographicCamera) {
+      }
+      if (activeCamera instanceof THREE.OrthographicCamera) {
         // Update orthographic camera - apply pan offsets
         const basePos = new THREE.Vector3();
         const lookAtPos = new THREE.Vector3();
@@ -2776,7 +3454,10 @@ const timelineOutRef = useRef(timelineOut);
 
       const clearAllParticles = () => {
         particleSystemsRef.current.forEach((particleSystem) => {
-          particleSystem.particles.forEach((particle) => scene.remove(particle.mesh));
+          particleSystem.particles.forEach((particle) => {
+            scene.remove(particle.mesh);
+            particle.driftCopyMeshes?.forEach(d => scene.remove(d));
+          });
           particleSystem.particles = [];
         });
       };
@@ -3192,9 +3873,15 @@ const timelineOutRef = useRef(timelineOut);
               const safeEmissionRate = isAdaptive ? Math.min(rawSafeEmissionRate, maxContinuousEmission) : rawSafeEmissionRate;
               const emissionInterval = 1000 / safeEmissionRate;
 
-              // Use connected shapes as emission sources if available, otherwise just use the emitter itself
-              const childShapes = Array.from(sceneObjectsRef.current.values()).filter(o =>
-                  o.parentId === obj.id && o.type !== 'PathPoint' && o.type !== 'Emitter' && o.type !== 'Force'
+              // Use connected emission shapes as sources if available, otherwise the emitter itself.
+              // Exclude Path children (those drive pathAnim, not area emission) and also
+              // Force / PathPoint / Emitter children which are never emission volumes.
+              const childShapes = sceneObjectsRef.current.filter(o =>
+                  o.parentId === obj.id &&
+                  o.type !== 'PathPoint' &&
+                  o.type !== 'Emitter' &&
+                  o.type !== 'Force' &&
+                  o.type !== 'Path'
                 );
               const activeSources = childShapes.length > 0 ? childShapes : [obj];
               // Dynamic sourceExtent placeholder — computed per-source below
@@ -3208,16 +3895,31 @@ const timelineOutRef = useRef(timelineOut);
                 
                 const sourceNode = activeSources[Math.floor(Math.random() * activeSources.length)];
                 const sourceProps = (sourceNode.properties ?? {}) as Record<string, any>;
-                  let emitterType = sourceNode.id === obj.id
-                    ? (sourceProps.emitterType ?? 'point')   // standalone emitter: use its own setting
-                    : 'mesh_bounds';                          // child shape fallback: bounding box
-                  if (sourceNode.type === 'Path') emitterType = 'curve';
-                  else if (sourceNode.type === 'Cube' || sourceNode.type === 'Box') emitterType = 'cube';
-                  else if (sourceNode.type === 'Sphere' || sourceNode.type === 'Torus') emitterType = 'ball';
-                  else if (sourceNode.type === 'Cylinder' || sourceNode.type === 'Cone') emitterType = 'ball';
-                  else if (sourceNode.type === 'Plane' || sourceNode.type === 'Rectangle') emitterType = 'square';
-                  else if (sourceNode.type === 'Circle') emitterType = 'circle';
-                  else if (sourceNode.id === obj.id) emitterType = sourceProps.emitterType ?? 'point'; // own emitter type
+                  // Determine emission type.
+                  // EmitterShape children inherit the emitter's configured type so particles
+                  // spread across the shape volume using the same logic as a standalone emitter.
+                  let emitterType: string;
+                  if (sourceNode.id === obj.id) {
+                    emitterType = sourceProps.emitterType ?? 'point';
+                  } else if (sourceNode.type === 'EmitterShape') {
+                    // Use the emitter's own shape type so the shape acts as the emission volume
+                    emitterType = (emitterProps.emitterType ?? 'cube');
+                  } else if (sourceNode.type === 'Path') {
+                    emitterType = 'curve';
+                  } else if (sourceNode.type === 'Cube' || sourceNode.type === 'Box') {
+                    emitterType = 'cube';
+                  } else if (sourceNode.type === 'Sphere' || sourceNode.type === 'Torus') {
+                    emitterType = 'ball';
+                  } else if (sourceNode.type === 'Cylinder' || sourceNode.type === 'Cone') {
+                    emitterType = 'ball';
+                  } else if (sourceNode.type === 'Plane' || sourceNode.type === 'Rectangle') {
+                    emitterType = 'square';
+                  } else if (sourceNode.type === 'Circle') {
+                    emitterType = 'circle';
+                  } else {
+                    // Generic child shape: use emitter's configured type
+                    emitterType = emitterProps.emitterType ?? 'cube';
+                  }
                 const emissionMode = sourceProps.emissionMode ?? emitterProps.emissionMode ?? 'volume';
                 const isSurfaceMode = emissionMode === 'surface';
                 const isEdgeMode = emissionMode === 'edge';
@@ -3676,8 +4378,12 @@ const timelineOutRef = useRef(timelineOut);
                     // Teleport mesh back to a random active source position (not necessarily
                     // the emitter itself when child shapes are driving emission).
                     {
-                      const recycleSources = sceneObjectsRef.current.filter(o =>
-                        o.parentId === obj.id && o.type !== 'PathPoint' && o.type !== 'Emitter' && o.type !== 'Force'
+                const recycleSources = sceneObjectsRef.current.filter(o =>
+                        o.parentId === obj.id &&
+                        o.type !== 'PathPoint' &&
+                        o.type !== 'Emitter' &&
+                        o.type !== 'Force' &&
+                        o.type !== 'Path'
                       );
                       const recycleSource = recycleSources.length > 0
                         ? recycleSources[Math.floor(Math.random() * recycleSources.length)]
@@ -4246,9 +4952,84 @@ const timelineOutRef = useRef(timelineOut);
           // instead of being abruptly culled.
           const visible = p.age < p.lifetime;
           p.mesh.visible = visible && (sceneSettingsRef.current.showParticles ?? true);
+          // Mirror visibility onto drift ghost copies — they are driven by the drift loop below
+          if (p.driftCopyMeshes && !visible) p.driftCopyMeshes.forEach(d => { d.visible = false; });
         });
       });
       // ── End lifecycle visibility ─────────────────────────────────────────────────────────────
+
+      // ── Drift Ghost Copies ────────────────────────────────────────────────────────────────────
+      const driftNow = (captureAnimTimeRef.current ?? Date.now()) / 1000;
+      sceneObjectsRef.current.forEach(driftObj => {
+        if (driftObj.type !== 'Emitter') return;
+        const ep = (driftObj.properties ?? {}) as any;
+        if (!ep.driftCopiesEnabled) {
+          // Ensure any leftover ghosts are hidden when feature is toggled off
+          const ps2 = particleSystemsRef.current.get(driftObj.id);
+          ps2?.particles.forEach(p => p.driftCopyMeshes?.forEach(d => { d.visible = false; }));
+          return;
+        }
+        const ps = particleSystemsRef.current.get(driftObj.id);
+        if (!ps) return;
+        const count   = Math.max(1, Math.min(8, Number(ep.driftCopiesCount ?? 3)));
+        const spacing = Number(ep.driftCopiesSpacing ?? 20);
+        const speed   = Number(ep.driftCopiesSpeed ?? 40);
+        const totalRange = count * spacing;
+        const emitterGlow = Boolean(ep.particleGlow ?? false);
+        const blending = emitterGlow ? THREE.AdditiveBlending : THREE.NormalBlending;
+        ps.particles.forEach(particle => {
+          // Build or rebuild ghost pool when count changes
+          if (!particle.driftCopyMeshes || particle.driftCopyMeshes.length !== count) {
+            particle.driftCopyMeshes?.forEach(d => scene.remove(d));
+            const srcMat0 = particle.mesh instanceof THREE.Sprite ? particle.mesh.material as THREE.SpriteMaterial : null;
+            const ghosts: THREE.Sprite[] = [];
+            for (let gi = 0; gi < count; gi++) {
+              const mat = new THREE.SpriteMaterial({
+                transparent: true,
+                depthWrite: false,
+                blending,
+                map: srcMat0?.map ?? null,
+                color: srcMat0 ? srcMat0.color.clone() : new THREE.Color('#ffffff'),
+              });
+              const ghost = new THREE.Sprite(mat);
+              ghost.renderOrder = 1;
+              ghost.visible = false;
+              scene.add(ghost);
+              ghosts.push(ghost);
+            }
+            particle.driftCopyMeshes = ghosts;
+          }
+
+          if (!particle.mesh.visible) {
+            particle.driftCopyMeshes.forEach(d => { d.visible = false; });
+            return;
+          }
+
+          const srcMat = particle.mesh instanceof THREE.Sprite ? particle.mesh.material as THREE.SpriteMaterial : null;
+          const baseOpacity = srcMat?.opacity ?? 0;
+          const ppos = particle.mesh.position;
+          const baseScaleX = Math.abs((particle.mesh as THREE.Sprite).scale?.x ?? 10);
+          const baseScaleY = (particle.mesh as THREE.Sprite).scale?.y ?? 10;
+
+          particle.driftCopyMeshes.forEach((ghost, gi) => {
+            const step = gi + 1;
+            // Continuously-scrolling upward offset per copy, each at a different phase
+            const phase = ((driftNow * speed + step * spacing) % (totalRange + spacing));
+            ghost.position.set(ppos.x, ppos.y + phase, ppos.z + 0.5);
+            const fadeFactor = Math.max(0, 1 - step / (count + 1));
+            ghost.material.opacity = baseOpacity * fadeFactor * 0.72;
+            ghost.material.blending = blending;
+            if (srcMat?.map && ghost.material.map !== srcMat.map) {
+              ghost.material.map = srcMat.map;
+              ghost.material.needsUpdate = true;
+            }
+            if (srcMat) ghost.material.color.copy(srcMat.color);
+            ghost.scale.set(baseScaleX, baseScaleY, 1);
+            ghost.visible = true;
+          });
+        });
+      });
+      // ── End Drift Ghost Copies ────────────────────────────────────────────────────────────────
 
       // ── Lightning live preview ───────────────────────────────────────────────────────────────
       sceneObjectsRef.current.forEach(lObj => {
@@ -4360,9 +5141,12 @@ const timelineOutRef = useRef(timelineOut);
           : fallbackEnd;
 
         const lMode  = (lProps.mode ?? 'loop-strike') as 'strike' | 'loop' | 'loop-strike';
-        const exportState = lightningViewportExportRef.current?.lightningId === lObj.id
+        let exportState = lightningViewportExportRef.current?.lightningId === lObj.id
           ? lightningViewportExportRef.current
           : null;
+        if (!exportState && captureSequenceRef.current !== null) {
+          exportState = captureSequenceRef.current as any;
+        }
 
         // ── Per-mode seed / subset / opacityScale ──────────────────────────
         let lSeed         = 777;
@@ -4408,7 +5192,8 @@ const timelineOutRef = useRef(timelineOut);
             }
           }
         } else if (lMode === 'loop') {
-          lSeed = isPlayingRef.current ? (Date.now() / 80) | 0 : 777;
+          // Always animate in real-time so the bolt flickers even when not playing
+          lSeed = (Date.now() / 80) | 0;
 
         } else if (lMode === 'strike') {
           // Grows via timeline scrub
@@ -4427,7 +5212,8 @@ const timelineOutRef = useRef(timelineOut);
           }
           const ls = loopStrikeStateRef.current.get(lObj.id)!;
 
-          if (isPlayingRef.current) {
+          // Always advance phase in real-time — bolt animates in viewport even when not playing
+          {
             const phaseDur = ls.phase === 'growing' ? strikeDur
                            : ls.phase === 'holding' ? holdDur
                            : fadeDur;
@@ -5080,7 +5866,7 @@ const timelineOutRef = useRef(timelineOut);
                   + lightningLoopNoise(t, noisePhase, glowNoiseScale) * glowNoiseIntensity * 1.3)
           : undefined;
         // ────────────────────────────────────────────────────────────────────────
-        const glowTex = buildLightningGlowTex(parsedGlow, parsedCore);
+        const glowTex = buildLightningGlowTex(parsedGlow, parsedCore, String(lProps.flareShape || 'circle'));
 
         /**
          * Places one THREE.Sprite per sample point along `bolt`.
@@ -5211,8 +5997,51 @@ const timelineOutRef = useRef(timelineOut);
 
       // ── Flame live preview ───────────────────────────────────────────────────────────────────
       {
-        const fAnimT = Date.now() / 1000.0;
+        const fAnimT = captureAnimTimeRef.current ?? (Date.now() % 10000000) / 1000.0;
         const FLAME_PTS = 10; // control points per tendril
+
+        // PRE-PASS: Collect all active tendril positions to calculate heat density
+        const globalTendrilBases: { x: number; z: number; weight: number }[] = [];
+        sceneObjectsRef.current.forEach(fObj => {
+          if (fObj.type !== 'Flame') return;
+          const fp = (fObj.properties ?? {}) as any;
+          const numT = fp.numTendrils ?? 5;
+          const speed = fp.speed ?? 1.4;
+          const fw = fp.width ?? 30;
+          const fBase = { x: fObj.position.x, y: fObj.position.y, z: fObj.position.z };
+          
+          let pathCurveF: THREE.Curve<THREE.Vector3> | null = null;
+          const targetPathIdF = fp.targetPathId as string | undefined;
+          if (targetPathIdF) {
+            const pathMeshF = sceneObjectMeshesRef.current.get(targetPathIdF) as any;
+            if (pathMeshF?.pathCurve) pathCurveF = pathMeshF.pathCurve as THREE.Curve<THREE.Vector3>;
+          }
+          
+          for (let ti = 0; ti < numT; ti++) {
+            const slotSeed = ti * 2.399963;
+            const minLife = 1.2 / Math.max(0.1, speed);
+            const maxLife = 3.8 / Math.max(0.1, speed);
+            const pr1 = Math.abs(Math.sin(slotSeed * 13.7 + 0.5));
+            const lifespan = minLife + pr1 * (maxLife - minLife);
+            const birthOffset = Math.abs(Math.sin(slotSeed * 7.3 + 1.1)) * lifespan;
+            
+            let bx = fBase.x, bz = fBase.z;
+            if (pathCurveF) {
+              const pathT = ( (numT > 1 ? ti / (numT - 1) : 0) + (fAnimT * Math.max(0.1, speed) * (fp.pathSpeed ?? 0.05)) ) % 1.0;
+              const pathPt = pathCurveF.getPointAt(Math.min(0.9999, pathT));
+              bx = pathPt.x; bz = pathPt.z;
+            }
+            const spreadAngle = (numT > 1 ? (ti / (numT - 1)) : 0.5) * Math.PI * 2 + Math.floor((fAnimT + birthOffset) / lifespan) * 0.97;
+            const baseR = fw * 0.35 * (numT > 1 ? 1 : 0);
+            const baseOffX = Math.cos(spreadAngle + slotSeed) * baseR;
+            const baseOffZ = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
+            const pZ1 = fp.placementZ || 'center';
+            const offsetZ1 = pZ1 === 'front' ? 15 : (pZ1 === 'back' ? -15 : 0);
+            bz += offsetZ1;
+            
+            globalTendrilBases.push({ x: bx + baseOffX, z: bz + baseOffZ, weight: fw });
+          }
+        });
 
         sceneObjectsRef.current.forEach(fObj => {
           if (fObj.type !== 'Flame') return;
@@ -5227,6 +6056,13 @@ const timelineOutRef = useRef(timelineOut);
             fGroup.remove(child);
           }
           fGroup.position.set(0, 0, 0);
+
+          // ── Ember persistent state for this flame ──────────────────────────
+          if (!flameEmbersRef.current.has(fObj.id)) {
+            flameEmbersRef.current.set(fObj.id, { embers: [], lastSpawn: [], nextSpawn: [] });
+          }
+          const emberState = flameEmbersRef.current.get(fObj.id)!;
+          const EMBER_DRAG = 0.55; // exponential vertical drag coefficient — embers rise then slow, never fall
 
           const fp = (fObj.properties ?? {}) as any;
           const flameHeight   = fp.height            ?? 80;
@@ -5248,21 +6084,49 @@ const timelineOutRef = useRef(timelineOut);
           const coreBlurF      = Math.max(0, Math.min(1, fp.coreBlur ?? 0.2));
           // glowFalloff: vertical opacity gradient — 0=flat, higher=more concentrated at base
           const glowFalloffF   = Math.max(0, fp.glowFalloff ?? 1.2);
+          // detachRate: 0 = tendrils stay rooted; 1 = original detach+fly-up behaviour
+          const detachRateF    = Math.max(0, Math.min(1, fp.detachRate ?? 0.5));
+          const emberFrequencyF = Math.max(0, Math.min(1, fp.emberFrequency ?? 0.2));
+          const emberSizeF   = Math.max(0.05, fp.emberSize   ?? 1.0);
+          const emberLifeF   = Math.max(0.1,  fp.emberLife   ?? 1.0);
+          // emberOffset: 0 = spawn only at tip; 1 = spawn anywhere along the full tendril
+          const emberOffsetF = Math.max(0, Math.min(1, fp.emberOffset ?? 0.0));
+          // emberSpeed: independent velocity scale for embers (1 = moderate, decoupled from turbulence speed)
+          const emberSpeedF  = Math.max(0.01, fp.emberSpeed ?? 1.0);
+          // Purge embers older than their lifetime before this tick
+          emberState.embers = emberState.embers.filter(e => fAnimT - e.born < e.life);
 
-          const hexStrToNum = (s: string) => parseInt(s.replace('#', ''), 16);
-          const coreNum = hexStrToNum(coreHexF);
-          const glowNum = hexStrToNum(glowHexF);
-          // glow texture: inner = coreColor, outer = glowColor (no forced white)
-          const gTexF = buildFlameTex(coreNum, glowNum);
-          // core texture: full core color family, slightly brightened at centre
-          const cTexF = buildFlameTex(coreNum, coreNum);
+
+          const hexStrToNum   = (s: string) => parseInt(s.replace('#', ''), 16);
+          const coreNum       = hexStrToNum(coreHexF);
+          const glowNum       = hexStrToNum(glowHexF);
+          // Gradient top colours (default = same as base → flat colour if not set)
+          const glowTopNum    = hexStrToNum(fp.glowColorTop  ?? glowHexF);
+          const coreTopNum    = hexStrToNum(fp.coreColorTop  ?? coreHexF);
+          // Convert hex to THREE.Color for per-sprite lerp
+          const hexToColor    = (n: number) => new THREE.Color(((n>>16)&0xff)/255, ((n>>8)&0xff)/255, (n&0xff)/255);
+          const glowColorA    = hexToColor(glowNum);
+          const glowColorB    = hexToColor(glowTopNum);
+          const coreColorA    = hexToColor(coreNum);
+          const coreColorB    = hexToColor(coreTopNum);
+          // Shared shape texture — colour is applied per-sprite via mat.color
+          const fShapeTex     = buildFlameTexShape(String(fp.flareShape || 'circle'));
 
           const fBase = { x: fObj.position.x, y: fObj.position.y, z: fObj.position.z };
 
-          // Sprite chain helper (mirrors addGlowChain but for Flame group)
+          // Optional: distribute tendril origins along a target path curve
+          const targetPathIdF = fp.targetPathId as string | undefined;
+          let pathCurveF: THREE.Curve<THREE.Vector3> | null = null;
+          if (targetPathIdF) {
+            const pathMeshF = sceneObjectMeshesRef.current.get(targetPathIdF) as any;
+            if (pathMeshF?.pathCurve) pathCurveF = pathMeshF.pathCurve as THREE.Curve<THREE.Vector3>;
+          }
+
+          // Sprite chain helper — colour gradient from colorA (base/t=0) to colorB (tip/t=1)
           const addFlameChain = (
             pts:       { x: number; y: number; z?: number }[],
-            tex:       THREE.Texture,
+            colorA:    THREE.Color,  // colour at base (t = 0)
+            colorB:    THREE.Color,  // colour at tip  (t = 1)
             sprSz:     number,
             opacity:   number,
             zOff:      number,
@@ -5336,13 +6200,17 @@ const timelineOutRef = useRef(timelineOut);
               const sizeScale = 1.0 + turbulence * (sizeNoise01 * 2.0 - 1.0) * 0.45;
               // Vertical gradient: pow(1-t, falloff) → full brightness at base (t=0), dims toward tip
               const vertGrad = glowFalloffF > 0 ? Math.pow(Math.max(0, 1.0 - t), glowFalloffF) : 1.0;
+              // Colour gradient: lerp from colorA (base) to colorB (tip)
+              const spriteColor = new THREE.Color().copy(colorA).lerp(colorB, t);
               const mat = new THREE.SpriteMaterial({
-                map:         tex,
+                map:         fShapeTex,
                 transparent: true,
+                color:       spriteColor,
                 opacity:     Math.max(0, baseOpacity * taper * flicker * growMask * vertGrad),
                 blending:    THREE.AdditiveBlending,
                 depthTest:   occludeF,
                 depthWrite:  false,
+                rotation:    (fp.shapeTwist ?? 0) * (t * Math.PI * 8.0 - ((fp.oscillation ?? 0) > 0 ? 0 : fAnimT * speed * 2.0)) + (fp.oscillation ?? 0) * (Math.sin(fAnimT * speed * 1.5 + t * Math.PI) + Math.cos(fAnimT * speed * 0.7) * 0.5),
               });
               const sp = new THREE.Sprite(mat);
               sp.position.set(pt.x, pt.y, (pt.z ?? 0) + zOff);
@@ -5350,6 +6218,19 @@ const timelineOutRef = useRef(timelineOut);
               fGroup.add(sp);
             });
           };
+
+          // ── Shared height breathing ─────────────────────────────────────
+          // One slow wave shared by ALL tendrils on this flame so they pulse in sync.
+          // Frequency is intentionally ~0.3–0.5 Hz (much slower than sprite flicker).
+          // turbulence gates the amplitude: 0 → no breathing, 1 → ±40% height swing.
+          const breathPhase = fAnimT * Math.max(0.1, speed) * 0.32;
+          const sharedBreath01 =
+            0.60 * (0.5 + 0.5 * Math.sin(breathPhase)) +
+            0.25 * (0.5 + 0.5 * Math.sin(breathPhase * 1.618 + 1.1)) +
+            0.15 * (0.5 + 0.5 * Math.sin(breathPhase * 2.414 + 2.3));
+          // [0..1] → [1 - amp .. 1 + amp], amplitude scales with turbulence
+          const breathAmp   = turbulence * 0.40;
+          const sharedHeightScale = 1.0 + (sharedBreath01 * 2.0 - 1.0) * breathAmp;
 
           for (let ti = 0; ti < numTendrils; ti++) {
             // ── Tendril lifecycle ──────────────────────────────────────────────
@@ -5385,40 +6266,107 @@ const timelineOutRef = useRef(timelineOut);
 
             // Lifecycle: rooted phase (age 0→DETACH) stays anchored at base,
             // detach phase (age DETACH→1) drifts upward and deforms.
-            const DETACH_START = 0.65;
+            // detachRate=0 pushes DETACH_START to 1 (never detach); =1 keeps original 0.65
+            const DETACH_START = 0.65 + (1.0 - 0.65) * (1.0 - detachRateF);
             const detachT = age01 < DETACH_START
               ? 0
               : (age01 - DETACH_START) / (1.0 - DETACH_START); // 0→1 after detach moment
 
-            // Only drifts upward after detaching — accelerating rise
-            const riseOffset = Math.pow(detachT, 1.3) * flameHeight * 0.55;
+            // Only drifts upward after detaching — accelerating rise, scaled by detachRate
+            const riseOffset = Math.pow(detachT, 1.3) * flameHeight * 0.55 * detachRateF;
 
             // Overall size, deformation, base thinning only apply after detach
             const ageScale     = 1.0 - detachT * 0.70;
             const deformMul    = 1.0 + detachT * 2.2;
-            const baseWidthMul = Math.max(0.05, 1.0 - detachT * 0.9);
+            
 
-            // Height also shrinks after detach
-            const activeHeight = flameHeight * ageScale * (0.75 + 0.25 * lifeFade);
+            // Height also shrinks after detach; shared breathing further modulates it
+            let pathFade = 1.0;
+            if (pathCurveF) {
+                const pathT = ( (numTendrils > 1 ? ti / (numTendrils - 1) : 0) + (fAnimT * Math.max(0.1, speed) * (fp.pathSpeed ?? 0.05)) ) % 1.0;
+                pathFade = Math.min(pathT * 20.0, (1.0 - pathT) * 20.0, 1.0);
+            }
+            let activeHeight = flameHeight * ageScale * (0.75 + 0.25 * lifeFade) * sharedHeightScale * pathFade;
+            const baseWidthMul = Math.max(0.05, 1.0 - detachT * 0.9) * pathFade;
 
             // The actual noise seed varies per life cycle so each new tendril wiggles differently
             const tendrilSeed  = slotSeed + Math.floor((fAnimT + birthOffset) / lifespan) * 1.618;
 
-            // Base spread angle shifts each new life
+            // Base origin: evenly distributed along target path, or all at object position
+            let tendrilBaseX = fBase.x, tendrilBaseY = fBase.y, tendrilBaseZ = fBase.z;
+          if (pathCurveF) {
+            const pathT = ( (numTendrils > 1 ? ti / (numTendrils - 1) : 0) + (fAnimT * Math.max(0.1, speed) * (fp.pathSpeed ?? 0.05)) ) % 1.0;
+            const pathPt = pathCurveF.getPointAt(Math.min(0.9999, pathT));
+            tendrilBaseX = pathPt.x; tendrilBaseY = pathPt.y; tendrilBaseZ = pathPt.z;
+          } else if (fp.attachedShapeId) {
+            const attachMesh: any = sceneObjectMeshesRef.current.get(fp.attachedShapeId);
+            if (attachMesh) {
+              let geom: any = null;
+              attachMesh.traverse((child: any) => { if (child.isMesh && child.geometry) geom = child.geometry; });
+              if (geom && geom.attributes && geom.attributes.position) {
+                  const posAttr = geom.attributes.position;
+                  const offsetCycle = Math.floor((fAnimT + birthOffset) / lifespan);
+                  const vIdx = Math.floor((ti * 1337 + offsetCycle) * 31.14) % posAttr.count;
+                  const v = new THREE.Vector3().fromBufferAttribute(posAttr, Math.floor(vIdx));
+                  v.applyMatrix4(attachMesh.matrixWorld);
+                  tendrilBaseX = v.x; tendrilBaseY = v.y; tendrilBaseZ = v.z;
+              }
+            }
+          }
+          // Base spread angle shifts each new life
             const spreadAngle  = (numTendrils > 1 ? (ti / (numTendrils - 1)) : 0.5) * Math.PI * 2
-                                 + Math.floor((fAnimT + birthOffset) / lifespan) * 0.97;
+                               + Math.floor((fAnimT + birthOffset) / lifespan) * 0.97;
             const baseR        = flameWidth * 0.35 * (numTendrils > 1 ? 1 : 0);
             const baseOffX     = Math.cos(spreadAngle + slotSeed) * baseR;
             const baseOffZ     = Math.sin(spreadAngle + slotSeed) * baseR * 0.4;
+            const pZ2 = fp.placementZ || 'center';
+            const offsetZ2 = pZ2 === 'front' ? 15 : (pZ2 === 'back' ? -15 : 0);
+            tendrilBaseZ += offsetZ2;
 
+            // ── Convection Heat / Mass Simulation ───────────────────────
+            // Tendrils packed closely together accumulate visual heat, elongating and widening them.
+            const buoyancy = fp.buoyancy ?? 1.0;
+            let heatDensity = 0;
+            let cx = 0, cz = 0;
+            const myX = tendrilBaseX + baseOffX;
+            const myZ = tendrilBaseZ + baseOffZ;
+            // Radius tightly curves around the base of the flame width, so even inside a single flame,
+            // the peripheral tendrils will have significantly lower density scores than central ones.
+            const heatRadius = Math.max(flameWidth * 1.5, 30.0);
+            globalTendrilBases.forEach(other => {
+              const dx = myX - other.x;
+              const dz = myZ - other.z;
+              const dist = Math.sqrt(dx * dx + dz * dz);
+              if (dist < heatRadius) {
+                // Cube the falloff so immediate neighbors (central tendrils) 
+                // give WAY more heat/weight than distant peripheral ones.
+                const w = Math.pow(1.0 - dist / heatRadius, 3.0);
+                heatDensity += w;
+                cx += other.x * w;
+                cz += other.z * w;
+              }
+            });
+            let inwardX = 0, inwardZ = 0;
+            if (heatDensity > 0.001) {
+              cx /= heatDensity; cz /= heatDensity;
+              inwardX = (cx - myX); // vector pointing towards local cluster centroid
+              inwardZ = (cz - myZ);
+            }
+            
+            // Baseline expected density for a tendril is just itself (~1.0). 
+            // Everything else adds to mass. Multiply by buoyancy setting.
+            const heatMultiplier = 1.0 + Math.max(0, (heatDensity - 1.0) * 0.15 * buoyancy);
+            
+            // Limit to max 6x multiplier to prevent absolutely broken math on a cluster of thousands.
+            activeHeight *= Math.min(6.0, heatMultiplier); // Inner/central tendrils and grouped flames stretch way taller
             // Build polyline from base to tip
             const pts: { x: number; y: number; z: number }[] = [];
             for (let pi = 0; pi < FLAME_PTS; pi++) {
               const yNorm    = pi / (FLAME_PTS - 1);
-              const y        = fBase.y + riseOffset + yNorm * activeHeight;
+              const y        = tendrilBaseY + riseOffset + yNorm * activeHeight;
               // Turbulence envelope: zero at base (anchored), grows toward tip
               // Also scaled by ageScale so detached tendril is proportionally thinner
-              const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5 * ageScale * baseWidthMul;
+              const widthEnv = Math.pow(yNorm, 0.65) * flameWidth * 0.5 * ageScale * baseWidthMul * (1.0 + (heatMultiplier - 1.0) * 0.65);
               // Base spread shrinks both along the stem (baseSpread) and with age (baseWidthMul)
               const baseSpread = (1.0 - yNorm) * baseWidthMul;
               // yNorm*k - fAnimT*speed → upward-traveling wave (sin(ky - ωt))
@@ -5427,60 +6375,138 @@ const timelineOutRef = useRef(timelineOut);
               const dx = (Math.sin(noiseT * 1.3 + tendrilSeed)       * 1.0
                         + Math.cos(noiseT * 2.1 + tendrilSeed * 1.7)  * 0.4) * turbulence * widthEnv * deformMul;
               const dz = Math.cos(noiseT * 0.9  + tendrilSeed * 2.3)          * turbulence * widthEnv * 0.6 * deformMul;
-              pts.push({ x: fBase.x + baseOffX * baseSpread + dx, y, z: fBase.z + baseOffZ * baseSpread + dz });
+              
+              // Upward drafts strongly pull surrounding tendrils inward towards the density string.
+              // Boosted suction so neighboring flames clearly bend into the main updraft.
+              const pullStrength = Math.max(0, heatDensity - 1.0) * buoyancy;
+              const draftMul = Math.pow(yNorm, 1.5) * 1.5 * Math.min(1.0, pullStrength * 0.1);
+              
+              pts.push({ x: tendrilBaseX + baseOffX * baseSpread + dx + inwardX * draftMul, y, z: tendrilBaseZ + baseOffZ * baseSpread + dz + inwardZ * draftMul });
             }
 
             // Optional physics modifiers (attractor / repulsor / flow-curve)
             if (usePhysicsF && physicsForceRef.current.length > 0) {
-              physicsForceRef.current.forEach(force => {
-                if (!force.enabled) return;
-                if (force.type === 'attractor' || force.type === 'repulsor') {
-                  let targetPos = new THREE.Vector3(force.position.x, force.position.y, force.position.z);
-                  if (force.targetShapeId) {
-                    const ts = sceneObjectsRef.current.find(o => o.id === force.targetShapeId);
-                    if (ts) targetPos.set(ts.position.x, ts.position.y, ts.position.z);
-                  }
-                  const sign = force.type === 'attractor' ? 1 : -1;
-                  pts.forEach((p, pi) => {
-                    if (pi === 0) return;
-                    const pos  = new THREE.Vector3(p.x, p.y, p.z);
-                    const dir  = new THREE.Vector3().subVectors(targetPos, pos);
-                    const dist = dir.length();
-                    const radius = Math.max(0.1, force.radius ?? 250);
-                    const falloff = Math.max(0, 1 - dist / radius);
-                    if (falloff <= 0 || dist < 1e-4) return;
-                    dir.normalize();
-                    const mag = Math.abs(force.strength) * 0.018 * falloff * modStrengthF * (pi / (FLAME_PTS - 1));
-                    p.x += dir.x * sign * mag;
-                    p.y += dir.y * sign * mag;
-                    p.z += dir.z * sign * mag;
-                  });
-                } else if (force.type === 'flow-curve' && force.curveId) {
-                  const pathMesh = sceneObjectMeshesRef.current.get(force.curveId) as any;
-                  if (!pathMesh?.pathCurve) return;
-                  const curve = pathMesh.pathCurve as THREE.Curve<THREE.Vector3>;
-                  pts.forEach((p, pi) => {
-                    if (pi === 0) return;
-                    const pos = new THREE.Vector3(p.x, p.y, p.z);
-                    let closestT = 0, minDSq = Infinity;
-                    for (let si = 0; si <= 16; si++) {
-                      const t = si / 16;
-                      const d = curve.getPointAt(t).distanceToSquared(pos);
-                      if (d < minDSq) { minDSq = d; closestT = t; }
-                    }
-                    const nearest = curve.getPointAt(closestT);
-                    const toCurve = new THREE.Vector3().subVectors(nearest, pos);
-                    const dist = toCurve.length();
-                    if (dist < 1e-4) return;
-                    const strength = Math.abs(force.strength) * 0.008 * modStrengthF * (pi / (FLAME_PTS - 1));
-                    const pull = Math.min(1, strength / (dist + 0.01));
-                    p.x += toCurve.x * pull;
-                    p.y += toCurve.y * pull;
-                    p.z += toCurve.z * pull;
-                  });
-                }
-              });
+  physicsForceRef.current.forEach(force => {
+    if (!force.enabled) return;
+    
+    let targetPos = new THREE.Vector3(force.position.x, force.position.y, force.position.z);
+    if (force.targetShapeId) {
+      const ts = sceneObjectsRef.current.find(o => o.id === force.targetShapeId);
+      if (ts) targetPos.set(ts.position.x, ts.position.y, ts.position.z);
+    }
+    
+    pts.forEach((p, pi) => {
+      if (pi === 0) return; // Base anchor is fixed
+      
+      const pos = new THREE.Vector3(p.x, p.y, p.z);
+      const dist = pos.distanceTo(targetPos);
+      const radius = Math.max(0.1, force.radius ?? 250);
+      const falloff = Math.max(0, 1 - dist / radius);
+      const t = pi / (FLAME_PTS - 1); // 0 at base, 1 at tip
+      
+      if (falloff <= 0 && force.type !== 'wind' && force.type !== 'gravity' && force.type !== 'turbulence' && force.type !== 'drag' && force.type !== 'damping') return;
+      
+      const strength = force.strength * 0.05 * modStrengthF;
+      let applyStrength = strength * t; // Forces affect tip more
+      if (force.type === 'attractor' || force.type === 'repulsor' || force.type === 'tornado' || force.type === 'vortex' || force.type === 'thermal-updraft') {
+        applyStrength *= falloff;
+      }
+
+      switch (force.type) {
+        case 'attractor': {
+          const dir = new THREE.Vector3().subVectors(targetPos, pos).normalize();
+          p.x += dir.x * applyStrength;
+          p.y += dir.y * applyStrength;
+          p.z += dir.z * applyStrength;
+          break;
+        }
+        case 'repulsor': {
+          const dir = new THREE.Vector3().subVectors(pos, targetPos).normalize();
+          p.x += dir.x * applyStrength;
+          p.y += dir.y * applyStrength;
+          p.z += dir.z * applyStrength;
+          break;
+        }
+        case 'wind': {
+          if(force.direction) {
+            const dir = new THREE.Vector3(force.direction.x, force.direction.y, force.direction.z).normalize();
+            p.x += dir.x * applyStrength;
+            p.y += dir.y * applyStrength;
+            p.z += dir.z * applyStrength;
+          }
+          break;
+        }
+        case 'gravity': {
+          p.y -= applyStrength * 2;
+          break;
+        }
+        case 'tornado':
+        case 'vortex': {
+          const dx = p.x - targetPos.x;
+          const dz = p.z - targetPos.z;
+          const rad = Math.sqrt(dx * dx + dz * dz);
+          const angle = Math.atan2(dz, dx) + applyStrength * 0.5;
+          
+          const nx = targetPos.x + Math.cos(angle) * rad;
+          const nz = targetPos.z + Math.sin(angle) * rad;
+          
+          p.x += (nx - p.x) * 0.5;
+          p.z += (nz - p.z) * 0.5;
+          p.y += applyStrength * 0.5; // slight updraft
+          break;
+        }
+        case 'turbulence': {
+          const time = performance.now() * 0.001 * Math.max(0.1, fp.speed || 1);
+          p.x += Math.sin(time * 2 + p.y * 0.02) * applyStrength * 2;
+          p.y += Math.cos(time * 2 + p.x * 0.02) * applyStrength * 2;
+          p.z += Math.sin(time * 2 + p.x * 0.02) * applyStrength * 2;
+          break;
+        }
+        case 'thermal-updraft': {
+          const dx = targetPos.x - pos.x;
+          const dz = targetPos.z - pos.z;
+          p.x += dx * applyStrength * 0.1;
+          p.z += dz * applyStrength * 0.1;
+          p.y += applyStrength * 2;
+          break;
+        }
+        case 'drag':
+        case 'damping': {
+          const basePos = new THREE.Vector3(pts[0].x, pts[0].y, pts[0].z);
+          const lerpVec = new THREE.Vector3(p.x, p.y, p.z).lerp(basePos, applyStrength * 0.02);
+          p.x = lerpVec.x; p.y = lerpVec.y; p.z = lerpVec.z;
+          break;
+        }
+        case 'flow-curve': {
+          if (force.curveId) {
+            const pathMesh = sceneObjectMeshesRef.current.get(force.curveId) as any;
+            if (!pathMesh?.pathCurve) return;
+            const curve = pathMesh.pathCurve as THREE.Curve<THREE.Vector3>;
+            let closestT = 0, minDSq = Infinity;
+            for (let si = 0; si <= 16; si++) {
+              const sqT = si / 16;
+              const d = curve.getPointAt(sqT).distanceToSquared(pos);
+              if (d < minDSq) { minDSq = d; closestT = sqT; }
             }
+            const nearest = curve.getPointAt(closestT);
+            const toCurve = new THREE.Vector3().subVectors(nearest, pos);
+            const distC = toCurve.length();
+            if (distC < 1e-4) return;
+            const pull = Math.min(1, applyStrength * 0.5 / (distC + 0.01));
+            
+            p.x += toCurve.x * pull;
+            p.y += toCurve.y * pull;
+            p.z += toCurve.z * pull;
+          }
+          break;
+        }
+      }
+    });
+  });
+}
+
+
+
 
             // Three sprite layers: outer halo, glow, bright core — scaled by lifeFade + ageScale
             const haloD = glowW * 4.0 * ageScale;
@@ -5490,13 +6516,468 @@ const timelineOutRef = useRef(timelineOut);
             const coreBlurSizeMul = 1.0 + coreBlurF * 2.6;
             const coreBlurOpaMul  = 1.0 / Math.sqrt(coreBlurSizeMul);
             const coreD = coreW * 2.2 * coreBlurSizeMul * ageScale;
-            addFlameChain(pts, gTexF, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
-            addFlameChain(pts, gTexF, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
-            addFlameChain(pts, cTexF, coreD, 0.60 * lifeFade * coreBlurOpaMul,  0.1, tendrilSeed + 2.2, growFront);
+            addFlameChain(pts, glowColorA, glowColorB, haloD, 0.09 * lifeFade, -0.1, tendrilSeed,       growFront);
+            addFlameChain(pts, glowColorA, glowColorB, glowD, 0.28 * lifeFade,  0.0, tendrilSeed + 1.1, growFront);
+            addFlameChain(pts, coreColorA, coreColorB, coreD, 0.60 * lifeFade * coreBlurOpaMul,  0.1, tendrilSeed + 2.2, growFront);
+
+            // ── Ember spawn: staggered per tendril, randomised interval ─────
+            if (emberFrequencyF > 0 && lifeFade > 0.2 && age01 > FADE_IN) {
+              // emberFrequencyF maps to total embers/sec across the flame (max 8/sec at 100%)
+              const totalRate      = emberFrequencyF * 40.0;
+              const perTendrilAvg  = numTendrils / Math.max(0.01, totalRate); // seconds per tendril
+              // On first encounter, stagger each slot's initial fire time so they never all pop together
+              if (emberState.lastSpawn[ti] === undefined) {
+                const stagger = Math.abs(Math.sin(slotSeed * 17.3 + 5.1)) * perTendrilAvg;
+                emberState.lastSpawn[ti] = fAnimT - stagger;
+                // First next-spawn time = now - stagger + randomised interval
+                const jitter0 = 0.5 + Math.abs(Math.sin(slotSeed * 23.9)) * 1.2;
+                emberState.nextSpawn[ti] = emberState.lastSpawn[ti] + perTendrilAvg * jitter0;
+              }
+              if (fAnimT >= emberState.nextSpawn[ti]) {
+                emberState.lastSpawn[ti] = fAnimT;
+                // Randomise the NEXT interval (0.5× – 1.8× average) using seed + time
+                const jitter = 0.5 + Math.abs(Math.sin(slotSeed * 31.1 + fAnimT * 0.41)) * 1.3;
+                emberState.nextSpawn[ti] = fAnimT + perTendrilAvg * jitter;
+                const esx = (Math.sin(tendrilSeed * 43.7 + fAnimT * 0.07) * 0.5 + 0.5);
+                const esy = (Math.cos(tendrilSeed * 29.1 + fAnimT * 0.11) * 0.5 + 0.5);
+                // Pick spawn point: tip (offset=0) or anywhere along the tendril (offset=1)
+                const spawnRand = Math.abs(Math.sin(slotSeed * 53.7 + fAnimT * 0.19));
+                const minPt = Math.floor((1.0 - emberOffsetF) * (pts.length - 1));
+                const spawnIdx = minPt + Math.floor(spawnRand * (pts.length - minPt));
+                const tip = pts[Math.min(spawnIdx, pts.length - 1)];
+                emberState.embers.push({
+                  x0: tip.x + (esx - 0.5) * flameWidth * 0.35,
+                  y0: tip.y,
+                  z0: tip.z ?? 0,
+                  vx: (esx - 0.5) * flameWidth * 0.4 * emberSpeedF,
+                  vy: (30 + esy * 35) * emberSpeedF,   // initial upward speed
+                  vz: Math.sin(tendrilSeed * 7.1) * flameWidth * 0.12 * emberSpeedF,
+                  born: fAnimT,
+                  life: (2.5 + esy * 3.5) * emberLifeF,
+                });
+              }
+            }
+          }
+
+          // ── Render persistent embers ──────────────────────────────────────────────
+          for (const e of emberState.embers) {
+            const age = fAnimT - e.born;
+            const t   = age / e.life;
+            const cx  = e.x0 + e.vx * age * Math.exp(-EMBER_DRAG * 0.4 * age);
+            // Buoyancy: rise with exponential deceleration — never falls back
+            // y(t) = y0 + (vy0 / k) * (1 - exp(-k*t))
+            const cy  = e.y0 + (e.vy / EMBER_DRAG) * (1.0 - Math.exp(-EMBER_DRAG * age));
+            const cz  = e.z0 + e.vz * age * Math.exp(-EMBER_DRAG * 0.4 * age);
+            const fadeIn  = Math.min(1, age / 0.15);
+            const fadeOut = 1.0 - Math.pow(Math.max(0, t), 2.5);
+            const opacity = fadeIn * fadeOut * 0.9;
+            if (opacity <= 0.01) continue;
+            const emberColor = new THREE.Color().copy(coreColorA).lerp(glowColorA, Math.pow(t, 0.5));
+            const size = coreW * 0.65 * emberSizeF * (1.0 - t * 0.5);
+            const mat = new THREE.SpriteMaterial({
+              map:         fShapeTex,
+              transparent: true,
+              color:       emberColor,
+              opacity,
+              blending:    THREE.AdditiveBlending,
+              depthTest:   occludeF,
+              depthWrite:  false,
+            });
+            const sp = new THREE.Sprite(mat);
+            sp.position.set(cx, cy, cz);
+            sp.scale.set(size, size, 1);
+            fGroup.add(sp);
           }
         });
       }
       // ── End flame live preview ────────────────────────────────────────────────────────────────
+
+      // ── Saber live preview ───────────────────────────────────────────────────────────────────
+      {
+        const sAnimT = (Date.now() % 10000000) / 1000.0;
+        sceneObjectsRef.current.forEach((sObj) => {
+          if (sObj.type !== 'Saber') return;
+          const sGroup = sceneObjectMeshesRef.current.get(sObj.id) as THREE.Group | undefined;
+          if (!sGroup) return;
+
+          const targetPathId = (sObj.properties ?? {}).targetPathId || sObj.id;
+          const sPts = sceneObjectsRef.current.filter(o => o.parentId === targetPathId && o.type === 'PathPoint');
+          
+          if (sPts.length < 2) {
+             sGroup.clear();
+             return;
+          }
+
+          const rawPoints = sPts.map(p => {
+              const pMesh = sceneObjectMeshesRef.current.get(p.id);
+              if (pMesh) {
+                  const wp = new THREE.Vector3();
+                  pMesh.getWorldPosition(wp);
+                  return wp;
+              }
+              return new THREE.Vector3(p.position.x, p.position.y, p.position.z);
+          });
+
+          const sp = (sObj.properties ?? {}) as any;
+          const closed = sp.closed ?? false;
+          const tension = sp.tension ?? 0.5;
+          const curve = new THREE.CatmullRomCurve3(rawPoints, closed, 'catmullrom', tension);
+
+          const coreColor  = new THREE.Color(sp.coreColor ?? '#ffffff');
+          const glowColor  = new THREE.Color(sp.glowColor ?? '#0088ff');
+          const coreWidth  = sp.coreWidth ?? 1.0;
+          const glowWidth  = sp.glowWidth ?? 6.0;
+          const noiseInt   = sp.noiseIntensity ?? 0.5;
+          const noiseScale = sp.noiseScale ?? 5.0;
+          const isAnim     = sp.noiseAnimated ?? true;
+          const noiseSpeed = sp.noiseSpeed ?? 1.0;
+          const sFalloff   = sp.glowFalloff ?? 1.2;
+          const noiseType   = sp.noiseType ?? 0;
+          const flowAngle   = ((sp.noiseFlowAngle ?? 0) * Math.PI) / 180;
+          const startOffset = sp.startOffset  ?? 0.0;
+          const endOffset   = sp.endOffset    ?? 1.0;
+          const phaseOffset = sp.phaseOffset  ?? 0.0;
+          const offsetSpeed = sp.offsetSpeed  ?? 0.0;
+          const startTaper  = sp.startTaper ?? 1.0;  // thickness at start (0=point, 1=full)
+          const endTaper    = sp.endTaper   ?? 0.0;  // thickness at end
+
+          const segments = Math.max(20, Math.min(Math.floor(curve.getLength() * 10), 400));
+          
+          // Use a FAT tube with 32 radial segments for a smooth high-res canvas
+          // We don't use it as a mesh, we use it as a volumetric bounding shell
+          const tubeGeo = new THREE.TubeGeometry(curve, segments, Math.max(1.0, glowWidth * 0.4), 32, closed);
+
+          let saberMesh = sGroup.getObjectByName('SaberMesh') as THREE.Mesh;
+          
+          if (!saberMesh) {
+              const vertexShader = `
+                varying vec2 vUv;
+                varying vec3 vOriginalNormal;
+                varying vec3 vViewPosition;
+                varying float vVertexNoise;
+
+                uniform float uTime;
+                uniform float uNoiseScale;
+                uniform float uNoiseInt;
+                uniform int   uNoiseType;
+                uniform float uFlowAngle;
+                uniform float uOffsetTime;
+                uniform float uStartOffset;
+                uniform float uEndOffset;
+                uniform float uOffsetSpeed;
+                uniform float uPhaseOffset;
+                uniform float uStartTaper;
+                uniform float uEndTaper;
+                uniform float uTubeRadius;
+
+                // ── Simplex 3D ───────────────────────────────────────────────────────
+                vec4 permute(vec4 x){return mod(((x*34.0)+1.0)*x,289.0);}
+                vec4 taylorInvSqrt(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+                float snoise(vec3 v){
+                  const vec2 C=vec2(1.0/6.0,1.0/3.0);
+                  const vec4 D=vec4(0.0,0.5,1.0,2.0);
+                  vec3 i=floor(v+dot(v,C.yyy));
+                  vec3 x0=v-i+dot(i,C.xxx);
+                  vec3 g=step(x0.yzx,x0.xyz);
+                  vec3 l=1.0-g;
+                  vec3 i1=min(g.xyz,l.zxy);
+                  vec3 i2=max(g.xyz,l.zxy);
+                  vec3 x1=x0-i1+C.xxx;
+                  vec3 x2=x0-i2+2.0*C.xxx;
+                  vec3 x3=x0-1.0+3.0*C.xxx;
+                  i=mod(i,289.0);
+                  vec4 p=permute(permute(permute(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
+                  float n_=1.0/7.0;
+                  vec3 ns=n_*D.wyz-D.xzx;
+                  vec4 j=p-49.0*floor(p*ns.z*ns.z);
+                  vec4 x_=floor(j*ns.z);
+                  vec4 y_=floor(j-7.0*x_);
+                  vec4 x=x_*ns.x+ns.yyyy;
+                  vec4 y=y_*ns.x+ns.yyyy;
+                  vec4 h=1.0-abs(x)-abs(y);
+                  vec4 b0=vec4(x.xy,y.xy);
+                  vec4 b1=vec4(x.zw,y.zw);
+                  vec4 s0=floor(b0)*2.0+1.0;
+                  vec4 s1=floor(b1)*2.0+1.0;
+                  vec4 sh=-step(h,vec4(0.0));
+                  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy;
+                  vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
+                  vec3 p0=vec3(a0.xy,h.x);
+                  vec3 p1=vec3(a0.zw,h.y);
+                  vec3 p2=vec3(a1.xy,h.z);
+                  vec3 p3=vec3(a1.zw,h.w);
+                  vec4 norm=taylorInvSqrt(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
+                  p0*=norm.x;p1*=norm.y;p2*=norm.z;p3*=norm.w;
+                  vec4 m=max(0.6-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
+                  m=m*m;
+                  return 42.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
+                }
+                // ── Fractal FBM (4 octaves of simplex) ───────────────────────────────
+                float fbmV(vec3 p){
+                  float v=0.0,a=0.5;
+                  vec3 s=vec3(1.7,9.2,5.3);
+                  v+=a*snoise(p); p=p*2.0+s; a*=0.5;
+                  v+=a*snoise(p); p=p*2.0+s; a*=0.5;
+                  v+=a*snoise(p); p=p*2.0+s; a*=0.5;
+                  v+=a*snoise(p);
+                  return v;
+                }
+
+                void main(){
+                  vUv=uv;
+                  vOriginalNormal=normalize(normalMatrix*normal);
+                  vec3 fd=vec3(cos(uFlowAngle),sin(uFlowAngle),0.0);
+                  vec3 np=position*uNoiseScale*0.5-fd*uTime*2.0;
+                  float n;
+                  if(uNoiseType==1){        // Turbulent: |simplex|
+                    n=abs(snoise(np))*2.0-1.0;
+                  } else if(uNoiseType==2){ // Ripple: sine waves
+                    n=sin(position.x*uNoiseScale+uTime*3.0)*cos(position.y*uNoiseScale*0.7-uTime*1.3);
+                  } else if(uNoiseType==3){ // Cellular: two-scale simplex
+                    n=snoise(np)*0.6+snoise(np*2.3+vec3(5.1,3.7,2.9))*0.4;
+                  } else if(uNoiseType==4){ // Fractal FBM
+                    n=fbmV(np)*2.0;
+                  } else {                  // 0 = Simplex (default)
+                    n=snoise(np);
+                  }
+                  vVertexNoise=n;
+                  // Taper scrolls with offset window: compute position within the window [0..1]
+                  float wLenV=clamp(uEndOffset-uStartOffset,0.001,1.0);
+                  float scV=fract(uv.x-uStartOffset-uPhaseOffset-uOffsetTime*uOffsetSpeed);
+                  float taperPosV=clamp(scV/wLenV,0.0,1.0);
+                  float halfT=taperPosV<0.5?taperPosV*2.0:(taperPosV-0.5)*2.0;
+                  float taperScale=taperPosV<0.5?mix(uStartTaper,1.0,halfT):mix(1.0,uEndTaper,halfT);
+                  // Collapse vertices toward the tube centerline by the taper factor
+                  vec3 tapered=position+normal*uTubeRadius*(taperScale-1.0);
+                  vec3 displaced=tapered+normal*(n*uNoiseInt*0.2*taperScale);
+                  vec4 mvPosition=modelViewMatrix*vec4(displaced,1.0);
+                  vViewPosition=-mvPosition.xyz;
+                  gl_Position=projectionMatrix*mvPosition;
+                }
+              `;
+
+              const fragmentShader = `
+                varying vec2 vUv;
+                varying vec3 vOriginalNormal;
+                varying vec3 vViewPosition;
+                varying float vVertexNoise;
+
+                uniform float uTime;
+                uniform vec3  uCoreColor;
+                uniform vec3  uGlowColor;
+                uniform float uCoreRatio;
+                uniform float uFalloff;
+                uniform int   uNoiseType;
+                uniform float uFlowAngle;
+                uniform float uOffsetTime;
+                uniform float uStartOffset;
+                uniform float uEndOffset;
+                uniform float uOffsetSpeed;
+                uniform float uPhaseOffset;
+                uniform float uStartTaper;
+                uniform float uEndTaper;
+
+                // ── Hash-based FBM (smooth, layered) ────────────────────────────────
+                float hash(vec2 p){return fract(1e4*sin(17.0*p.x+p.y*0.1)*(0.1+abs(sin(p.y*13.0+p.x))));}
+                float fbmH(vec2 x){
+                  float v=0.0,a=0.5;
+                  vec2 sh=vec2(100.0);
+                  v+=a*hash(x);x=x*2.0+sh;a*=0.5;
+                  v+=a*hash(x);x=x*2.0+sh;a*=0.5;
+                  v+=a*hash(x);x=x*2.0+sh;a*=0.5;
+                  v+=a*hash(x);
+                  return v;
+                }
+                // ── Turbulent: absolute-value FBM → spiky/electric ──────────────────
+                float turbulenceH(vec2 x){
+                  float v=0.0,a=0.5;
+                  vec2 sh=vec2(100.0);
+                  v+=a*abs(hash(x)*2.0-1.0);x=x*2.0+sh;a*=0.5;
+                  v+=a*abs(hash(x)*2.0-1.0);x=x*2.0+sh;a*=0.5;
+                  v+=a*abs(hash(x)*2.0-1.0);x=x*2.0+sh;a*=0.5;
+                  v+=a*abs(hash(x)*2.0-1.0);
+                  return v;
+                }
+                // ── Simplex 3D (re-declared for fragment) ─────────────────────────
+                vec4 permuteF(vec4 x){return mod(((x*34.0)+1.0)*x,289.0);}
+                vec4 tiSqrtF(vec4 r){return 1.79284291400159-0.85373472095314*r;}
+                float snoiseF(vec3 v){
+                  const vec2 C=vec2(1.0/6.0,1.0/3.0);
+                  const vec4 D=vec4(0.0,0.5,1.0,2.0);
+                  vec3 i=floor(v+dot(v,C.yyy));
+                  vec3 x0=v-i+dot(i,C.xxx);
+                  vec3 g=step(x0.yzx,x0.xyz);
+                  vec3 l=1.0-g;
+                  vec3 i1=min(g.xyz,l.zxy);
+                  vec3 i2=max(g.xyz,l.zxy);
+                  vec3 x1=x0-i1+C.xxx;
+                  vec3 x2=x0-i2+2.0*C.xxx;
+                  vec3 x3=x0-1.0+3.0*C.xxx;
+                  i=mod(i,289.0);
+                  vec4 p=permuteF(permuteF(permuteF(i.z+vec4(0.0,i1.z,i2.z,1.0))+i.y+vec4(0.0,i1.y,i2.y,1.0))+i.x+vec4(0.0,i1.x,i2.x,1.0));
+                  float n_=1.0/7.0;
+                  vec3 ns=n_*D.wyz-D.xzx;
+                  vec4 j=p-49.0*floor(p*ns.z*ns.z);
+                  vec4 x_=floor(j*ns.z),y_=floor(j-7.0*x_);
+                  vec4 xx=x_*ns.x+ns.yyyy,yy=y_*ns.x+ns.yyyy;
+                  vec4 hh=1.0-abs(xx)-abs(yy);
+                  vec4 b0=vec4(xx.xy,yy.xy),b1=vec4(xx.zw,yy.zw);
+                  vec4 s0=floor(b0)*2.0+1.0,s1=floor(b1)*2.0+1.0;
+                  vec4 sh=-step(hh,vec4(0.0));
+                  vec4 a0=b0.xzyw+s0.xzyw*sh.xxyy;
+                  vec4 a1=b1.xzyw+s1.xzyw*sh.zzww;
+                  vec3 p0=vec3(a0.xy,hh.x),p1=vec3(a0.zw,hh.y),p2=vec3(a1.xy,hh.z),p3=vec3(a1.zw,hh.w);
+                  vec4 nm=tiSqrtF(vec4(dot(p0,p0),dot(p1,p1),dot(p2,p2),dot(p3,p3)));
+                  p0*=nm.x;p1*=nm.y;p2*=nm.z;p3*=nm.w;
+                  vec4 m=max(0.6-vec4(dot(x0,x0),dot(x1,x1),dot(x2,x2),dot(x3,x3)),0.0);
+                  m=m*m;
+                  return 42.0*dot(m*m,vec4(dot(p0,x0),dot(p1,x1),dot(p2,x2),dot(p3,x3)));
+                }
+                // ── Fractal simplex FBM (5 octaves) ─────────────────────────────────
+                float fractalFBM(vec2 uv){
+                  float v=0.0,a=0.5;
+                  vec3 p=vec3(uv,0.0);
+                  vec3 s=vec3(1.7,9.2,5.3);
+                  v+=a*snoiseF(p);p=p*2.1+s;a*=0.5;
+                  v+=a*snoiseF(p);p=p*2.1+s;a*=0.5;
+                  v+=a*snoiseF(p);p=p*2.1+s;a*=0.5;
+                  v+=a*snoiseF(p);p=p*2.1+s;a*=0.5;
+                  v+=a*snoiseF(p);
+                  return v*0.5+0.5;
+                }
+                // ── Ripple: layered sine waves ───────────────────────────────────────
+                float ripple(vec2 uv, float t){
+                  float w =sin(uv.x*2.0+t*2.5)*0.5+0.5;
+                  w+=sin(uv.x*5.0-uv.y*1.3+t*1.7)*0.25;
+                  w+=sin(uv.x*9.0+uv.y*0.6-t*3.1)*0.125;
+                  return clamp(w,0.0,1.0);
+                }
+                // ── Cellular (Worley-style 2D) ───────────────────────────────────────
+                float cellular(vec2 uv){
+                  vec2 ip=floor(uv),fp=fract(uv);
+                  float d=1.0;
+                  for(int cy=-1;cy<=1;cy++){
+                    for(int cx=-1;cx<=1;cx++){
+                      vec2 nb=vec2(float(cx),float(cy));
+                      float hx=fract(sin(dot(ip+nb,vec2(127.1,311.7)))*43758.5453);
+                      float hy=fract(sin(dot(ip+nb,vec2(269.5,183.3)))*43758.5453);
+                      vec2 pt=nb+vec2(0.5+0.5*sin(6.28318*hx),0.5+0.5*sin(6.28318*hy));
+                      d=min(d,length(fp-pt));
+                    }
+                  }
+                  return 1.0-d;
+                }
+
+                void main(){
+                  vec3 viewDir=normalize(vViewPosition);
+                  float radial=abs(dot(vOriginalNormal,viewDir));
+                  float meshEdgeFade=smoothstep(0.01,0.4,radial);
+                  float coreThickness=uCoreRatio*0.5;
+                  float core=pow(radial,20.0/clamp(coreThickness+0.01,0.1,5.0))*2.5;
+                  float glow=pow(radial,uFalloff);
+
+                  // Sample micro-noise based on selected type
+                  vec2 fd2=vec2(cos(uFlowAngle),sin(uFlowAngle));
+                  vec2 noiseUv=vUv*vec2(20.0,5.0)-fd2*uTime*5.0;
+                  float microNoise;
+                  if(uNoiseType==1){           // Turbulent
+                    microNoise=turbulenceH(noiseUv);
+                  } else if(uNoiseType==2){    // Ripple
+                    microNoise=ripple(noiseUv*0.15,uTime);
+                  } else if(uNoiseType==3){    // Cellular
+                    vec2 cUv=vUv*vec2(6.0,2.0)-vec2(uTime*2.0,0.0);
+                    microNoise=cellular(cUv);
+                  } else if(uNoiseType==4){    // Fractal simplex FBM
+                    microNoise=fractalFBM(noiseUv*0.07);
+                  } else {                     // 0 = FBM hash (default)
+                    microNoise=fbmH(noiseUv);
+                  }
+
+                  float organicWarp=(vVertexNoise*0.5+0.5)*(microNoise*0.5+0.5);
+                  vec3 finalColor=mix(uGlowColor*glow*(1.0+organicWarp*3.0),uCoreColor,clamp(core,0.0,1.0));
+                  float alpha=(core+glow*(0.5+organicWarp*1.5))*meshEdgeFade;
+
+                  // Tiny fixed cap-fade to hide hard tube geometry ends at UV 0/1
+                  float capFade=smoothstep(0.0,0.01,vUv.x)*smoothstep(1.0,0.99,vUv.x);
+
+                  // Animated offset window: scrolls [startOffset, endOffset) along the tube
+                  float windowLen=clamp(uEndOffset-uStartOffset,0.001,1.0);
+                  float scroll=fract(vUv.x-uStartOffset-uPhaseOffset-uOffsetTime*uOffsetSpeed);
+                  float se=0.04;
+                  float windowFade=smoothstep(0.0,se,scroll)*smoothstep(windowLen,max(se*0.5,windowLen-se),scroll);
+
+                  // Taper follows the window: taperPos=0 at window start, 1 at window end
+                  float taperPos=clamp(scroll/windowLen,0.0,1.0);
+                  float halfTF=taperPos<0.5?taperPos*2.0:(taperPos-0.5)*2.0;
+                  float taperAlpha=taperPos<0.5?mix(uStartTaper,1.0,halfTF):mix(1.0,uEndTaper,halfTF);
+
+                  gl_FragColor=vec4(finalColor,clamp(alpha*capFade*windowFade*taperAlpha,0.0,1.0));
+                }
+              `;
+
+              const material = new THREE.ShaderMaterial({
+                  vertexShader,
+                  fragmentShader,
+                  uniforms: {
+                      uTime: { value: 0 },
+                      uCoreColor: { value: coreColor },
+                      uGlowColor: { value: glowColor },
+                      uCoreRatio: { value: coreWidth / glowWidth },
+                      uNoiseScale: { value: noiseScale * 0.1 },
+                      uNoiseInt: { value: noiseInt },
+                      uFalloff: { value: sFalloff * 2.0 },
+                      uNoiseType:    { value: noiseType },
+                      uFlowAngle:    { value: flowAngle },
+                      uOffsetTime:   { value: 0 },
+                      uStartOffset:  { value: startOffset },
+                      uEndOffset:    { value: endOffset },
+                      uOffsetSpeed:  { value: offsetSpeed },
+                      uPhaseOffset:  { value: phaseOffset },
+                      uStartTaper:   { value: startTaper },
+                      uEndTaper:     { value: endTaper },
+                      uTubeRadius:   { value: Math.max(1.0, glowWidth * 0.4) },
+                  },
+                  transparent: true,
+                  blending: THREE.AdditiveBlending,
+                  depthWrite: false, // Critical for volumetric look
+                  depthTest: true,
+                  side: THREE.DoubleSide // Render both inner and outer face of tube for volumetric layering
+              });
+
+              saberMesh = new THREE.Mesh(tubeGeo, material);
+              saberMesh.name = 'SaberMesh';
+              sGroup.clear();
+              sGroup.add(saberMesh);
+          } else {
+              if (saberMesh.geometry) saberMesh.geometry.dispose();
+              saberMesh.geometry = tubeGeo;
+              
+              const mat = saberMesh.material as THREE.ShaderMaterial;
+              mat.uniforms.uTime.value = isAnim ? sAnimT * noiseSpeed : 0;
+              mat.uniforms.uCoreColor.value.copy(coreColor);
+              mat.uniforms.uGlowColor.value.copy(glowColor);
+              if (glowWidth > 0) mat.uniforms.uCoreRatio.value = coreWidth / Math.max(0.1, glowWidth);
+              mat.uniforms.uNoiseScale.value = noiseScale * 0.1;
+              mat.uniforms.uNoiseInt.value = noiseInt;
+              mat.uniforms.uFalloff.value = sFalloff * 2.0;
+              mat.uniforms.uNoiseType.value    = noiseType;
+              mat.uniforms.uFlowAngle.value     = flowAngle;
+              mat.uniforms.uOffsetTime.value    = sAnimT;   // always ticking
+              mat.uniforms.uStartOffset.value   = startOffset;
+              mat.uniforms.uEndOffset.value     = endOffset;
+              mat.uniforms.uOffsetSpeed.value   = offsetSpeed;
+              mat.uniforms.uPhaseOffset.value   = phaseOffset;
+              mat.uniforms.uStartTaper.value    = startTaper;
+              mat.uniforms.uEndTaper.value      = endTaper;
+              mat.uniforms.uTubeRadius.value    = Math.max(1.0, glowWidth * 0.4);
+          }
+          
+           sGroup.position.set(0, 0, 0);
+           sGroup.rotation.set(0, 0, 0);
+           sGroup.scale.set(1, 1, 1);
+        });
+      }
+// ── End saber live preview ─────────────────────────────────────────────────────────────────
 
       // Update particle stats every few frames
       if (Math.random() < 0.1) {
@@ -5506,8 +6987,10 @@ const timelineOutRef = useRef(timelineOut);
           totalParticles += system.particles.length;
           numEmitters++;
         });
-        statsDisplay.innerText = `Particles: ${totalParticles}
-Emitters: ${numEmitters}`;
+        const selId = selectedObjectIdRef.current;
+        const selObj = selId ? sceneObjectsRef.current.find(o => o.id === selId) : null;
+        const selLabel = selObj ? `${selObj.name || selObj.type} [${selObj.type}]` : 'None';
+        statsDisplay.innerText = `Particles: ${totalParticles} | Emitters: ${numEmitters} | Sel: ${selLabel}`;
       }
 
       // ── Spine layer Z spread + renderOrder (zero matrix traversal) ──
@@ -5545,22 +7028,25 @@ Emitters: ${numEmitters}`;
         const qW = Math.floor(rW / 2);
         const qH = Math.floor(rH / 2);
         const { front, top, side } = quadCamerasRef.current;
-        // Top-left: overhead (top) view
+        const _pv = quadPanelViewsRef.current;
+        const _camFor = (v: string | undefined): THREE.Camera =>
+          v === 'y' ? top : v === 'z' ? front : v === 'x' ? side : activeCamera;
+        // Top-left panel
         renderer.setScissor(0, rH - qH, qW, qH);
         renderer.setViewport(0, rH - qH, qW, qH);
-        renderer.render(scene, top);
-        // Top-right: front view
+        renderer.render(scene, _camFor(_pv?.top ?? 'y'));
+        // Top-right panel
         renderer.setScissor(rW - qW, rH - qH, qW, qH);
         renderer.setViewport(rW - qW, rH - qH, qW, qH);
-        renderer.render(scene, front);
-        // Bottom-left: side view
+        renderer.render(scene, _camFor(_pv?.front ?? 'z'));
+        // Bottom-left panel
         renderer.setScissor(0, 0, qW, qH);
         renderer.setViewport(0, 0, qW, qH);
-        renderer.render(scene, side);
-        // Bottom-right: perspective
+        renderer.render(scene, _camFor(_pv?.side ?? 'x'));
+        // Bottom-right panel
         renderer.setScissor(rW - qW, 0, qW, qH);
         renderer.setViewport(rW - qW, 0, qW, qH);
-        renderer.render(scene, activeCamera);
+        renderer.render(scene, _camFor(_pv?.perspective ?? 'perspective'));
         // Restore full viewport
         renderer.setScissor(0, 0, rW, rH);
         renderer.setViewport(0, 0, rW, rH);
@@ -5618,6 +7104,7 @@ Emitters: ${numEmitters}`;
       document.removeEventListener('mouseup', onMouseUp);
       cancelAnimationFrame(animationFrameId);
       renderer.dispose();
+      sceneObjectMeshesRef.current.clear();
       gridHelpersRef.current = [];
       if (containerRef.current) {
         if (renderer.domElement.parentNode === containerRef.current) {
@@ -5663,24 +7150,48 @@ Emitters: ${numEmitters}`;
   useEffect(() => {
     const showObjects = sceneSettings.showObjects ?? true;
     const showBones = sceneSettings.showBones ?? true;
+    const hiddenSet = new Set(hiddenObjectIds);
+    const fxTypes = new Set(['Flame', 'Lightning', 'Saber', 'GlowSphere', 'LightningPoint']);
     sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
       const obj = sceneObjects.find((o) => o.id === objectId);
       if (!obj) return;
+      // PathPoints and FX are controlled by their own separate effects
+      if (obj.type === 'PathPoint' || fxTypes.has(obj.type)) return;
+      const visibleByHidden = showObjects && !hiddenSet.has(objectId);
       if (obj.type === 'Bone') {
         // Keep the bone parent visible so spine attachment planes can remain visible
         // even when bone visuals are filtered out.
-        mesh.visible = showObjects;
+        mesh.visible = visibleByHidden;
         mesh.children.forEach((child) => {
           const isSpineAttachment = child.name?.startsWith('spine-att-') ?? false;
           if (!isSpineAttachment) {
-            child.visible = showBones;
+            child.visible = visibleByHidden && showBones;
           }
         });
       } else {
-        mesh.visible = showObjects;
+        mesh.visible = visibleByHidden;
       }
     });
-  }, [sceneSettings.showObjects, sceneSettings.showBones, sceneObjects]);
+  }, [sceneSettings.showObjects, sceneSettings.showBones, sceneObjects, hiddenObjectIds]);
+
+  // PathPoints (bezier handle gizmos) visibility
+  useEffect(() => {
+    const show = sceneSettings.showPathPoints ?? false;
+    sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
+      const obj = sceneObjects.find((o) => o.id === objectId);
+      if (obj?.type === 'PathPoint') mesh.visible = show;
+    });
+  }, [sceneSettings.showPathPoints, sceneObjects]);
+
+  // FX objects visibility (Flame, Lightning, Saber, GlowSphere, LightningPoint)
+  useEffect(() => {
+    const show = sceneSettings.showFX ?? true;
+    const fxTypes = new Set(['Flame', 'Lightning', 'Saber', 'GlowSphere', 'LightningPoint']);
+    sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
+      const obj = sceneObjects.find((o) => o.id === objectId);
+      if (obj && fxTypes.has(obj.type)) mesh.visible = show;
+    });
+  }, [sceneSettings.showFX, sceneObjects]);
 
   useEffect(() => {
     particleSystemsRef.current.forEach((system) => {
@@ -5731,6 +7242,11 @@ Emitters: ${numEmitters}`;
       cameraState.isAnimating = true;
     }
   }, [viewMode, sceneSize]);
+
+  // Sync lookThroughCamera prop into ref
+  useEffect(() => {
+    lookThroughCameraRef.current = lookThroughCamera;
+  }, [lookThroughCamera]);
 
   // Sync quadViewport prop into ref (read by render loop without causing re-renders)
   useEffect(() => {
@@ -5792,7 +7308,10 @@ Emitters: ${numEmitters}`;
         // Clean up particle system if it's an emitter
         const particleSystem = particleSystemsRef.current.get(id);
         if (particleSystem) {
-          particleSystem.particles.forEach(p => scene.remove(p.mesh));
+          particleSystem.particles.forEach(p => {
+            scene.remove(p.mesh);
+            p.driftCopyMeshes?.forEach(d => scene.remove(d));
+          });
           particleSystemsRef.current.delete(id);
         }
       }
@@ -5829,6 +7348,7 @@ Emitters: ${numEmitters}`;
             3
           ));
           crosshairGroup.add(new THREE.LineSegments(crossGeometry, lineMaterial));
+          (crosshairGroup as any).isCrosshairRender = true;
           mesh = crosshairGroup;
           // Ensure a particle system exists for this emitter
           if (!particleSystemsRef.current.has(obj.id)) {
@@ -5857,6 +7377,10 @@ Emitters: ${numEmitters}`;
             new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9, depthTest: false }),
           ));
           mesh = xhGroup;
+        } else if (obj.type === 'Saber') {
+          const saberGroup = new THREE.Group();
+          (saberGroup as any).isSaberRender = true;
+          mesh = saberGroup;
         } else if (obj.type === 'Flame') {
           const flameGroup = new THREE.Group();
           (flameGroup as any).isFlameRender = true;
@@ -5939,6 +7463,109 @@ Emitters: ${numEmitters}`;
           const wireframeMat = new THREE.LineBasicMaterial({ color: 0xffd700, transparent: true, opacity: 1, depthTest: false });
           boneGroup.add(new THREE.LineSegments(new THREE.WireframeGeometry(diamondGeo), wireframeMat));
           mesh = boneGroup;
+        } else if (obj.type === 'CameraTarget') {
+          // Target reticle gizmo: cyan ring + crosshair
+          const tGroup = new THREE.Group();
+          const tMat = new THREE.LineBasicMaterial({ color: 0x00ddff, transparent: true, opacity: 0.9, depthTest: false });
+          // Ring (24-gon)
+          const N = 24, R = 14;
+          const ringVerts: number[] = [];
+          for (let i = 0; i < N; i++) {
+            const a0 = (i / N) * Math.PI * 2, a1 = ((i + 1) / N) * Math.PI * 2;
+            ringVerts.push(Math.cos(a0) * R, Math.sin(a0) * R, 0, Math.cos(a1) * R, Math.sin(a1) * R, 0);
+          }
+          const ringGeo = new THREE.BufferGeometry();
+          ringGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(ringVerts), 3));
+          tGroup.add(new THREE.LineSegments(ringGeo, tMat.clone()));
+          // Crosshair
+          const crossGeoT = new THREE.BufferGeometry();
+          crossGeoT.setAttribute('position', new THREE.BufferAttribute(
+            new Float32Array([-R * 1.5, 0, 0, R * 1.5, 0, 0,  0, -R * 1.5, 0, 0, R * 1.5, 0,  0, 0, -R * 0.6, 0, 0, R * 0.6]), 3));
+          tGroup.add(new THREE.LineSegments(crossGeoT, tMat.clone()));
+          (tGroup as any).isCameraTargetRender = true;
+          mesh = tGroup;
+        } else if (obj.type === 'Camera') {
+          // Recognisable 3-D camera body gizmo.
+          // THREE.Group.lookAt(target) points the group's +Z toward the target.
+          // So all geometry is built with +Z = toward subject (lens/frustum),
+          //                             -Z = away from subject (operator/viewfinder side).
+          const camGroup = new THREE.Group();
+
+          const addWireBox = (x0:number,y0:number,z0:number, x1:number,y1:number,z1:number, mat:THREE.LineBasicMaterial) => {
+            const v = new Float32Array([
+              x0,y0,z0, x1,y0,z0,  x1,y0,z0, x1,y0,z1,  x1,y0,z1, x0,y0,z1,  x0,y0,z1, x0,y0,z0,
+              x0,y1,z0, x1,y1,z0,  x1,y1,z0, x1,y1,z1,  x1,y1,z1, x0,y1,z1,  x0,y1,z1, x0,y1,z0,
+              x0,y0,z0, x0,y1,z0,  x1,y0,z0, x1,y1,z0,  x1,y0,z1, x1,y1,z1,  x0,y0,z1, x0,y1,z1,
+            ]);
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.BufferAttribute(v, 3));
+            camGroup.add(new THREE.LineSegments(g, mat));
+          };
+          const addWireCircle = (cx:number,cy:number,cz:number, r:number, N:number, mat:THREE.LineBasicMaterial) => {
+            const v: number[] = [];
+            for (let i=0;i<N;i++){
+              const a0=(i/N)*Math.PI*2, a1=((i+1)/N)*Math.PI*2;
+              v.push(cx+Math.cos(a0)*r,cy+Math.sin(a0)*r,cz, cx+Math.cos(a1)*r,cy+Math.sin(a1)*r,cz);
+            }
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(v), 3));
+            camGroup.add(new THREE.LineSegments(g, mat));
+          };
+
+          const bodyMat   = new THREE.LineBasicMaterial({ color: 0x44aaff, transparent:true, opacity:0.95, depthTest:false });
+          const lensMat   = new THREE.LineBasicMaterial({ color: 0x88ddff, transparent:true, opacity:0.90, depthTest:false });
+          const detailMat = new THREE.LineBasicMaterial({ color: 0x3366aa, transparent:true, opacity:0.80, depthTest:false });
+          const frustMat  = new THREE.LineBasicMaterial({ color: 0x4488ff, transparent:true, opacity:0.30, depthTest:false });
+
+          // ── main body (symmetric in Z, centered) ─────────────────────────
+          addWireBox(-20,-13,-13, 20,13,13, bodyMat.clone());
+
+          // ── viewfinder bump  (-Z = operator/back side) ───────────────────
+          addWireBox(-7,13,-13, 7,21,-4, detailMat.clone());
+
+          // ── handgrip (right side, symmetric in Z) ─────────────────────────
+          addWireBox(20,-13,-7, 30,9,7, detailMat.clone());
+
+          // ── lens barrel  (+Z = toward subject) ───────────────────────────
+          const lR = 9;
+          addWireCircle(0,0,13, lR, 18, lensMat.clone());   // rear ring at body front
+          addWireCircle(0,0,34, lR, 18, lensMat.clone());   // front ring
+          const bv = new Float32Array([
+             lR,  0, 13,  lR,  0, 34,
+            -lR,  0, 13, -lR,  0, 34,
+             0,  lR, 13,  0,  lR, 34,
+             0, -lR, 13,  0, -lR, 34,
+          ]);
+          const bg = new THREE.BufferGeometry();
+          bg.setAttribute('position', new THREE.BufferAttribute(bv,3));
+          camGroup.add(new THREE.LineSegments(bg, lensMat.clone()));
+
+          // ── FOV frustum (apex at lens front, opening toward subject) ─────
+          const fv = new Float32Array([
+            0,0,34, -30,-20,80,
+            0,0,34,  30,-20,80,
+            0,0,34,  30, 20,80,
+            0,0,34, -30, 20,80,
+            -30,-20,80,  30,-20,80,
+             30,-20,80,  30, 20,80,
+             30, 20,80, -30, 20,80,
+            -30, 20,80, -30,-20,80,
+          ]);
+          const fg = new THREE.BufferGeometry();
+          fg.setAttribute('position', new THREE.BufferAttribute(fv,3));
+          camGroup.add(new THREE.LineSegments(fg, frustMat.clone()));
+
+          // ── target line (+Z = toward target) ─────────────────────────────
+          const tlGeo = new THREE.BufferGeometry();
+          tlGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0,0,0, 0,0,300]),3));
+          const targetLine = new THREE.Line(
+            tlGeo,
+            new THREE.LineBasicMaterial({ color:0x2277ff, transparent:true, opacity:0.20, depthTest:false }),
+          );
+          (targetLine as any).isCameraTargetLine = true;
+          camGroup.add(targetLine);
+          (camGroup as any).isCameraObjectRender = true;
+          mesh = camGroup;
         } else {
           mesh = createStandardObjectMesh(obj.type);
         }
@@ -5953,7 +7580,7 @@ Emitters: ${numEmitters}`;
       } else {
         // Check if emitter type changed, if so rebuild the mesh
         const mesh = sceneObjectMeshesRef.current.get(obj.id);
-        if (obj.type === 'Emitter' && mesh) {
+        if (obj.type === 'Emitter' && mesh && !(mesh as any).isCrosshairRender) {
           // Remove all legacy emitterType visualizations. Only render crosshair for emitters.
           scene.remove(mesh);
           sceneObjectMeshesRef.current.delete(obj.id);
@@ -5971,6 +7598,7 @@ Emitters: ${numEmitters}`;
             3
           ));
           crosshairGroup.add(new THREE.LineSegments(crossGeometry, lineMaterial));
+          (crosshairGroup as any).isCrosshairRender = true;
           crosshairGroup.position.set(obj.position.x, obj.position.y, obj.position.z);
           crosshairGroup.rotation.set(obj.rotation.x, obj.rotation.y, obj.rotation.z);
           crosshairGroup.scale.set(obj.scale.x, obj.scale.y, obj.scale.z);
@@ -5978,22 +7606,35 @@ Emitters: ${numEmitters}`;
           sceneObjectMeshesRef.current.set(obj.id, crosshairGroup);
           return;
         }
-        
-      
+
+        // Rebuild Camera gizmo if stale mesh lacks isCameraObjectRender marker
+        if (obj.type === 'Camera' && mesh && !(mesh as any).isCameraObjectRender) {
+          scene.remove(mesh);
+          sceneObjectMeshesRef.current.delete(obj.id);
+          // Will be recreated as a proper camera gizmo on next sceneObjects update
+          return;
+        }
+
       // Update Path visuals
       if (obj.type === 'Path' && mesh && (mesh as any).isPathRender) {
          const points = sceneObjects.filter(o => o.type === 'PathPoint' && o.parentId === obj.id);
          if (points.length >= 2) {
-             const curvePoints = points.map(p => {
+             const rawPoints = points.map(p => {
                  const pMesh = sceneObjectMeshesRef.current.get(p.id);
                  return pMesh ? pMesh.position.clone() : new THREE.Vector3(p.position.x, p.position.y, p.position.z);
              });
-             const curve = new THREE.CatmullRomCurve3(curvePoints, (obj.properties as any)?.closed || false, 'catmullrom', (obj.properties as any)?.tension ?? 0.5);
-             const segments = Math.max((points.length - 1) * 20, 50);
-             const geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(segments));
+             let geometry: THREE.BufferGeometry;
+             if ((obj.properties as any)?.linear) {
+               geometry = new THREE.BufferGeometry().setFromPoints(rawPoints);
+               (mesh as any).pathCurve = null;
+             } else {
+               const curve = new THREE.CatmullRomCurve3(rawPoints, (obj.properties as any)?.closed || false, 'catmullrom', (obj.properties as any)?.tension ?? 0.5);
+               const segments = Math.max((points.length - 1) * 20, 50);
+               geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(segments));
+               (mesh as any).pathCurve = curve;
+             }
              (mesh as THREE.Line).geometry.dispose();
              (mesh as THREE.Line).geometry = geometry;
-             (mesh as any).pathCurve = curve;
              
              // Move the mesh itself to origin so its vertices match world coords
              mesh.position.set(0,0,0);
@@ -6011,6 +7652,37 @@ Emitters: ${numEmitters}`;
           mesh.scale.set(obj.scale.x, obj.scale.y, obj.scale.z);
         }
       }
+    });
+
+    // Second pass: rebuild any Path line geometries that were just created (or whose
+    // PathPoints were just replaced). At this point all PathPoint meshes are registered.
+    sceneObjects.forEach(obj => {
+      if (obj.type !== 'Path') return;
+      const mesh = sceneObjectMeshesRef.current.get(obj.id);
+      if (!mesh || !(mesh as any).isPathRender) return;
+      const points = sceneObjects.filter(o => o.type === 'PathPoint' && o.parentId === obj.id);
+      if (points.length < 2) return;
+      const curvePoints = points.map(p => {
+        const pMesh = sceneObjectMeshesRef.current.get(p.id);
+        return pMesh
+          ? pMesh.position.clone()
+          : new THREE.Vector3(p.position.x, p.position.y, p.position.z);
+      });
+      let geometry: THREE.BufferGeometry;
+      if ((obj.properties as any)?.linear) {
+        geometry = new THREE.BufferGeometry().setFromPoints(curvePoints);
+        (mesh as any).pathCurve = null;
+      } else {
+        const curve = new THREE.CatmullRomCurve3(curvePoints, (obj.properties as any)?.closed || false, 'catmullrom', (obj.properties as any)?.tension ?? 0.5);
+        const segments = Math.max((points.length - 1) * 20, 50);
+        geometry = new THREE.BufferGeometry().setFromPoints(curve.getPoints(segments));
+        (mesh as any).pathCurve = curve;
+      }
+      (mesh as THREE.Line).geometry.dispose();
+      (mesh as THREE.Line).geometry = geometry;
+      mesh.position.set(0, 0, 0);
+      mesh.rotation.set(0, 0, 0);
+      mesh.scale.set(1, 1, 1);
     });
   }, [sceneObjects]);
 
@@ -6768,6 +8440,11 @@ Emitters: ${numEmitters}`;
     let gizmoAnimationId: number;
     const animateGizmo = () => {
       gizmoAnimationId = requestAnimationFrame(animateGizmo);
+
+      // Hide axis gizmo in camera look-through mode
+      const inCamView = lookThroughCameraRef.current;
+      gizmoCanvas.style.visibility = inCamView ? 'hidden' : 'visible';
+      if (inCamView) return;
       
       // Synchronize gizmo camera rotation with main camera
       const perspectiveCamera = perspectiveCameraRef.current;
@@ -6842,6 +8519,10 @@ Emitters: ${numEmitters}`;
         gridHelpersRef.current.forEach((grid) => {
           helperVisibility.set(grid, grid.visible);
           grid.visible = false;
+        });
+        axisLinesRef.current.forEach((line) => {
+          helperVisibility.set(line, line.visible);
+          line.visible = false;
         });
         selectionOutlineHelpersRef.current.forEach((helper) => {
           helperVisibility.set(helper, helper.visible);
@@ -7290,10 +8971,35 @@ Emitters: ${numEmitters}`;
           }
       });
 
-      trackData.forEach((history, trackId) => {
-        const boneName = `track_${trackId}`;
+      const excludedEmitterIds = new Set<string>(options?.excludeIds ?? []);
 
+      // Sort tracks by average depth so furthest particles render behind closer ones.
+      // In orthographic front view the camera looks from +Z, so lower Z = further away.
+      // In perspective mode state.position.z is still the original world-space Z.
+      // We compute the average world-Z for each track across all frames and sort
+      // ascending (most-negative Z first) — those slots end up at the bottom of the
+      // Spine layer stack and are drawn first (behind everything else).
+      const trackDepths = new Map<string, number>();
+      trackData.forEach((history, trackId) => {
+        if (history.length === 0) { trackDepths.set(trackId, 0); return; }
+        let sumZ = 0;
+        for (const { state } of history) sumZ += state.position.z;
+        trackDepths.set(trackId, sumZ / history.length);
+      });
+      const sortedTrackIds = Array.from(trackData.keys()).sort((a, b) => {
+        const da = trackDepths.get(a) ?? 0;
+        const db = trackDepths.get(b) ?? 0;
+        return da - db; // ascending: furthest (most negative Z) first
+      });
+
+      for (const trackId of sortedTrackIds) {
+        const history = trackData.get(trackId)!;
+        const boneName = `track_${trackId}`;
         const slotName = 'slot_' + trackId;
+
+        // Skip emitters that the user unchecked in the hierarchy
+        const firstEmitterId = history[0]?.state.emitterId;
+        if (firstEmitterId && excludedEmitterIds.has(firstEmitterId)) return;
         
         spineData.bones.push({ name: boneName, parent: "root" });
         spineData.slots.push({ name: slotName, bone: boneName, attachment: null });
@@ -7363,43 +9069,14 @@ Emitters: ${numEmitters}`;
                 });
             }
 
-            // 3 keys (start, mid, end) — cubic bezier covers the full motion accurately
-            const maxKeys = 3;
-            const bakedKeys: {frame: number, state: CachedParticleState}[] = [];
-            if (life.length <= maxKeys) {
-                bakedKeys.push(...life);
-            } else {
-                for (let j = 0; j < maxKeys; j++) {
-                    const idx = Math.floor(j * (life.length - 1) / (maxKeys - 1));
-                    bakedKeys.push(life[idx]);
-                }
-            }
+            // Emit every cached frame as a keyframe with linear curves.
+            // A 3-key bezier reduction was tried previously but Catmull-Rom tangents
+            // computed from only 3 samples cause wild overshooting on path-following
+            // and other non-linear motions.  Linear per-frame keys are perfectly
+            // accurate and still compact — Spine only stores the keyframe array.
+            const bakedKeys: {frame: number, state: CachedParticleState}[] = life;
 
-            // Catmull-Rom tangent helpers — returns the slope at index k for a
-            // uniformly-sampled scalar sequence, clamped at the endpoints.
             type BakedKey = {frame: number, state: CachedParticleState};
-            const crTangent = (keys: BakedKey[], k: number, getValue: (s: BakedKey) => number): number => {
-                if (keys.length < 2) return 0;
-                const prev = keys[Math.max(0, k - 1)];
-                const next = keys[Math.min(keys.length - 1, k + 1)];
-                const prevTime = prev.frame / 24;
-                const nextTime = next.frame / 24;
-                const dt = nextTime - prevTime;
-                return dt > 0 ? (getValue(next) - getValue(prev)) / dt : 0;
-            };
-
-            // Build a single-value bezier curve definition [cx1,cy1,cx2,cy2].
-            const makeBezier1 = (
-                t0: number, v0: number, tan0: number,
-                t1: number, v1: number, tan1: number,
-                clampMin?: number
-            ): number[] => {
-                const dt = t1 - t0;
-                const third = dt / 3;
-                const cp0v = clampMin !== undefined ? Math.max(clampMin, v0 + tan0 * third) : v0 + tan0 * third;
-                const cp1v = clampMin !== undefined ? Math.max(clampMin, v1 - tan1 * third) : v1 - tan1 * third;
-                return [t0 + third, cp0v, t1 - third, cp1v];
-            };
 
             for (let k = 0; k < bakedKeys.length; k++) {
               const { frame, state } = bakedKeys[k];
@@ -7409,103 +9086,45 @@ Emitters: ${numEmitters}`;
               // windows), emit rgba=0 so the particle is transparent at origin/end in Spine — no snap flash.
               const effectiveOpacity = state.visible ? state.opacity : 0;
               const finalAlpha = Math.floor(Math.max(0, Math.min(1, effectiveOpacity)) * 255).toString(16).padStart(2, '0');
-              
+
               const isLastKey = k === bakedKeys.length - 1;
               const steppedDef = { curve: "stepped" };
+              const linearDef = { curve: "linear" };
 
-              // ── Translate bezier (Catmull-Rom tangents from position data) ──
-              let translateCurveDefinition: any = steppedDef;
-              if (!isLastKey) {
-                  const nextObj = bakedKeys[k + 1];
-                  const nextTime = nextObj.frame / 24;
-                  const getX = (bk: BakedKey) => bk.state.position.x * 10;
-                  const getY = (bk: BakedKey) => bk.state.position.y * 10;
-                  const tanX0 = crTangent(bakedKeys, k,     getX) * 10;
-                  const tanX1 = crTangent(bakedKeys, k + 1, getX) * 10;
-                  const tanY0 = crTangent(bakedKeys, k,     getY) * 10;
-                  const tanY1 = crTangent(bakedKeys, k + 1, getY) * 10;
-                  const bx = makeBezier1(time, getX(bakedKeys[k]), tanX0, nextTime, getX(nextObj), tanX1);
-                  const by = makeBezier1(time, getY(bakedKeys[k]), tanY0, nextTime, getY(nextObj), tanY1);
-                  translateCurveDefinition = { curve: [...bx, ...by] };
-              }
-
-              // ── RGBA bezier: per-channel Catmull-Rom for colour tint + smooth alpha fade ──
-              let rgbaCurveDefinition: any = steppedDef;
-              if (!isLastKey) {
-                  const nextObj = bakedKeys[k + 1];
-                  const nextTime = nextObj.frame / 24;
-                  const getA = (bk: BakedKey) => bk.state.visible ? Math.max(0, Math.min(1, bk.state.opacity)) : 0;
-                  const tanA0 = crTangent(bakedKeys, k,     getA);
-                  const tanA1 = crTangent(bakedKeys, k + 1, getA);
-                  const ba = makeBezier1(time, getA(bakedKeys[k]), tanA0, nextTime, getA(nextObj), tanA1, 0);
-                  // Per-channel colour bezier (handles tint gradient; degenerates to 1→1 for white)
-                  const _ch = (col: string | undefined, sh: number) => ((parseInt((col ?? 'ffffff'), 16) >> sh) & 0xff) / 255;
-                  const getR = (bk: BakedKey) => _ch(bk.state.color, 16);
-                  const getG = (bk: BakedKey) => _ch(bk.state.color, 8);
-                  const getB = (bk: BakedKey) => _ch(bk.state.color, 0);
-                  const tanR0 = crTangent(bakedKeys, k, getR), tanR1 = crTangent(bakedKeys, k+1, getR);
-                  const tanG0 = crTangent(bakedKeys, k, getG), tanG1 = crTangent(bakedKeys, k+1, getG);
-                  const tanB0 = crTangent(bakedKeys, k, getB), tanB1 = crTangent(bakedKeys, k+1, getB);
-                  const br = makeBezier1(time, getR(bakedKeys[k]), tanR0, nextTime, getR(nextObj), tanR1, 0);
-                  const bg = makeBezier1(time, getG(bakedKeys[k]), tanG0, nextTime, getG(nextObj), tanG1, 0);
-                  const bb = makeBezier1(time, getB(bakedKeys[k]), tanB0, nextTime, getB(nextObj), tanB1, 0);
-                  rgbaCurveDefinition = { curve: [...br, ...bg, ...bb, ...ba] };
-              }
+              // Linear interpolation between every cached frame.
+              // Bezier / Catmull-Rom compression was removed because with complex
+              // motions (path-following, turbulence) even a well-fitted 3-point
+              // bezier overshoots badly.  Per-frame linear keys are perfectly accurate.
+              const translateCurveDef = isLastKey ? steppedDef : linearDef;
+              const rgbaCurveDef     = isLastKey ? steppedDef : linearDef;
+              const scaleCurveDef    = isLastKey ? steppedDef : linearDef;
+              const rotateCurveDef   = isLastKey ? steppedDef : linearDef;
 
               const stateColorHex = (state.color ?? 'ffffff');
-              slotAnim.rgba.push({ time, color: `${stateColorHex}${finalAlpha}`, ...rgbaCurveDefinition });
+              slotAnim.rgba.push({ time, color: `${stateColorHex}${finalAlpha}`, ...rgbaCurveDef });
 
               boneAnim.translate.push({
                  time,
                  x: state.position.x * 10,
                  y: state.position.y * 10,
-                 ...translateCurveDefinition
+                 ...translateCurveDef,
               });
 
-              // ── Scale bezier (Catmull-Rom tangents) ──
-              // Also gate scale by visibility so the bone collapses to 0 at birth/death windows
-              // For perspective mode, state.size already has distRatio baked in by the projection step
-              // above, so we use the same x10/64 factor as ortho — no separate constant needed.
-              const rawScale = Math.max(0.05, state.size * 10) / 64;
+              // Factor 4 matches the sprite scale = size * 4 world units used in setParticleSize.
+              const rawScale = Math.max(0.05, state.size * 4) / 64;
               const sizeScale = state.visible ? rawScale : 0;
-              let scaleCurveDefinition: any = steppedDef;
-              if (!isLastKey) {
-                  const nextObj = bakedKeys[k + 1];
-                  const nextTime = nextObj.frame / 24;
-                  const scaleOf = (bk: BakedKey) => {
-                      if (!bk.state.visible) return 0;
-                      return Math.max(0.01, Math.max(0.05, bk.state.size * 10) / 64);
-                  };
-                  const tan0 = crTangent(bakedKeys, k,     scaleOf);
-                  const tan1 = crTangent(bakedKeys, k + 1, scaleOf);
-                  const bs = makeBezier1(time, scaleOf(bakedKeys[k]), tan0, nextTime, scaleOf(nextObj), tan1, 0);
-                  // x and y are identical — duplicate the same bezier
-                  scaleCurveDefinition = { curve: [...bs, ...bs] };
-              }
 
               boneAnim.scale.push({
                  time,
                  x: sizeScale,
                  y: sizeScale,
-                 ...scaleCurveDefinition
+                 ...scaleCurveDef,
               });
-
-              // ── Rotate bezier (Catmull-Rom tangents) ──
-              let rotateCurveDefinition: any = steppedDef;
-              if (!isLastKey) {
-                  const nextObj = bakedKeys[k + 1];
-                  const nextTime = nextObj.frame / 24;
-                  const getRot = (bk: BakedKey) => bk.state.rotation * -(180 / Math.PI);
-                  const tanR0 = crTangent(bakedKeys, k,     getRot);
-                  const tanR1 = crTangent(bakedKeys, k + 1, getRot);
-                  const br = makeBezier1(time, getRot(bakedKeys[k]), tanR0, nextTime, getRot(nextObj), tanR1);
-                  rotateCurveDefinition = { curve: br };
-              }
 
               boneAnim.rotate.push({
                  time,
                  value: state.rotation * -(180 / Math.PI),
-                 ...rotateCurveDefinition
+                 ...rotateCurveDef,
               });
             }
 
@@ -7583,15 +9202,35 @@ Emitters: ${numEmitters}`;
              spineData.animations.animation.slots[slotName] = slotAnim;
           }
 
-      });
+      }
 
       return spineData;
     },
     focusSelectedObject: () => {
       focusSelectedObjectRef.current?.();
     },
-    resetRigidBodies: () => {
-      // Stop any active simulation state
+    frameLightningInViewport: (lightningId: string) => {
+      const points = sceneObjectsRef.current.filter(
+        o => o.parentId === lightningId && o.type === 'LightningPoint',
+      );
+      if (points.length === 0) {
+        // fallback: focus the lightning group itself
+        const mesh = sceneObjectMeshesRef.current.get(lightningId);
+        if (mesh) { selectedObjectIdRef.current = lightningId; focusSelectedObjectRef.current?.(); }
+        return;
+      }
+      const box = new THREE.Box3();
+      points.forEach(p => box.expandByPoint(new THREE.Vector3(p.position.x, p.position.y, p.position.z)));
+      const center = box.getCenter(new THREE.Vector3());
+      const size   = box.getSize(new THREE.Vector3());
+      const radius = Math.max(size.length() * 0.6, 20);
+      const cs = cameraStateRef.current;
+      cs.viewOffsetX = center.x;
+      cs.viewOffsetY = center.y;
+      cs.viewOffsetZ = center.z;
+      cs.radius = Math.max(20, radius * 2.8);
+    },
+    resetRigidBodies: () => {      // Stop any active simulation state
       rigidBodyStateRef.current.clear();
       // Restore every physics-driven object to the position it had when play last started
       if (rigidBodyOriginRef.current.size === 0) return;
@@ -7612,6 +9251,440 @@ Emitters: ${numEmitters}`;
           );
         }
       });
+    },
+
+    generateVineOnSurface: (
+      objectId: string,
+      numPoints: number,
+      totalLength: number,
+      curliness: number,
+    ): { x: number; y: number; z: number }[] => {
+      const meshRoot = sceneObjectMeshesRef.current.get(objectId);
+      if (!meshRoot) return [];
+      const tris = buildSurfaceTris(meshRoot);
+      if (tris.length === 0) return [];
+
+      // Project a point onto the nearest surface triangle
+      const projectOntoTris = (p: THREE.Vector3): { point: THREE.Vector3; normal: THREE.Vector3 } => {
+        let bestDist = Infinity;
+        let bestPoint = p.clone();
+        let bestNormal = new THREE.Vector3(0, 1, 0);
+        const tmp = new THREE.Vector3();
+        for (const tri of tris) {
+          closestPointOnTriangleCached(p, tri.a, tri.b, tri.c, tmp);
+          const d = tmp.distanceToSquared(p);
+          if (d < bestDist) {
+            bestDist = d;
+            bestPoint.copy(tmp);
+            bestNormal.copy(tri.n);
+          }
+        }
+        return { point: bestPoint.clone(), normal: bestNormal.clone() };
+      };
+
+      // Rotate a tangent vector in the tangent plane of `n` by `angle` radians
+      const rotateTangentInPlane = (t: THREE.Vector3, n: THREE.Vector3, angle: number): THREE.Vector3 => {
+        const binormal = new THREE.Vector3().crossVectors(n, t).normalize();
+        return new THREE.Vector3()
+          .copy(t).multiplyScalar(Math.cos(angle))
+          .addScaledVector(binormal, Math.sin(angle))
+          .normalize();
+      };
+
+      // Area-weighted random start triangle
+      const areas = tris.map(tri => {
+        const ab = new THREE.Vector3().subVectors(tri.b, tri.a);
+        const ac = new THREE.Vector3().subVectors(tri.c, tri.a);
+        return new THREE.Vector3().crossVectors(ab, ac).length() * 0.5;
+      });
+      const totalArea = areas.reduce((s, a) => s + a, 0);
+      let rand = Math.random() * totalArea;
+      let pickIdx = 0;
+      for (let i = 0; i < areas.length; i++) {
+        rand -= areas[i];
+        if (rand <= 0) { pickIdx = i; break; }
+      }
+      const startTri = tris[pickIdx];
+      const u = Math.random();
+      const v = Math.random() * (1 - u);
+      const startPos = startTri.a.clone()
+        .addScaledVector(new THREE.Vector3().subVectors(startTri.b, startTri.a), u)
+        .addScaledVector(new THREE.Vector3().subVectors(startTri.c, startTri.a), v);
+
+      let normal = startTri.n.clone();
+      // Build initial tangent perpendicular to normal, then randomise direction
+      const arbitrary = Math.abs(normal.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+      let tangent = new THREE.Vector3().crossVectors(normal, arbitrary).normalize();
+      tangent = rotateTangentInPlane(tangent, normal, Math.random() * Math.PI * 2);
+
+      const stepLen = totalLength / Math.max(1, numPoints - 1);
+      // Organic wave parameters — different each call
+      const freq1 = 2.0 + Math.random() * 2.5;
+      const freq2 = freq1 * 1.618;
+      const phase1 = Math.random() * Math.PI * 2;
+      const phase2 = Math.random() * Math.PI * 2;
+
+      let pos = startPos.clone();
+      const result: { x: number; y: number; z: number }[] = [{ x: pos.x, y: pos.y, z: pos.z }];
+
+      for (let i = 1; i < numPoints; i++) {
+        const t = i / Math.max(1, numPoints - 1);
+        // Vine angle delta: dual-frequency sine (primary curl + harmonic flutter) + micro-noise
+        const angDelta =
+          Math.sin(t * Math.PI * 2 * freq1 + phase1) * curliness * 0.18 +
+          Math.sin(t * Math.PI * 2 * freq2 + phase2) * curliness * 0.06 +
+          (Math.random() - 0.5) * curliness * 0.05;
+        tangent = rotateTangentInPlane(tangent, normal, angDelta);
+
+        const nextPos = pos.clone().addScaledVector(tangent, stepLen);
+        const snapped = projectOntoTris(nextPos);
+        pos = snapped.point;
+        normal = snapped.normal;
+        // Re-project tangent onto new tangent plane (remove component along normal)
+        const proj = tangent.dot(normal);
+        tangent.addScaledVector(normal, -proj).normalize();
+
+        result.push({ x: pos.x, y: pos.y, z: pos.z });
+      }
+      return result;
+    },
+    getCamera: () => currentCameraRef.current,
+    getRendererSize: () => {
+      if (!rendererRef.current) return null;
+      const s = rendererRef.current.getSize(new THREE.Vector2());
+      return { width: s.x, height: s.y };
+    },
+    captureSaberPNG: (objectId: string): Promise<Blob> => {
+      return new Promise<Blob>((resolve, reject) => {
+        const renderer = rendererRef.current;
+        const camera   = currentCameraRef.current;
+        const scene3   = sceneRef.current;
+        if (!renderer || !camera || !scene3) { reject(new Error('Renderer not ready')); return; }
+
+        const targetGroup = sceneObjectMeshesRef.current.get(objectId);
+        if (!targetGroup) { reject(new Error('Object not found: ' + objectId)); return; }
+
+        const size = renderer.getSize(new THREE.Vector2());
+        const W = size.x, H = size.y;
+
+        // ── 1. Save visibility state of every scene object ──────────────────
+        const visMap = new Map<THREE.Object3D, boolean>();
+        scene3.traverse(obj => { visMap.set(obj, obj.visible); });
+
+        // ── 2. Hide everything except the target group and its descendants ──
+        scene3.traverse(obj => {
+          if (obj === scene3) return;
+          obj.visible = false;
+        });
+        // Show the saber group and all its children
+        targetGroup.visible = true;
+        targetGroup.traverse(obj => { obj.visible = true; });
+
+        // ── 3. Render to an off-screen render target ───────────────────────
+        const rt = new THREE.WebGLRenderTarget(W, H, {
+          format: THREE.RGBAFormat,
+          type:   THREE.UnsignedByteType,
+        });
+        const prevColor = renderer.getClearColor(new THREE.Color());
+        const prevAlpha = renderer.getClearAlpha();
+        // Null out scene background/fog so they don't paint over the transparent clear
+        const savedBg  = scene3.background;  scene3.background = null;
+        const savedFog = scene3.fog;         scene3.fog = null;
+        renderer.setClearColor(0x000000, 0);
+        renderer.setRenderTarget(rt);
+        renderer.clear();
+        renderer.render(scene3, camera);
+        renderer.setRenderTarget(null);
+        renderer.setClearColor(prevColor, prevAlpha);
+        scene3.background = savedBg;
+        scene3.fog = savedFog;
+
+        // ── 4. Restore visibility ─────────────────────────────────────────
+        visMap.forEach((v, obj) => { obj.visible = v; });
+
+        // ── 5. Read pixels (WebGL y is bottom-up, flip to top-down) ────────
+        const pixels = new Uint8Array(W * H * 4);
+        renderer.readRenderTargetPixels(rt, 0, 0, W, H, pixels);
+        rt.dispose();
+
+        // ── 6. Bounding box via Box3 projection (matches the live overlay) ────
+        const _pngBoxTarget = targetGroup.getObjectByName('SaberMesh') ?? targetGroup;
+        const boxPng = new THREE.Box3().setFromObject(_pngBoxTarget);
+        const glowWPng = (sceneObjectsRef.current.find(o => o.id === objectId)?.properties as any)?.glowWidth ?? 6;
+        boxPng.expandByScalar(glowWPng * capturePreviewPaddingRef.current);
+        const CORNERS_PNG = [
+          [0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,0,1],[1,0,1],[0,1,1],[1,1,1],
+        ] as const;
+        let mnX = W, mxX = 0, mnY = H, mxY = 0;
+        const _vp = new THREE.Vector3();
+        for (const [fx,fy,fz] of CORNERS_PNG) {
+          _vp.set(
+            fx ? boxPng.max.x : boxPng.min.x,
+            fy ? boxPng.max.y : boxPng.min.y,
+            fz ? boxPng.max.z : boxPng.min.z,
+          ).project(camera);
+          // NDC → renderer pixels, Y flipped (0 = top)
+          const spx = Math.round(( _vp.x + 1) * 0.5 * W);
+          const spy = Math.round((-_vp.y + 1) * 0.5 * H);
+          if (spx < mnX) mnX = spx; if (spx > mxX) mxX = spx;
+          if (spy < mnY) mnY = spy; if (spy > mxY) mxY = spy;
+        }
+        if (mnX > mxX || mnY > mxY) { reject(new Error('No visible pixels found')); return; }
+        const PAD_PNG = 2;
+        mnX = Math.max(0,   mnX - PAD_PNG); mxX = Math.min(W - 1, mxX + PAD_PNG);
+        mnY = Math.max(0,   mnY - PAD_PNG); mxY = Math.min(H - 1, mxY + PAD_PNG);
+        const cW = mxX - mnX + 1;
+        const cH = mxY - mnY + 1;
+
+        // ── 7. Copy cropped region into a canvas, respecting the y-flip ────
+        const cvs = document.createElement('canvas');
+        cvs.width = cW; cvs.height = cH;
+        const ctx  = cvs.getContext('2d')!;
+        const imgD = ctx.createImageData(cW, cH);
+        for (let cy = 0; cy < cH; cy++) {
+          for (let cx = 0; cx < cW; cx++) {
+            // dst pixel (cx, cy) comes from src WebGL pixel (mnX+cx, H-1-(mnY+cy))
+            const srcX = mnX + cx;
+            const srcY = H - 1 - (mnY + cy);
+            const si   = (srcY * W + srcX) * 4;
+            const di   = (cy   * cW + cx ) * 4;
+            imgD.data[di]     = pixels[si];
+            imgD.data[di + 1] = pixels[si + 1];
+            imgD.data[di + 2] = pixels[si + 2];
+            imgD.data[di + 3] = pixels[si + 3];
+          }
+        }
+        ctx.putImageData(imgD, 0, 0);
+
+        cvs.toBlob(blob => {
+          if (blob) resolve(blob);
+          else reject(new Error('Failed to encode PNG'));
+        }, 'image/png');
+      });
+    },
+
+    captureSaberSequence: (objectIds: string[], frameCount = 16, fps = 24): Promise<Blob[]> => {
+      return (async () => {
+        const renderer = rendererRef.current;
+        const camera   = currentCameraRef.current;
+        const scene3   = sceneRef.current;
+        if (!renderer || !camera || !scene3) throw new Error('Renderer not ready');
+        if (!objectIds.length) throw new Error('No objects specified');
+
+        type MatWithUniforms = THREE.Material & { uniforms?: Record<string, THREE.IUniform> };
+
+        // ── Gather per-object info ─────────────────────────────────────────
+        const targets = objectIds.map(id => {
+          const group    = sceneObjectMeshesRef.current.get(id);
+          const sObj     = sceneObjectsRef.current.find(o => o.id === id);
+          const isFlame  = sObj?.type === 'Flame';
+          const noiseSpeed = (sObj?.properties as any)?.noiseSpeed ?? 1.0;
+          const isAnim   = (sObj?.properties as any)?.noiseAnimated !== false;
+          const saberMesh = group?.getObjectByName('SaberMesh') as THREE.Mesh | undefined;
+          const mat      = saberMesh?.material as MatWithUniforms | undefined;
+          const savedTime       = mat?.uniforms?.uTime?.value       as number | undefined;
+          const savedOffsetTime = mat?.uniforms?.uOffsetTime?.value as number | undefined;
+          const glowW    = (sObj?.properties as any)?.glowWidth ?? 6;
+          return { id, group, sObj, isFlame, noiseSpeed, isAnim, mat, savedTime, savedOffsetTime, glowW };
+        }).filter(t => !!t.group);
+
+        if (!targets.length) throw new Error('None of the specified objects were found in the scene');
+
+        const size = renderer.getSize(new THREE.Vector2());
+        const W = size.x, H = size.y;
+
+        // ── Save visibility, hide all, show all targets ────────────────────
+        const visMap = new Map<THREE.Object3D, boolean>();
+        scene3.traverse(obj => { visMap.set(obj, obj.visible); });
+        scene3.traverse(obj => { if (obj !== scene3) obj.visible = false; });
+        for (const t of targets) {
+          t.group!.visible = true;
+          t.group!.traverse(obj => {
+            const anyObj = obj as any;
+            if (anyObj.isPathPointRender || anyObj.isPathRender || anyObj.isCrosshairRender || anyObj.isCameraObjectRender) {
+              obj.visible = false;
+            } else {
+              obj.visible = true;
+            }
+          });
+          
+          // Prevent root group itself if it's a helper
+          const anyGroup = t.group! as any;
+          if (anyGroup.isPathPointRender || anyGroup.isPathRender || anyGroup.isCrosshairRender || anyGroup.isCameraObjectRender) {
+            t.group!.visible = false;
+          }
+        }
+
+        // ── Off-screen render target ───────────────────────────────────────
+        const rt = new THREE.WebGLRenderTarget(W, H, {
+          format: THREE.RGBAFormat,
+          type:   THREE.UnsignedByteType,
+        });
+        const prevColor = renderer.getClearColor(new THREE.Color());
+        const prevAlpha = renderer.getClearAlpha();
+        const savedBg  = scene3.background;  scene3.background = null;
+        const savedFog = scene3.fog;         scene3.fog = null;
+        renderer.setClearColor(0x000000, 0);
+
+        // ── Render all frames ──────────────────────────────────────────────
+        const animDuration = 1.0;
+        const allPixels: Uint8Array[] = [];
+        for (let f = 0; f < frameCount; f++) {
+          
+          captureAnimTimeRef.current = f / fps;
+          captureSequenceRef.current = { frameCount, fps, frameIndex: f };
+          
+          // Drive saber shader uniforms for non-flame objects
+          for (const t of targets) {
+            if (!t.isFlame) {
+              const tNorm = (f / frameCount) * animDuration * t.noiseSpeed;
+              if (t.mat?.uniforms?.uTime)       t.mat.uniforms.uTime.value       = t.isAnim ? tNorm : 0;
+              if (t.mat?.uniforms?.uOffsetTime) t.mat.uniforms.uOffsetTime.value = f / fps;
+            }
+          }
+
+          // Await rAF so any useFrame logic (Lightning, Flames) can tick with captureAnimTimeRef
+          await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+          await new Promise<void>(resolve => setTimeout(resolve, 0));
+
+          renderer.setRenderTarget(rt);
+          renderer.clear();
+          renderer.render(scene3, camera);
+          const px = new Uint8Array(W * H * 4);
+          renderer.readRenderTargetPixels(rt, 0, 0, W, H, px);
+          allPixels.push(px);
+        }
+
+        renderer.setRenderTarget(null);
+        renderer.setClearColor(prevColor, prevAlpha);
+        rt.dispose();
+        captureAnimTimeRef.current = null;
+        captureSequenceRef.current = null;
+
+        // ── Restore visibility + shader state ─────────────────────────────
+        visMap.forEach((v, obj) => { obj.visible = v; });
+        for (const t of targets) {
+          if (t.mat?.uniforms?.uTime       && t.savedTime       !== undefined) t.mat.uniforms.uTime.value       = t.savedTime;
+          if (t.mat?.uniforms?.uOffsetTime && t.savedOffsetTime !== undefined) t.mat.uniforms.uOffsetTime.value = t.savedOffsetTime;
+        }
+        scene3.background = savedBg;
+        scene3.fog = savedFog;
+
+        // ── Union bounding box OR manual crop rect ──────────────────────
+        const manualCss = manualCropRectRef.current;
+        let mnX: number, mxX: number, mnY: number, mxY: number;
+        if (manualCss) {
+          const dpr = renderer.getPixelRatio();
+          mnX = Math.max(0, Math.round(manualCss.left * dpr));
+          mnY = Math.max(0, Math.round(manualCss.top  * dpr));
+          mxX = Math.min(W - 1, Math.round((manualCss.left + manualCss.width)  * dpr) - 1);
+          mxY = Math.min(H - 1, Math.round((manualCss.top  + manualCss.height) * dpr) - 1);
+        } else {
+          const unionBox = new THREE.Box3();
+          for (const t of targets) {
+            if (!t.group) continue;
+            const boxTarget = t.group.getObjectByName('SaberMesh') ?? t.group;
+            const b = new THREE.Box3().setFromObject(boxTarget);
+            b.expandByScalar(t.glowW * capturePreviewPaddingRef.current);
+            unionBox.union(b);
+          }
+          const CORNERS_SEQ = [
+            [0,0,0],[1,0,0],[0,1,0],[1,1,0],[0,0,1],[1,0,1],[0,1,1],[1,1,1],
+          ] as const;
+          mnX = W; mxX = 0; mnY = H; mxY = 0;
+          const _vs = new THREE.Vector3();
+          for (const [fx,fy,fz] of CORNERS_SEQ) {
+            _vs.set(
+              fx ? unionBox.max.x : unionBox.min.x,
+              fy ? unionBox.max.y : unionBox.min.y,
+              fz ? unionBox.max.z : unionBox.min.z,
+            ).project(camera);
+            const spx = Math.round(( _vs.x + 1) * 0.5 * W);
+            const spy = Math.round((-_vs.y + 1) * 0.5 * H);
+            if (spx < mnX) mnX = spx; if (spx > mxX) mxX = spx;
+            if (spy < mnY) mnY = spy; if (spy > mxY) mxY = spy;
+          }
+          if (mnX > mxX || mnY > mxY) { mnX = 0; mxX = W - 1; mnY = 0; mxY = H - 1; }
+          const PAD_PNG = 2;
+          mnX = Math.max(0, mnX - PAD_PNG); mxX = Math.min(W - 1, mxX + PAD_PNG);
+          mnY = Math.max(0, mnY - PAD_PNG); mxY = Math.min(H - 1, mxY + PAD_PNG);
+        }
+        const cW = mxX - mnX + 1;
+        const cH = mxY - mnY + 1;
+
+        // ── Crop + encode each frame ──────────────────────────────────────
+        const blobs: Blob[] = [];
+        for (const px of allPixels) {
+          const cvs2 = document.createElement('canvas');
+          cvs2.width = cW; cvs2.height = cH;
+          const ctx2  = cvs2.getContext('2d')!;
+          const imgD2 = ctx2.createImageData(cW, cH);
+          for (let cy2 = 0; cy2 < cH; cy2++) {
+            for (let cx2 = 0; cx2 < cW; cx2++) {
+              const srcX = mnX + cx2;
+              const srcY = H - 1 - (mnY + cy2);
+              const si   = (srcY * W + srcX) * 4;
+              const di   = (cy2  * cW + cx2 ) * 4;
+              imgD2.data[di]     = px[si];
+              imgD2.data[di + 1] = px[si + 1];
+              imgD2.data[di + 2] = px[si + 2];
+              imgD2.data[di + 3] = px[si + 3];
+            }
+          }
+          ctx2.putImageData(imgD2, 0, 0);
+          const blob = await new Promise<Blob>((res, rej) =>
+            cvs2.toBlob(b => b ? res(b) : rej(new Error('PNG encode failed')), 'image/png')
+          );
+          blobs.push(blob);
+        }
+        return blobs;
+      })();
+    },
+
+    getSpineEdgeOutline: (attachmentId: string, numPoints: number = 32): { x: number; y: number; z: number }[] => {
+      const mesh = spineAttachmentMeshesRef.current.get(attachmentId);
+      const pixData = spineAttachPixelDataRef.current.get(attachmentId);
+      if (!mesh || !pixData || !pixData.edgeSamples.length) return [];
+      const { edgeSamples } = pixData;
+      const geom = mesh.geometry as THREE.PlaneGeometry;
+      if (!geom?.parameters) return [];
+      const { width: pw, height: ph } = geom.parameters;
+      // Centroid in UV space
+      const cx = edgeSamples.reduce((s, p) => s + p.u, 0) / edgeSamples.length;
+      const cy = edgeSamples.reduce((s, p) => s + p.v, 0) / edgeSamples.length;
+      // Divide the full angle range into numPoints buckets.
+      // For each bucket pick the edge sample that is FARTHEST from centroid —
+      // this selects the outermost edge point in that direction, giving a tight
+      // contour that hugs the actual visible boundary.
+      type Bucket = { u: number; v: number; dist: number } | null;
+      const buckets: Bucket[] = new Array(numPoints).fill(null);
+      for (const s of edgeSamples) {
+        const angle = Math.atan2(s.v - cy, s.u - cx); // -π..π
+        const bIdx = Math.floor(((angle + Math.PI) / (2 * Math.PI)) * numPoints) % numPoints;
+        const dist = Math.hypot(s.u - cx, s.v - cy);
+        const b = buckets[bIdx];
+        if (!b || dist > b.dist) buckets[bIdx] = { u: s.u, v: s.v, dist };
+      }
+      // Fallback: fill empty buckets by interpolating from neighbours so path is closed
+      // (walk forward to find next populated bucket)
+      for (let i = 0; i < numPoints; i++) {
+        if (!buckets[i]) {
+          // Find nearest non-null bucket
+          let nearest: Bucket = null;
+          for (let d = 1; d < numPoints; d++) {
+            const cand = buckets[(i + d) % numPoints];
+            if (cand) { nearest = cand; break; }
+          }
+          buckets[i] = nearest;
+        }
+      }
+      return buckets
+        .filter((b): b is NonNullable<Bucket> => b !== null)
+        .map(b => {
+          const local = new THREE.Vector3((b.u - 0.5) * pw, (0.5 - b.v) * ph, 0);
+          const world = mesh.localToWorld(local);
+          return { x: world.x, y: world.y, z: world.z };
+        });
     },
   }));
 
@@ -7697,6 +9770,74 @@ Emitters: ${numEmitters}`;
           zIndex: 3,
         }}
       />
+      {/* Capture-preview crop overlay */}
+      {manualCropRect ? (
+        <div
+          style={{
+            position: 'absolute',
+            left: manualCropRect.left, top: manualCropRect.top,
+            width: manualCropRect.width, height: manualCropRect.height,
+            border: '2px solid #7dffaa',
+            boxShadow: '0 0 0 1px rgba(0,0,0,0.55), inset 0 0 0 1px rgba(0,0,0,0.55)',
+            zIndex: 10, boxSizing: 'border-box', cursor: 'move',
+            background: 'rgba(0,200,100,0.04)',
+          }}
+          onMouseDown={(e) => {
+            e.preventDefault(); e.stopPropagation();
+            cropDragRef.current = { type: 'move', startX: e.clientX, startY: e.clientY, origRect: { ...manualCropRect } };
+          }}
+        >
+          <span style={{
+            position: 'absolute', top: -18, left: 0, pointerEvents: 'none',
+            fontSize: 10, fontWeight: 700, color: '#7dffaa',
+            background: 'rgba(0,0,0,0.7)', padding: '1px 4px',
+            borderRadius: 3, whiteSpace: 'nowrap', letterSpacing: '0.05em',
+          }}>
+            {Math.round(manualCropRect.width)} × {Math.round(manualCropRect.height)}
+          </span>
+          {(['nw','n','ne','e','se','s','sw','w'] as const).map(ht => {
+            const hStyle: React.CSSProperties = {
+              position: 'absolute', width: 10, height: 10,
+              background: '#7dffaa', border: '1px solid rgba(0,0,0,0.6)',
+              borderRadius: 2, zIndex: 11,
+              ...(ht==='nw'?{top:-5,left:-5,cursor:'nw-resize'}:
+                 ht==='n' ?{top:-5,left:'calc(50% - 5px)',cursor:'n-resize'}:
+                 ht==='ne'?{top:-5,right:-5,cursor:'ne-resize'}:
+                 ht==='e' ?{top:'calc(50% - 5px)',right:-5,cursor:'e-resize'}:
+                 ht==='se'?{bottom:-5,right:-5,cursor:'se-resize'}:
+                 ht==='s' ?{bottom:-5,left:'calc(50% - 5px)',cursor:'s-resize'}:
+                 ht==='sw'?{bottom:-5,left:-5,cursor:'sw-resize'}:
+                          {top:'calc(50% - 5px)',left:-5,cursor:'w-resize'}),
+            };
+            return (
+              <div key={ht} style={hStyle}
+                onMouseDown={(e) => {
+                  e.preventDefault(); e.stopPropagation();
+                  cropDragRef.current = { type: ht, startX: e.clientX, startY: e.clientY, origRect: { ...manualCropRect } };
+                }}
+              />
+            );
+          })}
+        </div>
+      ) : capturePreviewRect ? (
+        <div style={{
+          position: 'absolute',
+          left: capturePreviewRect.left, top: capturePreviewRect.top,
+          width: capturePreviewRect.width, height: capturePreviewRect.height,
+          border: '2px dashed #7dffaa',
+          boxShadow: '0 0 0 1px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.6)',
+          pointerEvents: 'none', zIndex: 10, boxSizing: 'border-box',
+        }}>
+          <span style={{
+            position: 'absolute', top: -18, left: 0,
+            fontSize: 10, fontWeight: 700, color: '#7dffaa',
+            background: 'rgba(0,0,0,0.7)', padding: '1px 4px',
+            borderRadius: 3, whiteSpace: 'nowrap', letterSpacing: '0.05em',
+          }}>
+            {Math.round(capturePreviewRect.width)} × {Math.round(capturePreviewRect.height)}
+          </span>
+        </div>
+      ) : null}
       <div
         className="viewport-shelf"
         style={{
@@ -7743,6 +9884,20 @@ Emitters: ${numEmitters}`;
             checked={sceneSettings.showSpineImages ?? true}
             onChange={(e) => onUpdateSceneSettings?.({ showSpineImages: e.target.checked })}
           /> Spine Images
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px' }}>
+          <input
+            type="checkbox"
+            checked={sceneSettings.showPathPoints ?? false}
+            onChange={(e) => onUpdateSceneSettings?.({ showPathPoints: e.target.checked })}
+          /> Handles
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px' }}>
+          <input
+            type="checkbox"
+            checked={sceneSettings.showFX ?? true}
+            onChange={(e) => onUpdateSceneSettings?.({ showFX: e.target.checked })}
+          /> FX
         </label>
         <label style={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: '12px' }}>
           <input

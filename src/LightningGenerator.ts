@@ -56,8 +56,10 @@ export interface LightningGenOptions {
   /**
    * 'sequence' = every segment/branch gets its own N-frame PNG sequence (attachment cycles).
    * 'bone-anim' = one static PNG per segment/branch; jitter is driven by bone rotation keyframes.
+   * 'viewport-sequence' = full-frame PNG sequence captured from the live viewport renderer.
    */
-  exportMode: 'sequence' | 'bone-anim';
+  exportMode: 'sequence' | 'bone-anim' | 'viewport-sequence';
+  flareShape?: string;
 }
 
 export const defaultLightningOpts = (): LightningGenOptions => ({
@@ -404,19 +406,84 @@ function renderBoltToCtx(
       if (r < 0.3) return;
 
       // Same gradient shape as buildLightningGlowTex in Scene3D
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-      grad.addColorStop(0.00, `rgba(255,255,255,1.00)`);
-      grad.addColorStop(0.10, `rgba(255,255,255,0.95)`);
-      grad.addColorStop(0.22, `rgba(${cr},${cg},${cb},0.90)`);
-      grad.addColorStop(0.42, `rgba(${gr},${gg},${gb},0.80)`);
-      grad.addColorStop(0.65, `rgba(${gr},${gg},${gb},0.35)`);
-      grad.addColorStop(0.85, `rgba(${gr},${gg},${gb},0.08)`);
-      grad.addColorStop(1.00, `rgba(${gr},${gg},${gb},0.00)`);
+      const shape = opts.flareShape || 'circle';
+      if (shape === 'diamond') {
+        const dx = r; const dy = r;
+        const imgData = ctx.createImageData(Math.ceil(r*2), Math.ceil(r*2));
+        for (let py = 0; py < imgData.height; py++) {
+          for (let px = 0; px < imgData.width; px++) {
+            const ndx = Math.abs(px - r) / r;
+            const ndy = Math.abs(py - r) / r;
+            const d = ndx + ndy;
+            const a = d < 1.0 ? Math.pow(1.0 - d, 2.0) : 0;
+            
+            let clr: [number, number, number];
+            if (d < 0.10) { clr = [255, 255, 255]; }
+            else if (d < 0.22) { clr = [cr, cg, cb]; }
+            else { clr = [gr, gg, gb]; }
+            
+            const idx = (py * imgData.width + px) * 4;
+            imgData.data[idx] = clr[0]; imgData.data[idx+1] = clr[1]; imgData.data[idx+2] = clr[2];
+            imgData.data[idx+3] = a * 255;
+          }
+        }
+        
+        const tempCv = document.createElement('canvas'); tempCv.width = imgData.width; tempCv.height = imgData.height;
+        tempCv.getContext('2d')!.putImageData(imgData, 0, 0);
+        ctx.drawImage(tempCv, x - r, y - r);
 
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
-      ctx.fill();
+      } else if (shape === 'star') {
+        const dx = r; const dy = r;
+        const imgData = ctx.createImageData(Math.ceil(r*2), Math.ceil(r*2));
+        for (let py = 0; py < imgData.height; py++) {
+          for (let px = 0; px < imgData.width; px++) {
+            const ndx = Math.abs(px - r) / r;
+            const ndy = Math.abs(py - r) / r;
+            const d = Math.sqrt(ndx) + Math.sqrt(ndy);
+            const a = d < 1.0 ? Math.pow(1.0 - d, 2.5) : 0;
+            
+            let clr: [number, number, number];
+            if (d < 0.20) { clr = [255, 255, 255]; }
+            else if (d < 0.3) { clr = [cr, cg, cb]; }
+            else { clr = [gr, gg, gb]; }
+            
+            const idx = (py * imgData.width + px) * 4;
+            imgData.data[idx] = clr[0]; imgData.data[idx+1] = clr[1]; imgData.data[idx+2] = clr[2];
+            imgData.data[idx+3] = a * 255;
+          }
+        }
+        
+        const tempCv = document.createElement('canvas'); tempCv.width = imgData.width; tempCv.height = imgData.height;
+        tempCv.getContext('2d')!.putImageData(imgData, 0, 0);
+        ctx.drawImage(tempCv, x - r, y - r);
+      } else if (shape === 'sharp') {
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0.00, `rgba(255,255,255,1.00)`);
+        grad.addColorStop(0.02, `rgba(255,255,255,0.95)`);
+        grad.addColorStop(0.06, `rgba(${cr},${cg},${cb},0.90)`);
+        grad.addColorStop(0.12, `rgba(${gr},${gg},${gb},0.60)`);
+        grad.addColorStop(0.25, `rgba(${gr},${gg},${gb},0.15)`);
+        grad.addColorStop(1.00, `rgba(${gr},${gg},${gb},0.00)`);
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+        grad.addColorStop(0.00, `rgba(255,255,255,1.00)`);
+        grad.addColorStop(0.10, `rgba(255,255,255,0.95)`);
+        grad.addColorStop(0.22, `rgba(${cr},${cg},${cb},0.90)`);
+        grad.addColorStop(0.42, `rgba(${gr},${gg},${gb},0.80)`);
+        grad.addColorStop(0.65, `rgba(${gr},${gg},${gb},0.35)`);
+        grad.addColorStop(0.85, `rgba(${gr},${gg},${gb},0.08)`);
+        grad.addColorStop(1.00, `rgba(${gr},${gg},${gb},0.00)`);
+
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     });
   };
 
@@ -612,9 +679,14 @@ export function exportLightningHierarchyToSpine(
   }
   const arcLen = segLens.reduce((sum, value) => sum + value, 0) || straightLen;
   const rootAngleDeg = segAnglesDeg[0] ?? 0;
-  const glowPad      = Math.max(opts.glowWidth * 2, 20);
+
+  // ── Glow-aware padding:  compute a rough pixel scale first so we know the
+  //    scaled halo radius (glowWidth * S * 2.5) and can set padding ≥ that
+  //    (avoiding glow clipping at tile edges).
+  const roughScale  = Math.max(1, (opts.canvasWidth - 40) / Math.max(1, arcLen));
+  const glowPad     = Math.max(Math.ceil(opts.glowWidth * roughScale * 2.5 * 1.2), 20);
   // pixelScale: scene units → pixels (content area of the canvas maps to bolt length)
-  const pixelScale   = (opts.canvasWidth - 2 * glowPad) / arcLen;
+  const pixelScale   = (opts.canvasWidth - 2 * glowPad) / Math.max(1, arcLen);
   // S: scene units → Spine world units.  We use pixelScale so that
   // 1 Spine world unit = 1 canvas pixel, making attachment width/height
   // directly equal to the pixel dimensions of the PNG images.
@@ -628,8 +700,11 @@ export function exportLightningHierarchyToSpine(
   const animSlots:        any                         = {};
   const animBones:        any                         = {};
   const allSegmentFrames: Record<string, string[]>    = {};
-  // Spine 4.2 sequence mode: 'loop' for repeating, 'hold' for strike (hold last frame)
-  const seqMode = opts.mode === 'strike' ? 'hold' : 'loop';
+  // Spine 4.2 sequence mode:
+  //   PNG sequence — 'hold' for strike/loop-strike (play growth frames once, freeze at full bolt)
+  //                  'loop' for loop (arc jitter loops continuously)
+  //   bone-anim   — always 'loop' (overridden in addSlot)
+  const seqMode = opts.mode === 'loop' ? 'loop' : 'hold';
   const isBoneAnim = (opts.exportMode ?? 'sequence') === 'bone-anim';
   /**
    * For strike/loop-strike: tracks when each slot should start and finish revealing.
@@ -648,19 +723,26 @@ export function exportLightningHierarchyToSpine(
     renderStyle: BoltRenderStyle = MAIN_BOLT_RENDER_STYLE,
   ): { frames: string[]; cW: number; cH: number } => {
     const cW = Math.max(64, Math.ceil(worldLen * pixelScale + 2 * glowPad));
-    // For bone-anim use a tight canvas height so mesh vertices sit right at the
-    // content boundary.  Formula:
-    //   halo radius     = glowWidth * widthScale * 2.5  (largest pass)
-    //   arc Y wander    ≈ roughness * 0.3 * segLen/2 pixels (mid-displacement headroom)
-    //   We double it (both sides) and add glowPad margin.
-    // For sequence mode keep the full canvasHeight so the sequence frames have
-    // comfortable room for a wildly displaced arc.
-    const cH = opts.canvasHeight;
+    // Scale glow/core widths from world units → canvas pixels to match viewport sprite sizes:
+    //   viewport: haloD = glowWidth * 5.0 world-unit diameter
+    //   canvas:   haloR = glowWidth * pixelScale * 2.5 canvas-pixel radius  ✓
+    const scaledOpts = {
+      ...opts,
+      glowWidth: opts.glowWidth * pixelScale * widthScale,
+      coreWidth: opts.coreWidth * pixelScale * widthScale,
+    };
+    // Canvas height: enough for the scaled halo radius + worst-case Y arc wander per segment
+    const scaledHaloR = scaledOpts.glowWidth * 2.5;   // = glowWidth * pixelScale * widthScale * 2.5
+    const arcYWander  = opts.roughness * worldLen * pixelScale * 0.30;
+    const cH = Math.max(64, Math.ceil((scaledHaloR + arcYWander) * 2 * 2.4 + glowPad));
     const frames: string[] = [];
     const count = numFrames ?? opts.frameCount;
     for (let f = 0; f < count; f++) {
       const rng    = makePrng(f * 31337 + seedOffset + 9973);
-      const subset = opts.mode === 'strike' ? (f + 1) / count : 1.0;
+      // bone-anim: bones handle reveal → render full bolt every frame (arc jitter only).
+      // PNG sequence, loop: full bolt every frame (jitter loops).
+      // PNG sequence, strike/loop-strike: frames encode bolt growing 0→1 so the sequence IS the reveal.
+      const subset = (!isBoneAnim && opts.mode !== 'loop') ? (f + 1) / count : 1.0;
       const canvas = document.createElement('canvas');
       canvas.width  = cW;
       canvas.height = cH;
@@ -674,7 +756,9 @@ export function exportLightningHierarchyToSpine(
         pts = displace(pts, 2, turb * 1.4, makePrng(f * 12973 + seedOffset * 7 + 0xCAFEBABE));
       }
       const noisePhase = opts.mode === 'loop' ? f / count : 0;
-      renderBoltToCtx(ctx, pts, opts, subset, alphaScale, widthScale, tipTaper, renderStyle, noisePhase);
+      // Pass scaledOpts so glow radius is in canvas pixels matching viewport world proportions.
+      // widthScale is already baked into scaledOpts.glowWidth/coreWidth above.
+      renderBoltToCtx(ctx, pts, scaledOpts, subset, alphaScale, 1.0 /* widthScale baked */, tipTaper, renderStyle, noisePhase);
       frames.push(canvas.toDataURL('image/png'));
     }
     return { frames, cW, cH };
@@ -765,9 +849,12 @@ export function exportLightningHierarchyToSpine(
     const segStartT = traveled / arcLen;
     const segEndT = (traveled + segLen) / arcLen;
 
-    bonesArr.push({ name: ctrlBone, parent: prevMain, x: 0, y: 0, rotation: localDelta, transform: 'noRotationOrReflection' });
+    // ctrlBone inherits parent transform normally so world rotation = accumulated chain angle.
+    // jBone uses noScaleOrReflection: inherits rotation (correct position along segment direction)
+    // but NOT scale — prevents bone-anim's scaleX:0→1 from collapsing the rest of the chain.
+    bonesArr.push({ name: ctrlBone, parent: prevMain, x: 0, y: 0, rotation: localDelta });
     mainCtrls.push(ctrlBone);
-    bonesArr.push({ name: jBone, parent: ctrlBone, x: segLen * S, y: 0, rotation: 0, transform: 'noRotationOrReflection' });
+    bonesArr.push({ name: jBone, parent: ctrlBone, x: segLen * S, y: 0, rotation: 0, transform: 'noScaleOrReflection' });
     mainJunctions.push(jBone);
     mainJunctionFracs.push(segEndT);
     prevMain = jBone;
@@ -821,7 +908,7 @@ export function exportLightningHierarchyToSpine(
     const brLocalAngle = globalAngleDeg - parentAngleDeg;
 
     const brCtrlBone = `${name}_br${branchIdx}_ctrl`;
-    bonesArr.push({ name: brCtrlBone, parent: junctionBone, x: 0, y: 0, rotation: brLocalAngle, transform: 'noRotationOrReflection' });
+    bonesArr.push({ name: brCtrlBone, parent: junctionBone, x: 0, y: 0, rotation: brLocalAngle });
 
     const brKey = `br${branchIdx}`;
     const seedOff = branchIdx * 1009 + 31337 + branch.generation * 5003;
@@ -891,62 +978,133 @@ export function exportLightningHierarchyToSpine(
     };
 
     slotReveal.forEach(({ t0, t1, boneName }, slotName) => {
-      const tStart = easeStrike(t0) * strikeDur;   // eased growth: slow start, fast impact
+      const tStart = easeStrike(t0) * strikeDur;
       const tEnd   = easeStrike(t1) * strikeDur;
-      const window = Math.max(spf, tEnd - tStart);
 
-      // ── RGBA: grow in, hold, flicker-fade out ─────────────────────────────
-      const rgbaKeys: any[] = [{ time: 0, color: 'ffffff00' }];
-      if (tStart > spf) {
-        rgbaKeys.push({ time: Math.max(0, tStart - spf), color: 'ffffff00' });
-      }
-      rgbaKeys.push({ time: tStart, color: 'ffffff00' });
-      rgbaKeys.push({ time: tEnd,   color: 'ffffffff' });
-
-      if (opts.mode === 'loop-strike' && holdEnd > tEnd + 1e-6) {
-        const shimmerFrames = Math.max(2, Math.round((holdEnd - tEnd) * opts.fps));
-        for (let hh = 1; hh <= shimmerFrames; hh++) {
-          const u = hh / shimmerFrames;
-          const ts = tEnd + (holdEnd - tEnd) * u;
-          const shimmer = 0.90
-            + 0.07 * Math.abs(Math.sin(ts * 32.0))
-            + 0.03 * Math.abs(Math.sin(ts * 11.2 + 0.8));
-          const a = Math.min(255, Math.max(0, Math.round(Math.min(1, shimmer) * 255)));
-          rgbaKeys.push({ time: ts, color: `ffffff${a.toString(16).padStart(2, '0')}`, curve: 'stepped' });
+      if (isBoneAnim) {
+        // ── BONE-ANIM: staggered per-segment reveal via scaleX + RGBA ─────────
+        // RGBA: transparent → opaque at tStart, shimmer hold, flicker-fade out
+        const rgbaKeys: any[] = [{ time: 0, color: 'ffffff00' }];
+        if (tStart > spf) {
+          rgbaKeys.push({ time: Math.max(0, tStart - spf), color: 'ffffff00' });
         }
-      }
+        rgbaKeys.push({ time: tStart, color: 'ffffff00' });
+        rgbaKeys.push({ time: tEnd,   color: 'ffffffff' });
 
-      // Append hold + fade keys (skip first which equals tEnd to avoid duplicate)
-      const fadeKeys = buildFadeKeys(tEnd);
-      for (const fk of fadeKeys) {
-        if (fk.time > tEnd) rgbaKeys.push(fk);
-      }
+        if (opts.mode === 'loop-strike' && holdEnd > tEnd + 1e-6) {
+          const shimmerFrames = Math.max(2, Math.round((holdEnd - tEnd) * opts.fps));
+          for (let hh = 1; hh <= shimmerFrames; hh++) {
+            const u = hh / shimmerFrames;
+            const ts = tEnd + (holdEnd - tEnd) * u;
+            const shimmer = 0.90
+              + 0.07 * Math.abs(Math.sin(ts * 32.0))
+              + 0.03 * Math.abs(Math.sin(ts * 11.2 + 0.8));
+            const a = Math.min(255, Math.max(0, Math.round(Math.min(1, shimmer) * 255)));
+            rgbaKeys.push({ time: ts, color: `ffffff${a.toString(16).padStart(2, '0')}`, curve: 'stepped' });
+          }
+        }
+        const fadeKeys = buildFadeKeys(tEnd);
+        for (const fk of fadeKeys) {
+          if (fk.time > tEnd) rgbaKeys.push(fk);
+        }
+        animSlots[slotName] = { ...animSlots[slotName], rgba: rgbaKeys };
 
-      animSlots[slotName] = {
-        ...animSlots[slotName],
-        rgba: rgbaKeys,
-      };
+        // ScaleX: bone grows 0→1 at its tStart–tEnd window; holds at 1; resets invisibly at cycle end
+        const existingBone = animBones[boneName] ?? {};
+        const scaleKeys: any[] = [
+          { time: 0,      x: 0.001, y: 1, curve: 'linear' },
+          { time: tStart, x: 0.001, y: 1, curve: 'linear' },
+          { time: tEnd,   x: 1,     y: 1, curve: 'linear' },
+        ];
+        if (opts.mode === 'loop-strike') {
+          scaleKeys.push({ time: totalDur - spf, x: 1,     y: 1, curve: 'linear' });
+          scaleKeys.push({ time: totalDur,       x: 0.001, y: 1, curve: 'stepped' });
+        }
+        animBones[boneName] = { ...existingBone, scale: scaleKeys };
 
-      // ── ScaleX: ctrl bone grows 0→1, holds, resets at cycle end ──────────
-      const existingBone = animBones[boneName] ?? {};
-      const scaleKeys: any[] = [
-        { time: 0,      x: 0.001, y: 1, curve: 'linear' },
-        { time: tStart, x: 0.001, y: 1, curve: 'linear' },
-        { time: tEnd,   x: 1,     y: 1, curve: 'linear' },
-      ];
-      if (opts.mode === 'loop-strike') {
-        scaleKeys.push({ time: holdEnd, x: 1, y: 1, curve: 'linear' });
-        // Snap back to 0 just before the cycle loops so next grow starts clean
-        scaleKeys.push({ time: Math.max(tEnd + spf, totalDur - spf), x: 0.001, y: 1, curve: 'stepped' });
+      } else {
+        // ── PNG SEQUENCE: frames encode the bolt growth; NO bone scaleX ───────
+        // The attachment's own PNG sequence plays through frames 0→N showing the
+        // bolt drawing in (subset 0→1), mode='hold' freezes it at the last frame.
+        // Bones stay at scaleX=1 always.
+        //
+        // For loop-strike: add shimmer hold + flicker-fade RGBA so the fully-drawn
+        // bolt fades out naturally before the next cycle starts.
+        // For plain strike: no RGBA needed — sequence plays once and holds.
+        if (opts.mode === 'loop-strike' && fadeDur > 0) {
+          const rgbaKeys: any[] = [{ time: 0, color: 'ffffffff' }];
+
+          // Shimmer during the hold phase
+          if (holdDur > 0) {
+            const shimmerFrames = Math.max(2, Math.round(holdDur * opts.fps));
+            for (let hh = 1; hh <= shimmerFrames; hh++) {
+              const u = hh / shimmerFrames;
+              const ts = strikeDur + holdDur * u;
+              const shimmer = 0.90
+                + 0.07 * Math.abs(Math.sin(ts * 32.0))
+                + 0.03 * Math.abs(Math.sin(ts * 11.2 + 0.8));
+              const a = Math.min(255, Math.max(0, Math.round(Math.min(1, shimmer) * 255)));
+              rgbaKeys.push({ time: ts, color: `ffffff${a.toString(16).padStart(2, '0')}`, curve: 'stepped' });
+            }
+          }
+
+          // Flicker-fade out
+          const fadeFrames = Math.max(2, Math.round(fadeDur * opts.fps));
+          for (let ff = 0; ff <= fadeFrames; ff++) {
+            const tLocal    = ff / fadeFrames;
+            const tAbs      = holdEnd + tLocal * fadeDur;
+            const baseDecay = Math.max(0, 1 - tLocal);
+            const flickerAmt = Math.min(1, tLocal * 5.0);
+            const f1      = Math.abs(Math.sin(tAbs * 38.0));
+            const f2      = Math.abs(Math.sin(tAbs * 13.7 + 1.1));
+            const flicker = Math.pow(Math.max(0, f1 * f2), 0.4);
+            const alpha   = baseDecay * (1.0 - flickerAmt * 0.82 + flicker * flickerAmt * 0.82);
+            const a255    = Math.min(255, Math.max(0, Math.round(alpha * 255)));
+            rgbaKeys.push({ time: tAbs, color: `ffffff${a255.toString(16).padStart(2, '0')}`, curve: 'stepped' });
+          }
+          rgbaKeys.push({ time: totalDur, color: 'ffffff00', curve: 'stepped' });
+
+          animSlots[slotName] = { ...animSlots[slotName], rgba: rgbaKeys };
+        }
+        // No animBones entry — sequence mode never touches bone scale
       }
-      animBones[boneName] = {
-        ...existingBone,
-        scale: scaleKeys,
-      };
     });
   }
 
-  // ── Spine 4.2 JSON ────────────────────────────────────────────────────────
+  // ── Per-slot animation duration guarantee ──────────────────────────────────
+  // For loop mode and plain-strike PNG-sequence mode, no timeline keys extend
+  // past time 0, leaving animation duration = 0 → Spine never advances the animation.
+  // Add explicit opaque rgba keys to bracket the natural cycle length.
+  if (!isStrikeType) {
+    // loop mode: one cycle = frameCount / fps
+    const cycleDur = opts.frameCount / Math.max(1, opts.fps);
+    slotReveal.forEach((_reveal, slotName) => {
+      if (!animSlots[slotName]?.rgba) {
+        animSlots[slotName] = {
+          ...animSlots[slotName],
+          rgba: [
+            { time: 0,        color: 'ffffffff' },
+            { time: cycleDur, color: 'ffffffff' },
+          ],
+        };
+      }
+    });
+  } else if (!isBoneAnim && opts.mode === 'strike') {
+    // Plain-strike PNG sequence: growth encoded in frames; animation holds at full bolt.
+    // Need at least a key at strikeDur so Spine knows the animation is that long.
+    const strikeDurKey = opts.frameCount / Math.max(1, opts.fps);
+    slotReveal.forEach((_reveal, slotName) => {
+      if (!animSlots[slotName]?.rgba) {
+        animSlots[slotName] = {
+          ...animSlots[slotName],
+          rgba: [
+            { time: 0,            color: 'ffffffff' },
+            { time: strikeDurKey, color: 'ffffffff' },
+          ],
+        };
+      }
+    });
+  }
   const spineJson = {
     skeleton: {
       hash:   `${name}-hierarchy-export`,

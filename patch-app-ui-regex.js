@@ -1,33 +1,21 @@
 const fs = require('fs');
-const file = 'src/App.tsx';
-let code = fs.readFileSync(file, 'utf8');
+let c = fs.readFileSync('src/App.tsx', 'utf8');
 
-const regex = /<p style={{ fontSize: '0.8rem', color: '#8a93a2', marginTop: '0.5rem' }}>\s*\{selectedObject.parentId\s*\?\s*'This shape is connected to an emitter and will be used as an emission source.'\s*:\s*'Select an emitter to use this shape as an emission source.'\}\s*<\/p>\s*<\/div>/g;
+c = c.replace(
+  /<\/select>\s*<\/div>\s*<div[^>]*>Rendering<\/div>/,
+  \</select>
+                      </div>
 
-const replacement = `<p style={{ fontSize: '0.8rem', color: '#8a93a2', marginTop: '0.5rem', marginBottom: '0.8rem' }}>
-                            {selectedObject.parentId
-                              ? 'This shape is connected to an emitter and will be used as an emission source.'
-                              : 'Select an emitter to use this shape as an emission source.'}
-                          </p>
+                      {fp.targetPathId && (
+                        <>
+                          <label>Path Speed: {(fp.pathSpeed ?? 0.05).toFixed(3)}</label>
+                          <input type="range" min={-1.5} max={1.5} step={0.01} value={fp.pathSpeed ?? 0.05} onChange={e => upd('pathSpeed', Number(e.target.value))} />
+                          <div style={{ fontSize: '0.72rem', color: '#8a93a2', marginBottom: '4px' }}>How fast the flame slides along the curve.</div>
+                        </>
+                      )}
 
-                          {selectedObject.parentId && (
-                            <>
-                              <label htmlFor="shape-emission-mode">Emission Mode</label>
-                              <select
-                                id="shape-emission-mode"
-                                value={(selectedObject.properties as any)?.emissionMode || 'volume'}
-                                onChange={(event) => {
-                                  handleUpdateEmitterProperty('emissionMode', event.target.value);
-                                }}
-                              >
-                                <option value="volume">Volume (Random fill / Inner)</option>
-                                <option value="surface">Surface (Outer Shell)</option>
-                                <option value="edge">Edge (Wireframe)</option>
-                              </select>
-                            </>
-                          )}
-                        </div>`;
+                      <div style={{ marginBottom: '4px', fontWeight: 600, color: '#8a93a2', fontSize: '0.75rem', textTransform: 'uppercase' }}>Rendering</div>\
+);
 
-code = code.replace(regex, replacement);
-fs.writeFileSync(file, code, 'utf8');
-console.log("Regex patch applied to App.tsx!");
+fs.writeFileSync('src/App.tsx', c);
+console.log('App regex patched path speed');
