@@ -4734,68 +4734,37 @@ export function App() {
               <span>Saber</span>
             </button>
             <button className="create-shelf-action" onClick={() => {
-              if (!selectedObject || selectedObject.type !== 'Path') {
-                window.alert('Please select a bezier curve first');
-                return;
-              }
-              // Saber Bolt: Lightning tightly guided along the selected curve
-              const pathPts = (sceneObjects as SceneObject[])
-                .filter(o => o.type === 'PathPoint' && o.parentId === selectedObject.id)
-                .sort((a, b) => (sceneObjects as SceneObject[]).indexOf(a) - (sceneObjects as SceneObject[]).indexOf(b));
-              let startPos = { x: -80, y: 0, z: 0 };
-              let endPos   = { x:  80, y: 0, z: 0 };
-              if (pathPts.length >= 2) {
-                const first = pathPts[0].position;
-                const last  = pathPts[pathPts.length - 1].position;
-                startPos = { x: first.x, y: first.y, z: first.z ?? 0 };
-                endPos   = { x: last.x,  y: last.y,  z: last.z  ?? 0 };
-              } else if (pathPts.length === 1) {
-                const p = pathPts[0].position;
-                startPos = { x: p.x, y: p.y, z: p.z ?? 0 };
-              }
-              const lId     = 'lightning_' + Date.now();
-              const startId = 'lpt_start_' + Date.now();
-              const endId   = 'lpt_end_'   + (Date.now() + 1);
-              const saberBolt: SceneObject = {
-                id: lId,
-                name: 'Saber Bolt',
-                type: 'Lightning',
+              const s2Id = 'saber2_' + Date.now();
+              const saber2: SceneObject = {
+                id: s2Id,
+                name: 'Saber 2',
+                type: 'Saber2',
                 position: { x: 0, y: 0, z: 0 },
                 rotation: { x: 0, y: 0, z: 0 },
                 scale: { x: 1, y: 1, z: 1 },
                 parentId: null,
                 properties: {
-                  ...defaultLightningOpts(),
-                  // Tight path following
-                  followBezierPathIds: [selectedObject.id],
-                  curveTightness: 55,
-                  // Energy blade look — thin bright core, wide tight glow, minimal branching
-                  coreColor:         '#ffffff',
-                  coreWidth:         1.5,
-                  glowColor:         '#aa44ff',
-                  glowWidth:         10,
-                  segmentDepth:      3,
-                  roughness:         0.18,
-                  turbulence:        0.12,
-                  numSegments:       6,
-                  branchProbability: 0.08,
-                  branchCount:       0,
-                  branchLevels:      1,
-                  bend:              0,
-                  density:           2.5,
-                  mode:              'loop',
-                  glowNoiseIntensity: 0.55,
-                  glowNoiseScale:     4.0,
-                  glowNoiseSpeed:     1.5,
+                  coreColor: '#ffffff',
+                  glowColor: '#00ccff',
+                  glowWidth: 5.0,
+                  ringRadius: 25,
+                  circleCount: 18,
+                  driftSpeed: 45,
+                  driftHeight: 220,
+                  spawnRadius: 30,
+                  driftNoise: 0.35,
+                  noiseSpeed: 1.0,
+                  opacity: 1.0,
+                  glowFalloff: 1.5,
+                  frameCount: 24,
+                  fps: 24,
                 },
               };
-              const ptStart: SceneObject = { id: startId, name: 'Start', type: 'LightningPoint', position: startPos, rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'start' } };
-              const ptEnd:   SceneObject = { id: endId,   name: 'End',   type: 'LightningPoint', position: endPos,   rotation: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parentId: lId, properties: { role: 'end'   } };
-              setSceneObjects(prev => [...prev, saberBolt, ptStart, ptEnd]);
-              setSelectedObjectId(lId);
+              setSceneObjects(prev => [...prev, saber2]);
+              setSelectedObjectId(s2Id);
               setShowScenePropertiesPanel(true);
             }} type="button">
-              <span className="create-shelf-action-icon">⚡⚔</span>
+              <span className="create-shelf-action-icon">⭕</span>
               <span>Saber 2</span>
             </button>
           </div>
@@ -5187,12 +5156,12 @@ export function App() {
                   {(() => {
                     const allTypes = Array.from(new Set(sceneObjects.map(o => o.type))).sort();
                     const typeIcons: Record<string, string> = {
-                      Emitter: '⭐', Flame: '🔥', Lightning: '⚡', Saber: '🔵', GlowSphere: '🔴',
+                      Emitter: '⭐', Flame: '🔥', Lightning: '⚡', Saber: '🔵', Saber2: '⭕', GlowSphere: '🔴',
                       LightningPoint: '✦', Path: '〰️', PathPoint: '◦', EmitterShape: '◆',
                       CameraTarget: '🎥', Bone: '🦴', Mesh: '⬡',
                     };
                     const typeColors: Record<string, string> = {
-                      Emitter: '#5a9fd4', Flame: '#e8803a', Lightning: '#f1c40f', Saber: '#00e5ff',
+                      Emitter: '#5a9fd4', Flame: '#e8803a', Lightning: '#f1c40f', Saber: '#00e5ff', Saber2: '#00ffcc',
                       GlowSphere: '#ff6bcd', LightningPoint: '#f1c40f', Path: '#5fc87a', PathPoint: '#5fc87a',
                       EmitterShape: '#e8803a', CameraTarget: '#c084fc',
                     };
@@ -8072,6 +8041,77 @@ export function App() {
         >
           ⚔ Export to Spine ZIP
         </button>
+        <div className="property-row">
+          <label>Frame Count: {sp.frameCount ?? 24}</label>
+          <input type="range" min={1} max={120} step={1} value={sp.frameCount ?? 24} onChange={e => upd('frameCount', Number(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>FPS: {sp.fps ?? 24}</label>
+          <input type="range" min={1} max={60} step={1} value={sp.fps ?? 24} onChange={e => upd('fps', Number(e.target.value))} />
+        </div>
+      </div>
+    </>
+  );
+})()}
+
+                {selectedObject.type === 'Saber2' && (() => {
+  const sp = (selectedObject.properties ?? {}) as any;
+  const upd = (key: string, val: unknown) => handleUpdateEmitterProperty(key, val as any);
+  return (
+    <>
+      <div className="properties-section">
+        <h4>⭕ Saber 2 — Ring Drift</h4>
+        <div className="property-row">
+          <label>Core Color</label>
+          <input type="color" value={sp.coreColor ?? '#ffffff'} onChange={(e) => upd('coreColor', e.target.value)} />
+        </div>
+        <div className="property-row">
+          <label>Glow Color</label>
+          <input type="color" value={sp.glowColor ?? '#00ccff'} onChange={(e) => upd('glowColor', e.target.value)} />
+        </div>
+        <div className="property-row">
+          <label>Glow Width: {(sp.glowWidth ?? 5.0).toFixed(1)}</label>
+          <input type="range" min="0.5" max="30" step="0.1" value={sp.glowWidth ?? 5.0} onChange={(e) => upd('glowWidth', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Glow Falloff: {(sp.glowFalloff ?? 1.5).toFixed(2)}</label>
+          <input type="range" min="0.2" max="5.0" step="0.05" value={sp.glowFalloff ?? 1.5} onChange={(e) => upd('glowFalloff', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Ring Radius: {sp.ringRadius ?? 25}</label>
+          <input type="range" min="2" max="200" step="1" value={sp.ringRadius ?? 25} onChange={(e) => upd('ringRadius', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Circle Count: {sp.circleCount ?? 18}</label>
+          <input type="range" min="1" max="60" step="1" value={sp.circleCount ?? 18} onChange={(e) => upd('circleCount', parseInt(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Drift Speed: {sp.driftSpeed ?? 45}</label>
+          <input type="range" min="5" max="300" step="1" value={sp.driftSpeed ?? 45} onChange={(e) => upd('driftSpeed', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Drift Height: {sp.driftHeight ?? 220}</label>
+          <input type="range" min="20" max="800" step="5" value={sp.driftHeight ?? 220} onChange={(e) => upd('driftHeight', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Spawn Radius: {sp.spawnRadius ?? 30}</label>
+          <input type="range" min="0" max="300" step="1" value={sp.spawnRadius ?? 30} onChange={(e) => upd('spawnRadius', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Wobble: {(sp.driftNoise ?? 0.35).toFixed(2)}</label>
+          <input type="range" min="0" max="1.5" step="0.01" value={sp.driftNoise ?? 0.35} onChange={(e) => upd('driftNoise', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Noise Speed: {(sp.noiseSpeed ?? 1.0).toFixed(2)}</label>
+          <input type="range" min="0" max="5" step="0.05" value={sp.noiseSpeed ?? 1.0} onChange={(e) => upd('noiseSpeed', parseFloat(e.target.value))} />
+        </div>
+        <div className="property-row">
+          <label>Opacity: {(sp.opacity ?? 1.0).toFixed(2)}</label>
+          <input type="range" min="0" max="1" step="0.01" value={sp.opacity ?? 1.0} onChange={(e) => upd('opacity', parseFloat(e.target.value))} />
+        </div>
+      </div>
+      <div className="properties-section">
+        <h4>🎞 Capture</h4>
         <div className="property-row">
           <label>Frame Count: {sp.frameCount ?? 24}</label>
           <input type="range" min={1} max={120} step={1} value={sp.frameCount ?? 24} onChange={e => upd('frameCount', Number(e.target.value))} />

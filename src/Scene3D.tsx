@@ -6979,6 +6979,195 @@ const timelineOutRef = useRef(timelineOut);
       }
 // ── End saber live preview ─────────────────────────────────────────────────────────────────
 
+      // ── Saber2: glowing ring drift ──────────────────────────────────────────────────────────
+      {
+        const nowS2 = (Date.now() % 1e8) / 1000;
+        const _dummy = new THREE.Object3D();
+
+        sceneObjectsRef.current.forEach((sObj) => {
+          if (sObj.type !== 'Saber2') return;
+          const sGroup = sceneObjectMeshesRef.current.get(sObj.id) as THREE.Group | undefined;
+          if (!sGroup) return;
+
+          const sp = (sObj.properties ?? {}) as any;
+          const coreColor   = new THREE.Color(sp.coreColor   ?? '#ffffff');
+          const glowColor   = new THREE.Color(sp.glowColor   ?? '#00ccff');
+          const glowWidth   = sp.glowWidth   ?? 5.0;
+          const glowFalloff = sp.glowFalloff ?? 1.5;
+          const ringRadius  = sp.ringRadius  ?? 25;
+          const circleCount = Math.max(1, Math.round(sp.circleCount ?? 18));
+          const driftSpeed  = sp.driftSpeed  ?? 45;
+          const driftHeight = sp.driftHeight ?? 220;
+          const spawnRadius = sp.spawnRadius ?? 30;
+          const wobble      = sp.driftNoise  ?? 0.35;
+          const noiseSpeed  = sp.noiseSpeed  ?? 1.0;
+          const opacity     = sp.opacity     ?? 1.0;
+
+          // ── Init particle state ──────────────────────────────────────────
+          if (!sGroup.userData.s2p) {
+            const pts: { age: number; seed: number; ox: number; oz: number }[] = [];
+            for (let i = 0; i < circleCount; i++) {
+              const seed = Math.random() * 1000;
+              pts.push({
+                age: (i / circleCount) * (driftHeight / Math.max(1, driftSpeed)),
+                seed,
+                ox: (Math.random() - 0.5) * spawnRadius * 2,
+                oz: (Math.random() - 0.5) * spawnRadius * 2,
+              });
+            }
+            sGroup.userData.s2p = pts;
+            sGroup.userData.s2lastT = nowS2;
+          }
+
+          const particles = sGroup.userData.s2p as { age: number; seed: number; ox: number; oz: number }[];
+          const lastT: number = sGroup.userData.s2lastT ?? nowS2;
+          const dt = Math.min(0.05, nowS2 - lastT);
+          sGroup.userData.s2lastT = nowS2;
+
+          // Grow or shrink particle pool
+          while (particles.length < circleCount) {
+            particles.push({ age: 0, seed: Math.random() * 1000, ox: (Math.random() - 0.5) * spawnRadius * 2, oz: (Math.random() - 0.5) * spawnRadius * 2 });
+          }
+          while (particles.length > circleCount) particles.pop();
+
+          // ── Rebuild InstancedMesh only when key params change ────────────
+          const ud = sGroup.userData;
+          const needRebuild = !ud.s2mesh
+            || ud.s2count   !== circleCount
+            || Math.abs((ud.s2gw ?? 0) - glowWidth)   > 0.01
+            || Math.abs((ud.s2rr ?? 0) - ringRadius)   > 0.1;
+
+          if (needRebuild) {
+            if (ud.s2mesh) {
+              sGroup.remove(ud.s2mesh);
+              (ud.s2mesh as THREE.InstancedMesh).geometry.dispose();
+              ((ud.s2mesh as THREE.InstancedMesh).material as THREE.Material).dispose();
+            }
+
+            const tubeR = Math.max(0.3, glowWidth * 0.28);
+            const geo   = new THREE.TorusGeometry(ringRadius, tubeR, 10, 64);
+
+            const ringVert = `
+              #include <instanced_pars_vertex>
+              varying vec3 vNormal;
+              varying vec3 vViewPos;
+              varying vec3 vInstColor;
+              void main() {
+                #ifdef USE_INSTANCING_COLOR
+                  vInstColor = instanceColor;
+                #else
+                  vInstColor = vec3(1.0);
+                #endif
+                vec4 worldPos = instanceMatrix * vec4(position, 1.0);
+                vec3 transformedNormal = mat3(instanceMatrix) * normal;
+                vNormal = normalize(normalMatrix * transformedNormal);
+                vec4 mv = modelViewMatrix * worldPos;
+                vViewPos = -mv.xyz;
+                gl_Position = projectionMatrix * mv;
+              }
+            `;
+            const ringFrag = `
+              uniform vec3  uCoreColor;
+              uniform vec3  uGlowColor;
+              uniform float uFalloff;
+              uniform float uOpacity;
+              varying vec3  vNormal;
+              varying vec3  vViewPos;
+              varying vec3  vInstColor;
+              void main() {
+                vec3 viewDir = normalize(vViewPos);
+                float rim = abs(dot(normalize(vNormal), viewDir));
+                float glow = pow(rim, uFalloff);
+                float core = pow(rim, 12.0) * 2.0;
+                vec3 col = mix(uGlowColor * glow * 1.8, uCoreColor, clamp(core, 0.0, 1.0));
+                float alpha = clamp(glow * 1.5 + core, 0.0, 1.0) * uOpacity * vInstColor.r;
+                gl_FragColor = vec4(col, alpha);
+              }
+            `;
+
+            const mat = new THREE.ShaderMaterial({
+              vertexShader:   ringVert,
+              fragmentShader: ringFrag,
+              uniforms: {
+                uCoreColor: { value: coreColor.clone() },
+                uGlowColor: { value: glowColor.clone() },
+                uFalloff:   { value: glowFalloff * 2.0 },
+                uOpacity:   { value: opacity },
+              },
+              transparent:  true,
+              blending:     THREE.AdditiveBlending,
+              depthWrite:   false,
+              depthTest:    true,
+              side:         THREE.DoubleSide,
+            });
+
+            const iMesh = new THREE.InstancedMesh(geo, mat, circleCount);
+            iMesh.name      = 's2rings';
+            iMesh.frustumCulled = false;
+            // Pre-init colors so USE_INSTANCING_COLOR is defined in the first compiled shader
+            const _white = new THREE.Color(1, 1, 1);
+            for (let _ci = 0; _ci < circleCount; _ci++) iMesh.setColorAt(_ci, _white);
+            if (iMesh.instanceColor) iMesh.instanceColor.needsUpdate = true;
+            sGroup.add(iMesh);
+            ud.s2mesh   = iMesh;
+            ud.s2count  = circleCount;
+            ud.s2gw     = glowWidth;
+            ud.s2rr     = ringRadius;
+          }
+
+          const iMesh = ud.s2mesh as THREE.InstancedMesh;
+          const mat   = iMesh.material as THREE.ShaderMaterial;
+          mat.uniforms.uCoreColor.value.copy(coreColor);
+          mat.uniforms.uGlowColor.value.copy(glowColor);
+          mat.uniforms.uFalloff.value  = glowFalloff * 2.0;
+          mat.uniforms.uOpacity.value  = opacity;
+
+          const lifetime = driftHeight / Math.max(1, driftSpeed);
+          const _brightColor = new THREE.Color();
+
+          for (let i = 0; i < circleCount; i++) {
+            const p = particles[i];
+            p.age += dt;
+
+            if (p.age > lifetime) {
+              p.age -= lifetime;
+              p.seed = Math.random() * 1000;
+              p.ox = (Math.random() - 0.5) * spawnRadius * 2;
+              p.oz = (Math.random() - 0.5) * spawnRadius * 2;
+            }
+
+            const t = p.age / lifetime;
+            const y = p.age * driftSpeed;
+            const wx = Math.sin(p.seed       + nowS2 * noiseSpeed + p.age * 2.1) * wobble * driftHeight * 0.12;
+            const wz = Math.cos(p.seed * 1.7 + nowS2 * noiseSpeed * 0.9 + p.age * 1.6) * wobble * driftHeight * 0.09;
+
+            // Rings lie flat (horizontal) and drift straight up
+            _dummy.position.set(p.ox + wx, y, p.oz + wz);
+            _dummy.rotation.set(Math.PI / 2, 0, p.seed * 0.3);  // flat + slight spin
+            const scl = 1.0 + t * 0.25; // expand slightly as they rise
+            _dummy.scale.set(scl, scl, scl);
+            _dummy.updateMatrix();
+            iMesh.setMatrixAt(i, _dummy.matrix);
+
+            // Encode per-instance alpha in color channel (r=g=b = brightness multiplier)
+            const fadeIn  = Math.min(t * 6.0, 1.0);
+            const fadeOut = Math.max(0, 1.0 - Math.max(0, t - 0.6) * 2.5);
+            const bright  = fadeIn * fadeOut;
+            _brightColor.setRGB(bright, bright, bright);
+            iMesh.setColorAt(i, _brightColor);
+          }
+
+          iMesh.instanceMatrix.needsUpdate = true;
+          if (iMesh.instanceColor) iMesh.instanceColor.needsUpdate = true;
+
+          // Position the group at the scene object's world position
+          sGroup.position.set(sObj.position.x, sObj.position.y, sObj.position.z ?? 0);
+          sGroup.rotation.set(0, 0, 0);
+          sGroup.scale.set(1, 1, 1);
+        });
+      }
+      // ── End Saber2 ring drift ───────────────────────────────────────────────────────────────
+
       // Update particle stats every few frames
       if (Math.random() < 0.1) {
         let totalParticles = 0;
@@ -7151,7 +7340,7 @@ const timelineOutRef = useRef(timelineOut);
     const showObjects = sceneSettings.showObjects ?? true;
     const showBones = sceneSettings.showBones ?? true;
     const hiddenSet = new Set(hiddenObjectIds);
-    const fxTypes = new Set(['Flame', 'Lightning', 'Saber', 'GlowSphere', 'LightningPoint']);
+    const fxTypes = new Set(['Flame', 'Lightning', 'Saber', 'Saber2', 'GlowSphere', 'LightningPoint']);
     sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
       const obj = sceneObjects.find((o) => o.id === objectId);
       if (!obj) return;
@@ -7183,10 +7372,10 @@ const timelineOutRef = useRef(timelineOut);
     });
   }, [sceneSettings.showPathPoints, sceneObjects]);
 
-  // FX objects visibility (Flame, Lightning, Saber, GlowSphere, LightningPoint)
+  // FX objects visibility (Flame, Lightning, Saber, Saber2, GlowSphere, LightningPoint)
   useEffect(() => {
     const show = sceneSettings.showFX ?? true;
-    const fxTypes = new Set(['Flame', 'Lightning', 'Saber', 'GlowSphere', 'LightningPoint']);
+    const fxTypes = new Set(['Flame', 'Lightning', 'Saber', 'Saber2', 'GlowSphere', 'LightningPoint']);
     sceneObjectMeshesRef.current.forEach((mesh, objectId) => {
       const obj = sceneObjects.find((o) => o.id === objectId);
       if (obj && fxTypes.has(obj.type)) mesh.visible = show;
@@ -7381,6 +7570,10 @@ const timelineOutRef = useRef(timelineOut);
           const saberGroup = new THREE.Group();
           (saberGroup as any).isSaberRender = true;
           mesh = saberGroup;
+        } else if (obj.type === 'Saber2') {
+          const s2Group = new THREE.Group();
+          (s2Group as any).isSaber2Render = true;
+          mesh = s2Group;
         } else if (obj.type === 'Flame') {
           const flameGroup = new THREE.Group();
           (flameGroup as any).isFlameRender = true;
