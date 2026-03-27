@@ -239,6 +239,139 @@ function buildFlameTexShape(shape: string = 'circle'): THREE.Texture {
   return tex;
 }
 
+// ── Saber2 shape texture ──────────────────────────────────────────────────────────────────
+const _saber2TexCache = new Map<string, THREE.Texture>();
+/**
+ * Builds a white-on-transparent sprite texture for Saber2 billboard particles.
+ * shape: 'circle' | 'ring' | 'diamond' | 'star' | 'sharp' | 'hexagon' |
+ *        'triangle' | 'sparkle' | 'crescent' | data:image/…
+ * ringHollow: 0–1, how hollow the ring is (only used for shape='ring')
+ */
+function buildSaber2Tex(shape: string, ringHollow = 0.45): THREE.Texture {
+  const cacheKey = shape.startsWith('data:image') ? shape : `${shape}_${ringHollow.toFixed(2)}`;
+  if (_saber2TexCache.has(cacheKey)) return _saber2TexCache.get(cacheKey)!;
+
+  if (shape.startsWith('data:image')) {
+    const tex = new THREE.TextureLoader().load(shape);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    _saber2TexCache.set(cacheKey, tex);
+    return tex;
+  }
+
+  const S = 256, H = S / 2;
+  const cv = document.createElement('canvas');
+  cv.width = S; cv.height = S;
+  const ctx = cv.getContext('2d')!;
+  const imgData = ctx.createImageData(S, S);
+  const d = imgData.data;
+
+  const set = (x: number, y: number, a: number) => {
+    if (x < 0 || x >= S || y < 0 || y >= S) return;
+    const i = (y * S + x) * 4;
+    d[i] = 255; d[i+1] = 255; d[i+2] = 255; d[i+3] = Math.max(d[i+3], Math.round(a * 255));
+  };
+
+  if (shape === 'ring') {
+    for (let y = 0; y < S; y++) {
+      for (let x = 0; x < S; x++) {
+        const dx = (x - H) / H, dy = (y - H) / H;
+        const r = Math.sqrt(dx*dx + dy*dy);
+        const outer = 1.0, inner = ringHollow;
+        const edge = 0.08;
+        let a = 0;
+        if (r <= outer && r >= inner) {
+          const fromOuter = (outer - r) / edge;
+          const fromInner = (r - inner) / edge;
+          a = Math.min(Math.min(1, fromOuter), Math.min(1, fromInner));
+          a = Math.pow(clamp01(a), 0.6);
+        }
+        set(x, y, a);
+      }
+    }
+  } else if (shape === 'diamond') {
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = Math.abs(x - H) / H, dy = Math.abs(y - H) / H;
+      const dist = dx + dy;
+      set(x, y, dist < 1 ? Math.pow(1 - dist, 1.2) : 0);
+    }
+  } else if (shape === 'star') {
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = Math.abs(x - H) / H, dy = Math.abs(y - H) / H;
+      const dist = Math.sqrt(dx) + Math.sqrt(dy);
+      set(x, y, dist < 1 ? Math.pow(1 - dist, 2.0) : 0);
+    }
+  } else if (shape === 'sharp') {
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = (x - H) / H, dy = (y - H) / H;
+      const r = Math.sqrt(dx*dx + dy*dy);
+      set(x, y, r < 1 ? Math.pow(Math.max(0, 1 - r / 0.25), 2.5) : 0);
+    }
+  } else if (shape === 'hexagon') {
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = (x - H) / H, dy = (y - H) / H;
+      // Hexagonal distance
+      const q = Math.abs(dx), r2 = Math.abs(dy);
+      const hex = Math.max(q * 0.866 + r2 * 0.5, r2);
+      const a = hex < 0.87 ? Math.pow(clamp01(1 - hex / 0.87), 0.8) : 0;
+      set(x, y, a);
+    }
+  } else if (shape === 'triangle') {
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = (x - H) / H, dy = (y - H) / H;
+      // Equilateral triangle signed distance (pointing up)
+      const k = Math.sqrt(3.0);
+      const px = Math.abs(dx) - 0.75, py = dy + 0.5 / k;
+      let sd: number;
+      if (px + k * py > 0) { const tx = px - k * py; const ty = -k * px - py; sd = Math.sqrt(tx*tx + ty*ty) * 0.5; }
+      else { sd = Math.max(px, -py) - 0.0; }
+      set(x, y, sd < 0 ? Math.pow(clamp01((-sd) / 0.8), 0.7) : 0);
+    }
+  } else if (shape === 'sparkle') {
+    // 4-pointed star / lens cross
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = (x - H) / H, dy = (y - H) / H;
+      // Elongated on both axes then combined
+      const h = Math.pow(Math.abs(dx), 0.4) + Math.pow(Math.abs(dy) * 6, 2);
+      const v = Math.pow(Math.abs(dy), 0.4) + Math.pow(Math.abs(dx) * 6, 2);
+      const a = Math.max(h < 1 ? Math.pow(1 - h, 1.2) : 0, v < 1 ? Math.pow(1 - v, 1.2) : 0);
+      set(x, y, a);
+    }
+  } else if (shape === 'crescent') {
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = (x - H) / H, dy = (y - H) / H;
+      const r = Math.sqrt(dx*dx + dy*dy);
+      const inOuter = r < 0.95;
+      // Offset inner circle to carve out crescent
+      const cx2 = dx - 0.36, cy2 = dy - 0.18;
+      const r2 = Math.sqrt(cx2*cx2 + cy2*cy2);
+      const carve = r2 < 0.70;
+      const a = (inOuter && !carve) ? Math.pow(clamp01(1 - r / 0.95), 0.5) * clamp01((r2 - 0.70) / 0.12 + 1) : 0;
+      set(x, y, a);
+    }
+  } else {
+    // circle (default) — radial gradient
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+      const dx = (x - H) / H, dy = (y - H) / H;
+      const r = Math.sqrt(dx*dx + dy*dy);
+      set(x, y, r < 1 ? Math.pow(clamp01(1 - r), 0.7) : 0);
+    }
+  }
+
+  ctx.putImageData(imgData, 0, 0);
+
+  // Smooth slightly
+  const out = document.createElement('canvas');
+  out.width = S; out.height = S;
+  const octx = out.getContext('2d')!;
+  octx.filter = 'blur(1.5px)';
+  octx.drawImage(cv, 0, 0);
+
+  const tex = new THREE.CanvasTexture(out);
+  _saber2TexCache.set(cacheKey, tex);
+  return tex;
+}
+function clamp01(v: number) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
 /**
  * Walks a polyline and returns points sampled at `spacing` world-unit intervals.
  * Ensures the first and last original points are always included.
@@ -6979,63 +7112,65 @@ const timelineOutRef = useRef(timelineOut);
       }
 // ── End saber live preview ─────────────────────────────────────────────────────────────────
 
-      // ── Saber2: glowing ring drift ──────────────────────────────────────────────────────────
+      // ── Saber2: billboard sprite drift ─────────────────────────────────────────────────────
       {
         const nowS2 = (Date.now() % 1e8) / 1000;
         const _dummy = new THREE.Object3D();
+        const camera = currentCameraRef.current;
 
         sceneObjectsRef.current.forEach((sObj) => {
           if (sObj.type !== 'Saber2') return;
           const sGroup = sceneObjectMeshesRef.current.get(sObj.id) as THREE.Group | undefined;
-          if (!sGroup) return;
+          if (!sGroup || !camera) return;
 
           const sp = (sObj.properties ?? {}) as any;
-          const coreColor   = new THREE.Color(sp.coreColor   ?? '#ffffff');
-          const glowColor   = new THREE.Color(sp.glowColor   ?? '#00ccff');
-          const glowWidth   = sp.glowWidth   ?? 5.0;
-          const glowFalloff = sp.glowFalloff ?? 1.5;
-          const ringRadius  = sp.ringRadius  ?? 25;
-          const circleCount = Math.max(1, Math.round(sp.circleCount ?? 18));
-          const driftSpeed  = sp.driftSpeed  ?? 45;
-          const driftHeight = sp.driftHeight ?? 220;
-          const spawnRadius = sp.spawnRadius ?? 30;
-          const wobble      = sp.driftNoise  ?? 0.35;
-          const noiseSpeed  = sp.noiseSpeed  ?? 1.0;
-          const opacity     = sp.opacity     ?? 1.0;
+          const coreColor    = new THREE.Color(sp.coreColor    ?? '#ffffff');
+          const glowColor    = new THREE.Color(sp.glowColor    ?? '#00ccff');
+          const particleSize = sp.particleSize  ?? 50;
+          const particleShape: string = sp.particleShape ?? 'circle';
+          const ringHollow   = sp.ringHollow ?? 0.45;
+          const circleCount  = Math.max(1, Math.round(sp.circleCount ?? 18));
+          const driftSpeed   = sp.driftSpeed  ?? 45;
+          const driftHeight  = sp.driftHeight ?? 220;
+          const spawnRadius  = sp.spawnRadius ?? 30;
+          const wobble       = sp.driftNoise  ?? 0.35;
+          const noiseSpeed   = sp.noiseSpeed  ?? 1.0;
+          const opacity      = sp.opacity     ?? 1.0;
+          const customTex: string = sp.customShapeTexture ?? '';
+
+          const resolvedShape = customTex.startsWith('data:image') ? customTex : particleShape;
+          const resolvedHollow = particleShape === 'ring' ? ringHollow : 0.45;
 
           // ── Init particle state ──────────────────────────────────────────
           if (!sGroup.userData.s2p) {
-            const pts: { age: number; seed: number; ox: number; oz: number }[] = [];
+            const pts: { age: number; seed: number; ox: number; oz: number; spin: number }[] = [];
             for (let i = 0; i < circleCount; i++) {
-              const seed = Math.random() * 1000;
               pts.push({
                 age: (i / circleCount) * (driftHeight / Math.max(1, driftSpeed)),
-                seed,
+                seed: Math.random() * 1000,
                 ox: (Math.random() - 0.5) * spawnRadius * 2,
                 oz: (Math.random() - 0.5) * spawnRadius * 2,
+                spin: (Math.random() - 0.5) * Math.PI * 2,
               });
             }
             sGroup.userData.s2p = pts;
             sGroup.userData.s2lastT = nowS2;
           }
 
-          const particles = sGroup.userData.s2p as { age: number; seed: number; ox: number; oz: number }[];
+          const particles = sGroup.userData.s2p as { age: number; seed: number; ox: number; oz: number; spin: number }[];
           const lastT: number = sGroup.userData.s2lastT ?? nowS2;
           const dt = Math.min(0.05, nowS2 - lastT);
           sGroup.userData.s2lastT = nowS2;
 
-          // Grow or shrink particle pool
+          // Grow/shrink pool
           while (particles.length < circleCount) {
-            particles.push({ age: 0, seed: Math.random() * 1000, ox: (Math.random() - 0.5) * spawnRadius * 2, oz: (Math.random() - 0.5) * spawnRadius * 2 });
+            particles.push({ age: 0, seed: Math.random() * 1000, ox: (Math.random() - 0.5) * spawnRadius * 2, oz: (Math.random() - 0.5) * spawnRadius * 2, spin: (Math.random() - 0.5) * Math.PI * 2 });
           }
           while (particles.length > circleCount) particles.pop();
 
-          // ── Rebuild InstancedMesh only when key params change ────────────
+          // ── Rebuild InstancedMesh only when circleCount changes ──────────
           const ud = sGroup.userData;
-          const needRebuild = !ud.s2mesh
-            || ud.s2count   !== circleCount
-            || Math.abs((ud.s2gw ?? 0) - glowWidth)   > 0.01
-            || Math.abs((ud.s2rr ?? 0) - ringRadius)   > 0.1;
+          const needRebuild = !ud.s2mesh || ud.s2count !== circleCount;
 
           if (needRebuild) {
             if (ud.s2mesh) {
@@ -7044,86 +7179,86 @@ const timelineOutRef = useRef(timelineOut);
               ((ud.s2mesh as THREE.InstancedMesh).material as THREE.Material).dispose();
             }
 
-            const tubeR = Math.max(0.3, glowWidth * 0.28);
-            const geo   = new THREE.TorusGeometry(ringRadius, tubeR, 10, 64);
+            const geo = new THREE.PlaneGeometry(1, 1);
 
-            const ringVert = `
-              #include <instanced_pars_vertex>
-              varying vec3 vNormal;
-              varying vec3 vViewPos;
+            const spriteFrag = `
+              uniform sampler2D uTex;
+              uniform vec3  uCoreColor;
+              uniform vec3  uGlowColor;
+              uniform float uOpacity;
+              varying vec2  vUv;
+              varying vec3  vInstColor;
+              void main() {
+                vec4 s = texture2D(uTex, vUv);
+                float bright = s.r;
+                vec3 col  = mix(uGlowColor * 1.8, uCoreColor, smoothstep(0.35, 0.82, bright));
+                col = mix(col, vec3(1.4), smoothstep(0.85, 1.0, bright));
+                float alpha = s.a * uOpacity * vInstColor.r;
+                gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
+              }
+            `;
+            const spriteVert = `
+              varying vec2 vUv;
               varying vec3 vInstColor;
               void main() {
+                vUv = uv;
                 #ifdef USE_INSTANCING_COLOR
                   vInstColor = instanceColor;
                 #else
                   vInstColor = vec3(1.0);
                 #endif
-                vec4 worldPos = instanceMatrix * vec4(position, 1.0);
-                vec3 transformedNormal = mat3(instanceMatrix) * normal;
-                vNormal = normalize(normalMatrix * transformedNormal);
-                vec4 mv = modelViewMatrix * worldPos;
-                vViewPos = -mv.xyz;
-                gl_Position = projectionMatrix * mv;
-              }
-            `;
-            const ringFrag = `
-              uniform vec3  uCoreColor;
-              uniform vec3  uGlowColor;
-              uniform float uFalloff;
-              uniform float uOpacity;
-              varying vec3  vNormal;
-              varying vec3  vViewPos;
-              varying vec3  vInstColor;
-              void main() {
-                vec3 viewDir = normalize(vViewPos);
-                float rim = abs(dot(normalize(vNormal), viewDir));
-                float glow = pow(rim, uFalloff);
-                float core = pow(rim, 12.0) * 2.0;
-                vec3 col = mix(uGlowColor * glow * 1.8, uCoreColor, clamp(core, 0.0, 1.0));
-                float alpha = clamp(glow * 1.5 + core, 0.0, 1.0) * uOpacity * vInstColor.r;
-                gl_FragColor = vec4(col, alpha);
+                gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
               }
             `;
 
             const mat = new THREE.ShaderMaterial({
-              vertexShader:   ringVert,
-              fragmentShader: ringFrag,
+              vertexShader:   spriteVert,
+              fragmentShader: spriteFrag,
               uniforms: {
+                uTex:       { value: buildSaber2Tex(resolvedShape, resolvedHollow) },
                 uCoreColor: { value: coreColor.clone() },
                 uGlowColor: { value: glowColor.clone() },
-                uFalloff:   { value: glowFalloff * 2.0 },
                 uOpacity:   { value: opacity },
               },
-              transparent:  true,
-              blending:     THREE.AdditiveBlending,
-              depthWrite:   false,
-              depthTest:    true,
-              side:         THREE.DoubleSide,
+              transparent: true,
+              blending:    THREE.AdditiveBlending,
+              depthWrite:  false,
+              depthTest:   true,
+              side:        THREE.DoubleSide,
             });
 
             const iMesh = new THREE.InstancedMesh(geo, mat, circleCount);
-            iMesh.name      = 's2rings';
+            iMesh.name = 's2sprites';
             iMesh.frustumCulled = false;
-            // Pre-init colors so USE_INSTANCING_COLOR is defined in the first compiled shader
             const _white = new THREE.Color(1, 1, 1);
             for (let _ci = 0; _ci < circleCount; _ci++) iMesh.setColorAt(_ci, _white);
             if (iMesh.instanceColor) iMesh.instanceColor.needsUpdate = true;
             sGroup.add(iMesh);
-            ud.s2mesh   = iMesh;
-            ud.s2count  = circleCount;
-            ud.s2gw     = glowWidth;
-            ud.s2rr     = ringRadius;
+            ud.s2mesh  = iMesh;
+            ud.s2count = circleCount;
+            ud.s2shape = resolvedShape;
+            ud.s2hollow = resolvedHollow;
           }
 
           const iMesh = ud.s2mesh as THREE.InstancedMesh;
           const mat   = iMesh.material as THREE.ShaderMaterial;
+
+          // Update texture when shape changes
+          if (ud.s2shape !== resolvedShape || ud.s2hollow !== resolvedHollow) {
+            mat.uniforms.uTex.value = buildSaber2Tex(resolvedShape, resolvedHollow);
+            ud.s2shape  = resolvedShape;
+            ud.s2hollow = resolvedHollow;
+          }
           mat.uniforms.uCoreColor.value.copy(coreColor);
           mat.uniforms.uGlowColor.value.copy(glowColor);
-          mat.uniforms.uFalloff.value  = glowFalloff * 2.0;
-          mat.uniforms.uOpacity.value  = opacity;
+          mat.uniforms.uOpacity.value = opacity;
 
           const lifetime = driftHeight / Math.max(1, driftSpeed);
           const _brightColor = new THREE.Color();
+
+          // Camera quaternion for billboard
+          const camQ = new THREE.Quaternion();
+          camera.getWorldQuaternion(camQ);
 
           for (let i = 0; i < circleCount; i++) {
             const p = particles[i];
@@ -7134,6 +7269,7 @@ const timelineOutRef = useRef(timelineOut);
               p.seed = Math.random() * 1000;
               p.ox = (Math.random() - 0.5) * spawnRadius * 2;
               p.oz = (Math.random() - 0.5) * spawnRadius * 2;
+              p.spin = (Math.random() - 0.5) * Math.PI * 2;
             }
 
             const t = p.age / lifetime;
@@ -7141,32 +7277,32 @@ const timelineOutRef = useRef(timelineOut);
             const wx = Math.sin(p.seed       + nowS2 * noiseSpeed + p.age * 2.1) * wobble * driftHeight * 0.12;
             const wz = Math.cos(p.seed * 1.7 + nowS2 * noiseSpeed * 0.9 + p.age * 1.6) * wobble * driftHeight * 0.09;
 
-            // Rings lie flat (horizontal) and drift straight up
+            const scl = particleSize * (1.0 + t * 0.3); // expand as they rise
+
             _dummy.position.set(p.ox + wx, y, p.oz + wz);
-            _dummy.rotation.set(Math.PI / 2, 0, p.seed * 0.3);  // flat + slight spin
-            const scl = 1.0 + t * 0.25; // expand slightly as they rise
-            _dummy.scale.set(scl, scl, scl);
+            // Billboard: face camera; add a slow spin around camera's forward
+            const spinQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), p.spin + nowS2 * 0.2);
+            _dummy.quaternion.copy(camQ).multiply(spinQ);
+            _dummy.scale.set(scl, scl, 1);
             _dummy.updateMatrix();
             iMesh.setMatrixAt(i, _dummy.matrix);
 
-            // Encode per-instance alpha in color channel (r=g=b = brightness multiplier)
-            const fadeIn  = Math.min(t * 6.0, 1.0);
-            const fadeOut = Math.max(0, 1.0 - Math.max(0, t - 0.6) * 2.5);
-            const bright  = fadeIn * fadeOut;
-            _brightColor.setRGB(bright, bright, bright);
+            // Fade in / fade out
+            const fadeIn  = Math.min(t * 8.0, 1.0);
+            const fadeOut = 1.0 - Math.max(0, (t - 0.65) / 0.35);
+            _brightColor.setRGB(fadeIn * fadeOut, fadeIn * fadeOut, fadeIn * fadeOut);
             iMesh.setColorAt(i, _brightColor);
           }
 
           iMesh.instanceMatrix.needsUpdate = true;
           if (iMesh.instanceColor) iMesh.instanceColor.needsUpdate = true;
 
-          // Position the group at the scene object's world position
           sGroup.position.set(sObj.position.x, sObj.position.y, sObj.position.z ?? 0);
           sGroup.rotation.set(0, 0, 0);
           sGroup.scale.set(1, 1, 1);
         });
       }
-      // ── End Saber2 ring drift ───────────────────────────────────────────────────────────────
+      // ── End Saber2 sprite drift ─────────────────────────────────────────────────────────────
 
       // Update particle stats every few frames
       if (Math.random() < 0.1) {

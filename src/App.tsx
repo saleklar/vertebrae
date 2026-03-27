@@ -4746,8 +4746,9 @@ export function App() {
                 properties: {
                   coreColor: '#ffffff',
                   glowColor: '#00ccff',
-                  glowWidth: 5.0,
-                  ringRadius: 25,
+                  particleShape: 'circle',
+                  particleSize: 50,
+                  ringHollow: 0.45,
                   circleCount: 18,
                   driftSpeed: 45,
                   driftHeight: 220,
@@ -4755,7 +4756,6 @@ export function App() {
                   driftNoise: 0.35,
                   noiseSpeed: 1.0,
                   opacity: 1.0,
-                  glowFalloff: 1.5,
                   frameCount: 24,
                   fps: 24,
                 },
@@ -8057,10 +8057,74 @@ export function App() {
                 {selectedObject.type === 'Saber2' && (() => {
   const sp = (selectedObject.properties ?? {}) as any;
   const upd = (key: string, val: unknown) => handleUpdateEmitterProperty(key, val as any);
+  const SHAPE_OPTIONS = [
+    { value: 'circle',   label: '● Circle' },
+    { value: 'ring',     label: '○ Ring' },
+    { value: 'diamond',  label: '◆ Diamond' },
+    { value: 'star',     label: '★ Star' },
+    { value: 'sharp',    label: '🔆 Sharp' },
+    { value: 'hexagon',  label: '⬢ Hexagon' },
+    { value: 'triangle', label: '▲ Triangle' },
+    { value: 'sparkle',  label: '✨ Sparkle' },
+    { value: 'crescent', label: '🌙 Crescent' },
+    { value: 'custom',   label: '🖼️ Custom Image' },
+  ];
+  const currentShape: string = sp.particleShape ?? 'circle';
+  const hasCustomTex = !!(sp.customShapeTexture?.startsWith?.('data:image'));
   return (
     <>
       <div className="properties-section">
-        <h4>⭕ Saber 2 — Ring Drift</h4>
+        <h4>⭕ Saber 2 — Particle Drift</h4>
+
+        {/* Shape picker */}
+        <div className="property-row">
+          <label>Shape</label>
+          <select
+            value={currentShape}
+            onChange={e => upd('particleShape', e.target.value)}
+            style={{ width: '60%', padding: '3px 6px', backgroundColor: '#1a222c', color: '#cdd7e0', border: '1px solid #3c4c5c', borderRadius: 4 }}
+          >
+            {SHAPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </div>
+
+        {/* Custom image upload */}
+        {currentShape === 'custom' && (
+          <div className="property-row" style={{ flexDirection: 'column', alignItems: 'flex-start', gap: 6 }}>
+            <label style={{ color: '#ffcc66' }}>{hasCustomTex ? '✅ Custom image loaded' : 'Upload PNG / JPG'}</label>
+            <input
+              type="file"
+              accept="image/*"
+              style={{ fontSize: '0.75rem', color: '#cdd7e0' }}
+              onChange={e => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = ev => {
+                  const url = ev.target?.result as string;
+                  if (url) upd('customShapeTexture', url);
+                };
+                reader.readAsDataURL(file);
+              }}
+            />
+            {hasCustomTex && (
+              <img
+                src={sp.customShapeTexture}
+                alt="preview"
+                style={{ width: 48, height: 48, objectFit: 'contain', border: '1px solid #445', borderRadius: 4, background: '#111' }}
+              />
+            )}
+          </div>
+        )}
+
+        {/* Ring hollow — only meaningful for ring shape */}
+        {currentShape === 'ring' && (
+          <div className="property-row">
+            <label>Ring Hollow: {(sp.ringHollow ?? 0.45).toFixed(2)}</label>
+            <input type="range" min="0.05" max="0.92" step="0.01" value={sp.ringHollow ?? 0.45} onChange={e => upd('ringHollow', parseFloat(e.target.value))} />
+          </div>
+        )}
+
         <div className="property-row">
           <label>Core Color</label>
           <input type="color" value={sp.coreColor ?? '#ffffff'} onChange={(e) => upd('coreColor', e.target.value)} />
@@ -8070,19 +8134,11 @@ export function App() {
           <input type="color" value={sp.glowColor ?? '#00ccff'} onChange={(e) => upd('glowColor', e.target.value)} />
         </div>
         <div className="property-row">
-          <label>Glow Width: {(sp.glowWidth ?? 5.0).toFixed(1)}</label>
-          <input type="range" min="0.5" max="30" step="0.1" value={sp.glowWidth ?? 5.0} onChange={(e) => upd('glowWidth', parseFloat(e.target.value))} />
+          <label>Particle Size: {sp.particleSize ?? 50}</label>
+          <input type="range" min="5" max="400" step="1" value={sp.particleSize ?? 50} onChange={(e) => upd('particleSize', parseFloat(e.target.value))} />
         </div>
         <div className="property-row">
-          <label>Glow Falloff: {(sp.glowFalloff ?? 1.5).toFixed(2)}</label>
-          <input type="range" min="0.2" max="5.0" step="0.05" value={sp.glowFalloff ?? 1.5} onChange={(e) => upd('glowFalloff', parseFloat(e.target.value))} />
-        </div>
-        <div className="property-row">
-          <label>Ring Radius: {sp.ringRadius ?? 25}</label>
-          <input type="range" min="2" max="200" step="1" value={sp.ringRadius ?? 25} onChange={(e) => upd('ringRadius', parseFloat(e.target.value))} />
-        </div>
-        <div className="property-row">
-          <label>Circle Count: {sp.circleCount ?? 18}</label>
+          <label>Count: {sp.circleCount ?? 18}</label>
           <input type="range" min="1" max="60" step="1" value={sp.circleCount ?? 18} onChange={(e) => upd('circleCount', parseInt(e.target.value))} />
         </div>
         <div className="property-row">
